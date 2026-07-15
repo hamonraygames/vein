@@ -155,8 +155,18 @@ func note_blocked() -> void:
 	_blocked = true
 
 
+## Position of an item at progress `t` along the FLOW, where t=0 is the source.
+##
+## The curve is stored from `a` to `b` — whichever end the player happened to drag
+## from — but flow direction comes from the graph. When those disagree (drag
+## started at the Heart), t must be mirrored, or items are drawn setting out from
+## the Heart and crawling to the Well while actually being delivered to the Heart.
+## The sim was always right; the picture was lying.
 func sample(t: float) -> Vector2:
-	var target := clampf(t, 0.0, 1.0) * length
+	var u := clampf(t, 0.0, 1.0)
+	if dir == Dir.B_TO_A:
+		u = 1.0 - u
+	var target := u * length
 	for i in cum.size() - 1:
 		if target <= cum[i + 1]:
 			var span := cum[i + 1] - cum[i]

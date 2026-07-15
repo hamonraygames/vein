@@ -5,10 +5,25 @@ class_name VNode
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
 enum Kind { HEART, WELL, FORGE, LOOM }
-enum Res { RAW, REFINED, CLOTH }
+enum Res { RAW, REFINED, CLOTH, VOID }
 
 ## A Forge eats this many RAW to emit one REFINED.
 const FORGE_RATIO := 2
+
+## Items a Well holds before it runs dry. Depletion is by USE, not by clock:
+## a Well only spends reserve when it actually emits, and it only emits when
+## something downstream will take the item. So the trunk you lean on hardest is
+## the one that dies first, and an unconnected Well keeps its reserve forever.
+## That is the whole enemy design — every strength eats itself.
+const WELL_YIELD := 70.0
+
+## A spent Well does not politely stop. It goes necrotic and starts pumping VOID
+## down the vein you built to it, faster than it ever gave you RAW. You must cut
+## it — which costs you the throughput you had come to depend on.
+const CORRUPT_PERIOD := 1.0
+
+## Seconds a corrupted node takes to rot its live neighbours. Neglect cascades.
+const SPREAD_TIME := 9.0
 
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
@@ -36,6 +51,14 @@ var intake: Array[int] = []
 ## 0..1, decays. Drives the swell when the node emits or consumes.
 var pulse := 0.0
 
+## Items left in a Well. Drawn as the ring itself, so a Well literally erodes
+## away as you drain it — you can see which of your lifelines is nearly gone
+## without a number, and plan the reroute before it kills you.
+var reserve := WELL_YIELD
+var corrupted := false
+## Seconds this node has been rotting its neighbours.
+var spread_accum := 0.0
+
 ## Heart only: how full it is, 0..1. Drawn as a level inside the hexagon so the
 ## goal of the game is legible on sight — the vessel is emptying, fill it. This
 ## is the one thing the player must understand and it must never need a number.
@@ -62,21 +85,55 @@ func _on_beat(_i: int) -> void:
 
 func _process(delta: float) -> void:
 	pulse = maxf(0.0, pulse - delta * 3.2)
-	if kind == Kind.WELL:
+	if kind == Kind.WELL or corrupted:
 		_emit_accum += delta
-		if _emit_accum >= WELL_PERIOD:
-			_emit_accum -= WELL_PERIOD
-			if buffer.size() < BUFFER_CAP:
-				buffer.append(produces)
-				pulse = 1.0
+		var period := CORRUPT_PERIOD if corrupted else WELL_PERIOD
+		if _emit_accum >= period:
+			_emit_accum -= period
+			_emit()
 	elif kind == Kind.FORGE:
 		_smelt()
 	queue_redraw()
 
 
+func _emit() -> void:
+	if buffer.size() >= BUFFER_CAP:
+		return
+	if corrupted:
+		buffer.append(Res.VOID)
+		pulse = 1.0
+		return
+	buffer.append(produces)
+	pulse = 1.0
+	# Reserve is only spent on an item that actually left, so a Well backed up
+	# behind a full buffer is not quietly bleeding out.
+	reserve -= 1.0
+	if reserve <= 0.0:
+		corrupt()
+
+
+func corrupt() -> void:
+	if corrupted:
+		return
+	corrupted = true
+	reserve = 0.0
+	produces = Res.VOID
+	# Whatever it was still holding turns with it.
+	buffer.clear()
+	intake.clear()
+	pulse = 1.0
+
+
+func reserve_ratio() -> float:
+	if kind != Kind.WELL or corrupted:
+		return 0.0
+	return clampf(reserve / WELL_YIELD, 0.0, 1.0)
+
+
 func take(kind_in: int) -> bool:
-	# A Forge only swallows RAW; anything already refined passes through as cargo.
-	if kind == Kind.FORGE and kind_in == Res.RAW:
+	# A Forge cannot launder rot into food — VOID passes straight through it and
+	# on to the Heart, so routing poison via a Forge is not an escape hatch.
+	if kind == Kind.FORGE and kind_in == Res.RAW and not corrupted:
 		if intake.size() >= BUFFER_CAP:
 			return false
 		intake.append(kind_in)
@@ -150,10 +207,41 @@ func _draw_hex(r: float, col: Color) -> void:
 
 
 func _draw_ring(r: float, col: Color) -> void:
+	if corrupted:
+		_draw_necrotic(r)
+		return
+
 	var fill := col
 	fill.a = 0.10 + pulse * 0.22
 	draw_circle(Vector2.ZERO, r, fill)
-	draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, col, 2.5, true)
+
+	# The ring IS the reserve. A full Well is a closed circle; a drained one is a
+	# vanishing arc. No number, and you can read your whole board's life
+	# expectancy in one glance.
+	var ghost := col
+	ghost.a = 0.13
+	draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, ghost, 2.0, true)
+
+	var left := reserve_ratio()
+	if left > 0.0:
+		var start := -PI * 0.5
+		draw_arc(Vector2.ZERO, r, start, start + TAU * left, 32, col, 2.5, true)
+
+
+## A spent Well, gone necrotic: cold, jagged, and beating out of time with you.
+func _draw_necrotic(r: float) -> void:
+	var wobble := 0.5 + 0.5 * sin(float(Time.get_ticks_msec()) * 0.004)
+	var fill := Palette.VOID_DIM
+	fill.a = 0.55 + pulse * 0.35
+	draw_circle(Vector2.ZERO, r * (0.9 + pulse * 0.15), fill)
+
+	var spikes := PackedVector2Array()
+	for i in 14:
+		var a := TAU * (float(i) / 14.0)
+		var rr := r * (1.18 if i % 2 == 0 else 0.72 - wobble * 0.08)
+		spikes.append(Vector2(cos(a), sin(a)) * rr)
+	spikes.append(spikes[0])
+	draw_polyline(spikes, Palette.VOID, 2.0, true)
 
 
 func _draw_tri(r: float, col: Color) -> void:

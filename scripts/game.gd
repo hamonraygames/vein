@@ -31,10 +31,14 @@ const FUEL_CAP := 6.0
 ## adds latency, which is the trade. The bigger prize is that it HALVES the item
 ## count carrying that fuel, so a Forge in front of a bursting trunk is the tool
 ## for congestion, not just a multiplier.
+## VOID is negative fuel: a corrupted Well doesn't stop feeding you, it feeds you
+## poison, down the vein you built and came to rely on. Cutting it costs the
+## throughput you were depending on — which is the point.
 const FUEL_BY_RES := {
 	VNode.Res.RAW: 1.0,
 	VNode.Res.REFINED: 3.0,
 	VNode.Res.CLOTH: 7.0,
+	VNode.Res.VOID: -2.5,
 }
 
 ## Forges arrive once the Heart's appetite has outgrown raw supply.
@@ -124,6 +128,11 @@ var ruptures := 0
 ## Items destroyed on arrival at a node whose buffer was already full. Every one
 ## of these is pressure that vanished instead of backing up the network.
 var dropped := 0
+## VOID items that reached the Heart. If this is 0 across a run, the enemy never
+## engaged and corruption is decorative.
+var poisoned := 0
+## Wells that ran dry and turned this run.
+var corruptions := 0
 
 ## Seconds this run has been alive. The escalation clock — see APPETITE_RATE.
 var run_time := 0.0
@@ -255,6 +264,8 @@ func start_run(run_seed: int) -> void:
 	beats = 0
 	ruptures = 0
 	dropped = 0
+	poisoned = 0
+	corruptions = 0
 	_rescue = 0.0
 	_drain_amt = 0.0
 	run_time = 0.0
@@ -553,6 +564,7 @@ func _process(delta: float) -> void:
 		return
 
 	_tick_escalation(delta)
+	_tick_corruption(delta)
 	heart.fuel_ratio = fuel / FUEL_CAP
 	_push_from_nodes()
 	for v in veins:
@@ -561,6 +573,30 @@ func _process(delta: float) -> void:
 
 	budget_hint.queue_redraw()
 	drag_layer.queue_redraw()
+
+
+## Rot spreads down live veins. Leaving a necrotic Well wired in doesn't just
+## poison the Heart — it takes the neighbours with it, so the punishment for
+## ignoring one dead lifeline is losing that whole limb of your network.
+func _tick_corruption(delta: float) -> void:
+	var newly: Array[VNode] = []
+	for n in nodes:
+		if not n.corrupted:
+			continue
+		n.spread_accum += delta
+		if n.spread_accum < VNode.SPREAD_TIME:
+			continue
+		n.spread_accum = 0.0
+		for v in veins:
+			var o := v.other(n)
+			if o != null and not o.corrupted and o.kind == VNode.Kind.WELL:
+				newly.append(o)
+
+	for n in newly:
+		n.corrupt()
+		corruptions += 1
+		if OS.has_feature("mobile"):
+			Input.vibrate_handheld(140)
 
 
 ## Every node with something buffered tries to hand it downhill.
@@ -616,8 +652,12 @@ func _deliver(kind: int, to: VNode) -> void:
 			_rescue = 1.0
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(120)
-		fuel = minf(FUEL_CAP, fuel + float(FUEL_BY_RES.get(kind, 1.0)))
+		fuel = clampf(fuel + float(FUEL_BY_RES.get(kind, 1.0)), 0.0, FUEL_CAP)
 		to.pulse = 1.0
+		if kind == VNode.Res.VOID:
+			poisoned += 1
+			if OS.has_feature("mobile"):
+				Input.vibrate_handheld(90)
 	elif not to.take(kind):
 		dropped += 1
 

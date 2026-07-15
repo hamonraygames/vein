@@ -11,6 +11,12 @@ const REFINED := Color("e4572e")  # triangle — coral
 const CLOTH := Color("e8e3d3")    # square  — bone
 const HEART := Color("f5f2ea")    # hexagon — white
 
+## Corruption. The one COLD colour in a warm-on-dark palette, and the only thing
+## on screen that does not belong — a spent Well gone necrotic, and the poison it
+## pumps down the vein you built to it.
+const VOID := Color("6f5bd6")
+const VOID_DIM := Color("2a2145")
+
 ## Veins carry the whole read of the board, so they cannot be near-background.
 ## The first pass had them at #2c262e-#4a3f48 against a #0d0d10 canvas, which
 ## vanished on a phone in daylight — you could not see your own network.
@@ -29,4 +35,5 @@ static func of_res(kind: int) -> Color:
 		0: return RAW
 		1: return REFINED
 		2: return CLOTH
+		3: return VOID
 	return HEART

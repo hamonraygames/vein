@@ -90,9 +90,13 @@ func _record() -> void:
 		if n.kind != VNode.Kind.HEART and n.depth >= 0 and n.buffer.size() >= VNode.BUFFER_CAP:
 			full_buffers += 1
 
-	print("run %d: beat %4d | budget %2d | wells %2d (%d fed) | heart-links %d | peak stress %.2f/6.0s | backed-up %d | dropped %d | ruptures %d"
-		% [_idx + 1, beats, _game.budget, wells, fed, heart_degree, peak, full_buffers,
-			_game.dropped, _game.ruptures])
+	var rotted := 0
+	for n in _game.nodes:
+		if n.corrupted:
+			rotted += 1
+
+	print("run %d: beat %4d | budget %2d | wells %2d (%d fed) | rotted %d | poisoned %d | ruptures %d"
+		% [_idx + 1, beats, _game.budget, wells, fed, rotted, _game.poisoned, _game.ruptures])
 
 	_idx += 1
 	if _idx >= runs:

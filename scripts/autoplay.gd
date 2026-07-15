@@ -17,7 +17,19 @@ class_name AutoPlay
 ## This is a floor, not optimal play: it never deletes or re-routes.
 
 static func step(game) -> void:
-	if not game.alive or not game.can_afford():
+	if not game.alive:
+		return
+
+	# Cut the rot first. Without this the bot sits there letting necrotic Wells
+	# pump VOID into the Heart and dies at ~69 beats, which measures its
+	# blindness rather than the game. Amputation is the basic human response and
+	# the floor has to include it.
+	for v in game.veins:
+		if v.a.corrupted or v.b.corrupted:
+			game._remove_vein(v)
+			return
+
+	if not game.can_afford():
 		return
 
 	var pick: VNode = null
