@@ -29,15 +29,30 @@ static func step(game) -> void:
 			game._remove_vein(v)
 			return
 
+	# Once demand changes, old direct lines become traps: they spend scarce vein
+	# budget to feed scraps. Humans should learn to amputate them; the probe
+	# floor needs the same instinct.
+	if game.demand == VNode.Res.REFINED:
+		for v in game.veins:
+			if _connects(v, VNode.Kind.WELL, VNode.Kind.HEART):
+				game._remove_vein(v, true)
+				return
+	elif game.demand == VNode.Res.CLOTH:
+		for v in game.veins:
+			if _connects(v, VNode.Kind.WELL, VNode.Kind.HEART) \
+					or _connects(v, VNode.Kind.FORGE, VNode.Kind.HEART):
+				game._remove_vein(v, true)
+				return
+
 	if not game.can_afford():
 		return
 
-	# When the Heart wants REFINED, a Well wired straight to it is feeding the
-	# Heart garbage (WRONG_SHAPE_FUEL). The only useful shape is
-	# Well -> Forge -> Heart, so a Forge on the graph is worth more than any
-	# number of direct Wells. Without this the bot keeps pumping circles into a
-	# Heart that stopped wanting them and measures its own blindness.
-	var need_forge: bool = game.demand == VNode.Res.REFINED
+	# When demand climbs, direct Wells become garbage. Prefer the live production
+	# chain over extra raw supply:
+	#   REFINED: Well -> Forge -> Heart
+	#   CLOTH:   Well -> Forge -> Loom -> Heart
+	var need_forge: bool = game.demand == VNode.Res.REFINED or game.demand == VNode.Res.CLOTH
+	var need_loom: bool = game.demand == VNode.Res.CLOTH
 
 	var pick: VNode = null
 	var target: VNode = null
@@ -52,11 +67,20 @@ static func step(game) -> void:
 			if m.depth < 0 or not game.in_reach(n, m):
 				continue
 			var score: float = float(m.depth) * 10000.0 + n.position.distance_to(m.position)
-			# Getting a Forge connected, and then feeding it, outranks everything.
-			if need_forge:
+			# Getting the demanded tool chain connected, then fed, outranks
+			# everything. These are coarse priorities for a floor bot, not optimal
+			# play.
+			if need_loom:
+				if n.kind == VNode.Kind.LOOM:
+					score -= 2000000.0
+				elif n.kind == VNode.Kind.FORGE and m.kind == VNode.Kind.LOOM:
+					score -= 1500000.0
+				elif n.kind == VNode.Kind.WELL and m.kind == VNode.Kind.FORGE:
+					score -= 1000000.0
+			elif need_forge:
 				if n.kind == VNode.Kind.FORGE:
 					score -= 1000000.0
-				elif m.kind == VNode.Kind.FORGE:
+				elif n.kind == VNode.Kind.WELL and m.kind == VNode.Kind.FORGE:
 					score -= 500000.0
 			if score < best:
 				best = score
@@ -65,3 +89,8 @@ static func step(game) -> void:
 
 	if pick != null and target != null:
 		game._add_vein(pick, target)
+
+
+static func _connects(v: Vein, kind_a: int, kind_b: int) -> bool:
+	return (v.a.kind == kind_a and v.b.kind == kind_b) \
+		or (v.a.kind == kind_b and v.b.kind == kind_a)

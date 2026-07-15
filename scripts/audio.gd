@@ -31,10 +31,10 @@ const SFX := {
 
 ## Stage thresholds on `intensity` (0..1) at which each bed takes over.
 const BED_ORDER := ["calm", "driving", "frantic"]
-const BED_AT := [0.0, 0.34, 0.70]
+const BED_AT := [0.0, 0.18, 0.46]
 
-const FADE := 1.6
-const MUSIC_DB := -9.0
+const FADE := 0.9
+const MUSIC_DB := -15.0
 ## One-shots are pooled: a busy network fires a lot of notes per beat and
 ## allocating players per note would stutter on a mid-range phone.
 const VOICES := 14
@@ -145,10 +145,10 @@ func _select_bed(i: int) -> void:
 ## sounds laboured and wrong long before you read the board. The rate itself
 ## already slows (Beat.RATE_BY_STATE); this is the timbre on top of that.
 const BEAT_BY_STATE := {
-	Beat.State.HEALTHY: {"key": "beat_slow", "db": -3.0, "pitch": 1.0},
-	Beat.State.STRAINED: {"key": "beat_fast", "db": -2.0, "pitch": 1.1},
-	Beat.State.DYING: {"key": "beat_slow", "db": -1.0, "pitch": 0.66},
-	Beat.State.STOPPED: {"key": "beat_slow", "db": -1.0, "pitch": 0.5},
+	Beat.State.HEALTHY: {"key": "beat_slow", "db": -1.5, "pitch": 1.0},
+	Beat.State.STRAINED: {"key": "beat_fast", "db": -0.5, "pitch": 1.1},
+	Beat.State.DYING: {"key": "beat_slow", "db": 0.0, "pitch": 0.66},
+	Beat.State.STOPPED: {"key": "beat_slow", "db": 0.0, "pitch": 0.5},
 }
 
 
@@ -187,7 +187,7 @@ func play(key: String, db: float = -8.0, pitch: float = 1.0) -> void:
 ##     stuck buzzer. Extra arrivals still land, they just don't all speak.
 ##   - Poison keeps its full voice. A VOID hit is rare and must always cut
 ##     through — that one is meant to alarm you.
-const NOTES_PER_BEAT := 3
+const NOTES_PER_BEAT := 2
 
 var _notes_this_beat := 0
 
@@ -201,7 +201,15 @@ func swallow(res_kind: int, fullness: float) -> void:
 		return
 	_notes_this_beat += 1
 
-	if res_kind == VNode.Res.REFINED:
+	if res_kind == VNode.Res.CLOTH:
+		play("refined", -20.0, lerpf(0.38, 0.50, fullness))
+	elif res_kind == VNode.Res.REFINED:
 		play("refined", -22.0, lerpf(0.52, 0.68, fullness))
 	else:
 		play("raw", -26.0, lerpf(0.44, 0.58, fullness))
+
+
+func sync_hit(combo: int, perfect: bool) -> void:
+	var pitch := 0.70 + float(combo) * 0.045
+	var db := -18.0 + minf(float(combo), 8.0) * 0.8
+	play("refined" if perfect else "raw", db, pitch)

@@ -70,6 +70,9 @@ var stress := 0.0
 ## to answer "did any trunk ever come near its limit?"
 var peak_occupancy := 0.0
 var peak_stress := 0.0
+## Rhythm-built veins carry better. Off-beat scars carry worse. This makes the
+## heartbeat a routing mechanic, not just a soundtrack.
+var tempo_grade := 0
 var _blocked := false
 
 
@@ -183,7 +186,10 @@ func advance(delta: float) -> Array[int]:
 		queue_redraw()
 		return arrived
 
-	var step := SPEED * delta / length
+	var speed_scale := 1.0 + float(tempo_grade) * 0.035
+	if tempo_grade < 0:
+		speed_scale = 0.82
+	var step := SPEED * speed_scale * delta / length
 	var keep: Array[Dictionary] = []
 	for d in dots:
 		d.t += step
@@ -245,6 +251,13 @@ func _draw() -> void:
 	else:
 		col = Palette.VEIN_IDLE.lerp(Palette.VEIN_LIVE, _flow)
 		width += _flow * 4.5
+		if tempo_grade > 0:
+			var hot := Palette.WARM
+			hot.a = 1.0
+			col = col.lerp(hot, clampf(float(tempo_grade) / 18.0, 0.0, 0.45))
+			width += minf(float(tempo_grade), 10.0) * 0.18
+		elif tempo_grade < 0:
+			col = col.lerp(Palette.VEIN_STRAINED, 0.45)
 
 	# Over-carrying: the vein bulges and darkens, and the throb quickens as it
 	# nears bursting. This is the only warning, and it has to be felt as dread

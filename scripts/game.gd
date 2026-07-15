@@ -20,11 +20,11 @@ const SAVE_PATH := "user://vein.cfg"
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 2
+const TUNING_VERSION := 3
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
-const START_BUDGET := 5
-const FUEL_CAP := 6.0
+const START_BUDGET := 4
+const FUEL_CAP := 5.0
 
 ## Fuel per item by resource. A Forge burns two RAW (2.0 of fuel) into one
 ## REFINED (3.0), so refining is worth 1.5x — but it costs an extra vein and
@@ -41,9 +41,17 @@ const FUEL_BY_RES := {
 	VNode.Res.VOID: -2.5,
 }
 
-## Forges arrive once the Heart's appetite has outgrown raw supply.
-const FIRST_FORGE_TIME := 38.0
-const FORGE_GAP := 55.0
+## A sloppy redraw is surgery while the body is awake. Cutting a live vein spills
+## whatever was in flight and costs Heart fuel immediately. Rot is the exception:
+## amputating poison is already punishment enough because it costs throughput.
+const CUT_BLEED_BY_DOT := 0.35
+
+## Tools arrive before the Heart asks for them. Seeing the piece first makes the
+## demand flip feel like a test, not a hidden rule.
+const FIRST_FORGE_TIME := 20.0
+const FORGE_GAP := 42.0
+const FIRST_LOOM_TIME := 58.0
+const LOOM_GAP := 72.0
 
 ## What the Heart DEMANDS, by run-second. This is the game.
 ##
@@ -63,12 +71,14 @@ const FORGE_GAP := 55.0
 ## triangle, and only the triangle node makes triangles.
 const DEMAND_TIERS := [
 	{"at": 0.0, "res": VNode.Res.RAW},
-	{"at": 42.0, "res": VNode.Res.REFINED},
+	{"at": 28.0, "res": VNode.Res.REFINED},
+	{"at": 74.0, "res": VNode.Res.CLOTH},
 ]
 
-## Feeding the Heart something it did not ask for. Not zero — a starving Heart
-## will still take scraps — but nowhere near enough to live on.
-const WRONG_SHAPE_FUEL := 0.12
+## Feeding the Heart something it did not ask for. This is not "less efficient";
+## it is wrong blood. The triangle/square demand must be a survival gate, not a
+## suggestion a careless player can ignore.
+const WRONG_SHAPE_FUEL := -0.85
 
 ## Appetite grows LINEARLY, on the CLOCK. Both halves of that matter.
 ##
@@ -103,9 +113,9 @@ const WRONG_SHAPE_FUEL := 0.12
 ## nearly empty: connect both Wells in the first seconds or die, no grace period,
 ## nothing explained. That is a slap skill can answer, and it leaves the curve's
 ## headroom intact.
-const START_FUEL := 1.6
-const APPETITE_BASE := 0.42
-const APPETITE_RATE := 0.009    # per second
+const START_FUEL := 0.95
+const APPETITE_BASE := 0.50
+const APPETITE_RATE := 0.012    # per second
 
 ## Seconds of exertion before the heart is fully racing.
 const EXERTION_SPAN := 300.0
@@ -116,14 +126,25 @@ const MISSES_DYING := 3
 const MISSES_FATAL := 6
 
 # Spawns and budget are on the clock for the same reason as appetite.
-const FIRST_WELL_TIME := 10.0
-const WELL_GAP_START := 14.0
-const WELL_GAP_DECAY := 0.8     # wells arrive faster and faster
-const WELL_GAP_MIN := 8.0
+const FIRST_WELL_TIME := 6.0
+const WELL_GAP_START := 11.0
+const WELL_GAP_DECAY := 0.9     # wells arrive faster and faster
+const WELL_GAP_MIN := 6.5
 
-const FIRST_BUDGET_TIME := 22.0
-const BUDGET_GAP_START := 30.0
-const BUDGET_GAP_GROWTH := 5.0  # ...while veins arrive slower and slower
+const FIRST_BUDGET_TIME := 16.0
+const BUDGET_GAP_START := 24.0
+const BUDGET_GAP_GROWTH := 7.0  # ...while veins arrive slower and slower
+
+## Veins cannot cross. This is the spatial skill check: spaghetti is not a
+## strategy. A bad draw snaps the crossing vein and bleeds the Heart, which makes
+## route planning and hand precision matter from the first minute.
+const CROSS_BLEED := 1.0
+const OFFBEAT_BLEED := 0.45
+const SYNC_FUEL := 0.18
+const PERFECT_WINDOW := 0.11
+const GOOD_WINDOW := 0.22
+const COMBO_GAIN := 0.07
+const COMBO_CAP := 10
 
 const SNAP := 48.0             # magnetic radius; imprecise thumbs feel precise
 const LONG_PRESS := 0.32
@@ -174,6 +195,9 @@ var corruptions := 0
 ## Items the Heart accepted but did not want. High counts mean the player (or
 ## bot) failed to re-plumb after a demand flip.
 var wasted := 0
+## Consecutive edits made on the heartbeat. This is the mastery layer: elite
+## play is not just topology, it is surgery in rhythm.
+var combo := 0
 
 ## The shape the Heart wants right now. Drawn inside it — see VNode._draw_hex.
 var demand: int = VNode.Res.RAW
@@ -182,6 +206,7 @@ var demand: int = VNode.Res.RAW
 var run_time := 0.0
 var _next_well_time := FIRST_WELL_TIME
 var _next_forge_time := FIRST_FORGE_TIME
+var _next_loom_time := FIRST_LOOM_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
@@ -196,6 +221,8 @@ var _moved := false
 
 var _rescue := 0.0
 var _drain_amt := 0.0
+var _sync_flash := 0.0
+var _bad_tempo_flash := 0.0
 ## Time scale to restore when the panic-pinch ends. Captured on engage so the
 ## harnesses' scale survives.
 var _pre_dilation_scale := 1.0
@@ -316,12 +343,16 @@ func start_run(run_seed: int) -> void:
 	poisoned = 0
 	corruptions = 0
 	wasted = 0
+	combo = 0
 	demand = VNode.Res.RAW
 	_rescue = 0.0
 	_drain_amt = 0.0
+	_sync_flash = 0.0
+	_bad_tempo_flash = 0.0
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
+	_next_loom_time = FIRST_LOOM_TIME
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
@@ -365,7 +396,13 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 	var n: VNode = VNodeScene.new()
 	n.kind = kind
 	n.position = pos
-	n.produces = VNode.Res.REFINED if kind == VNode.Kind.FORGE else VNode.Res.RAW
+	match kind:
+		VNode.Kind.FORGE:
+			n.produces = VNode.Res.REFINED
+		VNode.Kind.LOOM:
+			n.produces = VNode.Res.CLOTH
+		_:
+			n.produces = VNode.Res.RAW
 	node_layer.add_child(n)
 	nodes.append(n)
 	return n
@@ -469,6 +506,10 @@ func _tick_escalation(delta: float) -> void:
 		_spawn_node(VNode.Kind.FORGE)
 		_next_forge_time += FORGE_GAP
 
+	if run_time >= _next_loom_time:
+		_spawn_node(VNode.Kind.LOOM)
+		_next_loom_time += LOOM_GAP
+
 	if run_time >= _next_budget_time:
 		budget += 1
 		_next_budget_time += _budget_gap
@@ -483,10 +524,10 @@ func _spawn_well() -> void:
 ## New nodes spawn in awkward places, forcing rerouting. Bias to the lower two
 ## thirds so everything stays in one-thumb reach.
 ##
-## A Forge is placed by the opposite rule to a Well: it wants to sit CLOSE to the
+## A tool is placed by the opposite rule to a Well: it wants to sit CLOSE to the
 ## Heart, because its job is to stand between a cluster of Wells and the trunk
-## they overload. Spawning it out at the rim like a Well would make it unroutable
-## and it would never be worth the veins.
+## they overload. Spawning it out at the rim like a Well would make it
+## unroutable and it would never be worth the veins.
 func _spawn_node(kind: int) -> void:
 	var vp := design_size()
 	var best := Vector2.ZERO
@@ -518,8 +559,8 @@ func _spawn_node(kind: int) -> void:
 
 		var to_heart := p.distance_to(heart.position)
 		var s := 0.0
-		if kind == VNode.Kind.FORGE:
-			# A Forge must stand between a cluster of Wells and the Heart.
+		if kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM:
+			# Tools must stand between a cluster of supply and the Heart.
 			s = -to_heart
 		else:
 			# Prefer awkward — elbow room from neighbours — WITHOUT preferring a
@@ -581,13 +622,48 @@ func in_reach(a: VNode, b: VNode) -> bool:
 func _add_vein(a: VNode, b: VNode) -> void:
 	if a == b or not can_afford() or _find_vein(a, b) != null or not in_reach(a, b):
 		return
+	var synced := _tempo_action()
+	var crossed := _crossing_vein(a, b)
+	if crossed != null:
+		fuel = maxf(0.0, fuel - CROSS_BLEED * (0.55 if synced else 1.0))
+		_rescue = 0.0
+		Audio.play("rupture", -2.0, 1.25)
+		if OS.has_feature("mobile"):
+			Input.vibrate_handheld(260)
+		_on_ruptured(crossed)
+		return
 	var v: Vein = VeinScene.new()
 	# Alternate the bend so parallel veins fan out instead of overlapping.
 	v.setup(a, b, 1.0 if veins.size() % 2 == 0 else -1.0)
+	v.tempo_grade = combo if synced else -1
 	v.ruptured.connect(_on_ruptured)
 	vein_layer.add_child(v)
 	veins.append(v)
 	_rebuild_graph()
+
+
+func _tempo_action() -> bool:
+	var q := _tempo_quality()
+	if q <= GOOD_WINDOW:
+		combo = mini(combo + (2 if q <= PERFECT_WINDOW else 1), COMBO_CAP)
+		_sync_flash = 1.0
+		fuel = clampf(fuel + SYNC_FUEL * (1.0 + float(combo) * 0.08), 0.0, FUEL_CAP)
+		Audio.sync_hit(combo, q <= PERFECT_WINDOW)
+		if OS.has_feature("mobile"):
+			Input.vibrate_handheld(30 + combo * 6)
+		return true
+
+	combo = 0
+	_bad_tempo_flash = 1.0
+	fuel = maxf(0.0, fuel - OFFBEAT_BLEED)
+	Audio.play("corrupt", -14.0, 0.58)
+	if OS.has_feature("mobile"):
+		Input.vibrate_handheld(90)
+	return false
+
+
+func _tempo_quality() -> float:
+	return minf(Beat.phase, 1.0 - Beat.phase)
 
 
 ## A trunk carried more than it could bear. The dots in flight scatter and die,
@@ -613,16 +689,55 @@ func _on_ruptured(v: Vein) -> void:
 	_remove_vein(v)
 
 
-func _remove_vein(v: Vein) -> void:
+func _remove_vein(v: Vein, surgical := false) -> void:
+	var synced := true
+	if surgical:
+		synced = _tempo_action()
+	if surgical and not (v.a.corrupted or v.b.corrupted) and not v.dots.is_empty():
+		var bleed := float(v.dots.size()) * CUT_BLEED_BY_DOT
+		if synced:
+			bleed *= 0.25
+		fuel = maxf(0.0, fuel - bleed)
+		var pts: Array[Vector2] = []
+		var kinds: Array[int] = []
+		for d in v.dots:
+			pts.append(v.sample(d.t))
+			kinds.append(d.kind)
+		var burst: Node2D = BurstScene.new()
+		vein_layer.add_child(burst)
+		burst.spawn(pts, kinds, rng.randi())
+		Audio.play("rupture", -8.0, 0.75)
 	veins.erase(v)
 	v.queue_free()
 	_rebuild_graph()
+
+
+func _crossing_vein(a: VNode, b: VNode) -> Vein:
+	for v in veins:
+		if v.a == a or v.a == b or v.b == a or v.b == b:
+			continue
+		if _segments_cross(a.position, b.position, v.a.position, v.b.position):
+			return v
+	return null
+
+
+func _segments_cross(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> bool:
+	var r := a1 - a0
+	var s := b1 - b0
+	var den := r.cross(s)
+	if absf(den) < 0.001:
+		return false
+	var t := (b0 - a0).cross(s) / den
+	var u := (b0 - a0).cross(r) / den
+	return t > 0.04 and t < 0.96 and u > 0.04 and u < 0.96
 
 
 # --- Sim --------------------------------------------------------------------
 
 func _process(delta: float) -> void:
 	_rescue = maxf(0.0, _rescue - delta * 2.2)
+	_sync_flash = maxf(0.0, _sync_flash - delta * 3.8)
+	_bad_tempo_flash = maxf(0.0, _bad_tempo_flash - delta * 4.4)
 
 	var target_drain := 0.0
 	if not alive:
@@ -655,6 +770,52 @@ func _process(delta: float) -> void:
 
 	budget_hint.queue_redraw()
 	drag_layer.queue_redraw()
+	queue_redraw()
+
+
+func _draw() -> void:
+	if heart == null or not alive:
+		return
+
+	var centre := heart.position
+	var exert := clampf(run_time / EXERTION_SPAN, 0.0, 1.0)
+	var phase := Beat.phase
+	var beat_r := 48.0 + phase * (44.0 + exert * 54.0)
+
+	var ring := Palette.HEART
+	ring.a = (1.0 - phase) * (0.22 + exert * 0.22)
+	draw_arc(centre, beat_r, 0.0, TAU, 72, ring, 1.5 + exert * 2.0, true)
+
+	var window := Palette.WARM
+	window.a = 0.25 + _sync_flash * 0.45
+	draw_arc(centre, 58.0, -PI * 0.5 - PERFECT_WINDOW * TAU,
+		-PI * 0.5 + PERFECT_WINDOW * TAU, 18, window, 3.0 + _sync_flash * 3.0, true)
+
+	if _bad_tempo_flash > 0.0:
+		var bad := Palette.VEIN_STRAINED
+		bad.a = _bad_tempo_flash * 0.65
+		draw_arc(centre, 74.0 + (1.0 - _bad_tempo_flash) * 24.0, 0.0, TAU, 44,
+			bad, 4.0 * _bad_tempo_flash, true)
+
+	if combo > 0:
+		var teeth := combo
+		for i in teeth:
+			var a := TAU * (float(i) / float(COMBO_CAP)) - PI * 0.5
+			var p0 := centre + Vector2(cos(a), sin(a)) * 72.0
+			var p1 := centre + Vector2(cos(a), sin(a)) * (82.0 + _sync_flash * 8.0)
+			var c := Palette.WARM.lerp(Palette.CLOTH, float(i) / float(COMBO_CAP))
+			c.a = 0.65 + _sync_flash * 0.35
+			draw_line(p0, p1, c, 3.0, true)
+
+	if exert > 0.18:
+		var chaos := (exert - 0.18) / 0.82
+		var storm := Palette.VEIN_STRAINED
+		storm.a = 0.05 + chaos * 0.12
+		var spin := float(Time.get_ticks_msec()) * 0.001 * (0.8 + chaos * 2.6)
+		for i in 5:
+			var a0 := spin + float(i) * TAU / 5.0
+			draw_arc(centre, 108.0 + float(i) * 17.0 + chaos * 26.0,
+				a0, a0 + PI * (0.45 + chaos * 0.35), 20, storm, 1.2 + chaos * 2.2, true)
 
 
 ## Rot spreads down live veins. Leaving a necrotic Well wired in doesn't just
@@ -737,8 +898,15 @@ func _deliver(kind: int, to: VNode) -> void:
 				Input.vibrate_handheld(120)
 		var gain := float(FUEL_BY_RES.get(kind, 1.0))
 		if kind != demand and kind != VNode.Res.VOID:
-			gain = WRONG_SHAPE_FUEL
+			gain = WRONG_SHAPE_FUEL * (1.0 + float(combo) * 0.04)
 			wasted += 1
+			combo = 0
+			_bad_tempo_flash = 1.0
+			Audio.play("corrupt", -10.0, 0.82)
+			if OS.has_feature("mobile"):
+				Input.vibrate_handheld(60)
+		elif kind != VNode.Res.VOID:
+			gain *= 1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN
 		fuel = clampf(fuel + gain, 0.0, FUEL_CAP)
 		to.pulse = 1.0
 		Audio.swallow(kind, fuel / FUEL_CAP)
@@ -819,7 +987,7 @@ func _on_release(p: Vector2) -> void:
 	if not _moved:
 		var v := _vein_at(p)
 		if v != null:
-			_remove_vein(v)
+			_remove_vein(v, true)
 
 
 ## The provisional vein under the thumb, plus a highlight on whatever it would
@@ -837,15 +1005,16 @@ func _draw_drag() -> void:
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
 	var stretched := _drag_from.position.distance_to(end) > Vein.MAX_LEN
+	var crossing := to != null and to != _drag_from and _crossing_vein(_drag_from, to) != null
 
-	var col := Palette.VEIN_STRAINED if stretched else Palette.VEIN_LIVE
+	var col := Palette.VEIN_STRAINED if stretched or crossing else Palette.VEIN_LIVE
 	col.a = 0.75
 	drag_layer.draw_line(_drag_from.position, end, col, 3.0, true)
 
 	if to == null:
 		return
 	var ok := to != _drag_from and can_afford() and _find_vein(_drag_from, to) == null \
-		and in_reach(_drag_from, to)
+		and in_reach(_drag_from, to) and not crossing
 	var ring := Palette.WARM if ok else Palette.VEIN_STRAINED
 	ring.a = 0.85
 	drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU, 28, ring, 2.0, true)

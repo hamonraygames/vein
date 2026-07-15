@@ -7,8 +7,9 @@ class_name VNode
 enum Kind { HEART, WELL, FORGE, LOOM }
 enum Res { RAW, REFINED, CLOTH, VOID }
 
-## A Forge eats this many RAW to emit one REFINED.
-const FORGE_RATIO := 2
+## Tools condense two inputs into one stronger output. A Forge eats RAW and makes
+## REFINED; a Loom eats REFINED and makes CLOTH.
+const TOOL_RATIO := 2
 
 ## Items a Well holds before it runs dry. Depletion is by USE, not by clock:
 ## a Well only spends reserve when it actually emits, and it only emits when
@@ -101,7 +102,7 @@ func _process(delta: float) -> void:
 		if _emit_accum >= period:
 			_emit_accum -= period
 			_emit()
-	elif kind == Kind.FORGE:
+	elif kind == Kind.FORGE or kind == Kind.LOOM:
 		_smelt()
 	queue_redraw()
 
@@ -141,9 +142,9 @@ func reserve_ratio() -> float:
 
 
 func take(kind_in: int) -> bool:
-	# A Forge cannot launder rot into food — VOID passes straight through it and
-	# on to the Heart, so routing poison via a Forge is not an escape hatch.
-	if kind == Kind.FORGE and kind_in == Res.RAW and not corrupted:
+	# Tools cannot launder rot into food — VOID passes straight through them and
+	# on to the Heart, so routing poison through equipment is not an escape hatch.
+	if _accepts_tool_input(kind_in):
 		if intake.size() >= BUFFER_CAP:
 			return false
 		intake.append(kind_in)
@@ -155,17 +156,24 @@ func take(kind_in: int) -> bool:
 	return true
 
 
-## Two RAW in, one REFINED out. The conversion halves the item count carrying the
-## same run of fuel, which is why a Forge is the answer to a bursting trunk and
-## not just a fuel multiplier.
+func _accepts_tool_input(kind_in: int) -> bool:
+	return not corrupted and (
+		(kind == Kind.FORGE and kind_in == Res.RAW)
+		or (kind == Kind.LOOM and kind_in == Res.REFINED)
+	)
+
+
+## Two in, one stronger shape out. The conversion halves the item count carrying
+## the same run of fuel, which is why a tool is the answer to a bursting trunk
+## and not just a fuel multiplier.
 func _smelt() -> void:
-	if intake.size() < FORGE_RATIO or buffer.size() >= BUFFER_CAP:
+	if intake.size() < TOOL_RATIO or buffer.size() >= BUFFER_CAP:
 		return
-	for i in FORGE_RATIO:
+	for i in TOOL_RATIO:
 		intake.pop_front()
-	buffer.append(Res.REFINED)
+	buffer.append(produces)
 	pulse = 1.0
-	# The moment two become one, made loud. A Forge that silently swaps pips
+	# The moment two become one, made loud. A tool that silently swaps pips
 	# teaches nothing — it just sits there as an unexplained red triangle, which
 	# is exactly how it read in playtest.
 	smelt_flash = 1.0
@@ -186,6 +194,7 @@ func _draw() -> void:
 	match kind:
 		Kind.HEART: _draw_hex(r, col)
 		Kind.FORGE: _draw_tri(r, col)
+		Kind.LOOM: _draw_square(r, col)
 		_: _draw_ring(r, col)
 
 	_draw_buffer(r, col)
@@ -306,6 +315,8 @@ func _draw_tri(r: float, col: Color) -> void:
 	outline.append(tri[0])
 	draw_polyline(outline, edge, 2.5 + smelt_flash * 2.0, true)
 
+	_draw_forge_recipe(r)
+
 	# The output leaving: a ring blooming outward on the beat it was made.
 	if smelt_flash > 0.0:
 		var halo := Palette.REFINED
@@ -314,14 +325,75 @@ func _draw_tri(r: float, col: Color) -> void:
 			halo, 2.0 + smelt_flash * 2.0, true)
 
 
-## Raw waiting to be smelted, drawn INSIDE the triangle so a starved Forge (one
-## pip, waiting forever for its pair) is distinguishable from a busy one.
+## A Loom. It is intentionally calm and orthogonal against the Forge's point: a
+## new silhouette for a deeper strategic ask.
+func _draw_square(r: float, col: Color) -> void:
+	var side := r * (1.65 + smelt_flash * 0.14)
+	var rect := Rect2(Vector2(-side * 0.5, -side * 0.5), Vector2(side, side))
+
+	var fill := col
+	fill.a = 0.06 + pulse * 0.16 + smelt_flash * 0.38
+	draw_rect(rect, fill, true)
+
+	var edge := col
+	edge.a = 0.42 + pulse * 0.28 + smelt_flash * 0.52
+	draw_rect(rect, edge, false, 2.5 + smelt_flash * 2.0)
+
+	_draw_loom_recipe(r)
+
+	if smelt_flash > 0.0:
+		var halo := Palette.CLOTH
+		halo.a = smelt_flash * 0.66
+		var h := side * (0.72 + (1.0 - smelt_flash) * 0.55)
+		draw_rect(Rect2(Vector2(-h, -h), Vector2(h * 2.0, h * 2.0)), halo, false,
+			2.0 + smelt_flash * 2.0)
+
+
+func _draw_forge_recipe(r: float) -> void:
+	var a := 0.42 + smelt_flash * 0.35
+	var raw := Palette.RAW
+	raw.a = a
+	draw_circle(Vector2(-r * 0.28, r * 0.16), 3.0, raw)
+	draw_circle(Vector2(r * 0.28, r * 0.16), 3.0, raw)
+
+	var out := Palette.REFINED
+	out.a = 0.58 + smelt_flash * 0.32
+	_draw_mini_tri(Vector2.ZERO + Vector2(0.0, -r * 0.16), r * 0.18, out, 1.7)
+
+
+func _draw_loom_recipe(r: float) -> void:
+	var refined := Palette.REFINED
+	refined.a = 0.42 + smelt_flash * 0.35
+	_draw_mini_tri(Vector2(-r * 0.25, r * 0.15), r * 0.13, refined, 1.4)
+	_draw_mini_tri(Vector2(r * 0.25, r * 0.15), r * 0.13, refined, 1.4)
+
+	var cloth := Palette.CLOTH
+	cloth.a = 0.58 + smelt_flash * 0.32
+	_draw_mini_square(Vector2(0.0, -r * 0.16), r * 0.16, cloth, 1.7)
+
+
+func _draw_mini_tri(center: Vector2, size: float, col: Color, width: float) -> void:
+	var tri := PackedVector2Array()
+	for i in 3:
+		var a := TAU * (float(i) / 3.0) - PI * 0.5
+		tri.append(center + Vector2(cos(a), sin(a)) * size)
+	tri.append(tri[0])
+	draw_polyline(tri, col, width, true)
+
+
+func _draw_mini_square(center: Vector2, half: float, col: Color, width: float) -> void:
+	draw_rect(Rect2(center - Vector2(half, half), Vector2(half * 2.0, half * 2.0)),
+		col, false, width)
+
+
+## Input waiting to be smelted, drawn INSIDE the tool so a starved tool (one pip,
+## waiting forever for its pair) is distinguishable from a busy one.
 func _draw_intake(r: float) -> void:
-	if kind != Kind.FORGE or intake.is_empty():
+	if (kind != Kind.FORGE and kind != Kind.LOOM) or intake.is_empty():
 		return
 	for i in mini(intake.size(), BUFFER_CAP):
 		var p := Vector2(-6.0 + 6.0 * float(i % 3), 4.0 + 6.0 * float(i / 3))
-		draw_circle(p, 2.0, Palette.RAW)
+		draw_circle(p, 2.0, Palette.of_res(intake[i]))
 
 
 ## Buffered items orbit the node as pips. A backed-up Well wears its congestion.
