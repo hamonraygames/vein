@@ -75,10 +75,21 @@ const DEMAND_TIERS := [
 	{"at": 37.0, "res": VNode.Res.CLOTH},
 ]
 
-## Feeding the Heart something it did not ask for. This is not "less efficient";
-## it is wrong blood. The triangle/square demand must be a survival gate, not a
-## suggestion a careless player can ignore.
-const WRONG_SHAPE_FUEL := -0.85
+## Feeding the Heart something it did not ask for: WASTED, never poison.
+##
+## This was -0.85 and it was the bug behind "when the heart turns to square and
+## I connect square, I die — what am I missing?" Nothing. Audited at a flip:
+## fuel went 3.73 -> 0.00 in 0.7s, because the moment demand changed, every item
+## already in flight across a healthy 6-vein network hit for -0.85. Your own
+## working network instantly became a poison pump aimed at the Heart, and the
+## square you connected to fix it could not possibly arrive in time.
+##
+## The rule that was violated: A WORKING NETWORK MUST NEVER BE WORSE THAN NO
+## NETWORK. At -0.85 you were strictly better off having built nothing, which
+## inverts the entire game. The demand flip is still a hard survival gate —
+## off-demand fuel is ~nothing, so a stale network starves you on the clock —
+## but starving is a deadline you can race, not an execution.
+const WRONG_SHAPE_FUEL := 0.05
 
 ## Appetite grows LINEARLY, on the CLOCK. Both halves of that matter.
 ##
@@ -189,7 +200,9 @@ const AIRBORNE_CHANCE := 0.35     ## per spread-tick, once AIRBORNE_AT is crosse
 ## strategy. A bad draw is simply REFUSED (see _add_vein), not punished; it used
 ## to bleed fuel and destroy the crossed vein instead, which silently ate the
 ## Heart's most-needed rescue connection right where veins most converge.
-const OFFBEAT_BLEED := 0.45
+## Rhythm is a pure carrot: an on-beat edit pays SYNC_FUEL and builds combo, an
+## off-beat one just doesn't. There is deliberately no OFFBEAT penalty — see
+## _tempo_action.
 const SYNC_FUEL := 0.18
 const PERFECT_WINDOW := 0.11
 const GOOD_WINDOW := 0.22
@@ -815,12 +828,19 @@ func _tempo_action() -> bool:
 			Input.vibrate_handheld(30 + combo * 6)
 		return true
 
+	# Off-beat costs you the COMBO and nothing else — no fuel, no hurt sound.
+	#
+	# It used to bleed OFFBEAT_BLEED fuel and play the "corrupt" (hurt) cue on
+	# every edit. Two problems, both reported: it taxed the rescue connection at
+	# the exact moment you could least afford it (see WRONG_SHAPE_FUEL for the
+	# audit), and it fired the hurt sound when you were merely wiring two
+	# ISOLATED nodes together to prepare a Forge — nowhere near the Heart, and
+	# hurting nothing. The hurt cue now belongs exclusively to the Heart taking
+	# damage (see _deliver). Rhythm is a carrot: play on the beat and you get
+	# fuel and a rising combo; miss and you simply don't. Building is never
+	# punished, so a vein is always safe to draw.
 	combo = 0
 	_bad_tempo_flash = 1.0
-	fuel = maxf(0.0, fuel - OFFBEAT_BLEED)
-	Audio.play("corrupt", -14.0, 0.58)
-	if OS.has_feature("mobile"):
-		Input.vibrate_handheld(90)
 	return false
 
 
@@ -914,7 +934,15 @@ func _remove_vein(v: Vein, surgical := false) -> void:
 	if surgical:
 		synced = _tempo_action()
 	if surgical and not (v.a.corrupted or v.b.corrupted) and not v.dots.is_empty():
-		var bleed := float(v.dots.size()) * CUT_BLEED_BY_DOT
+		# Only spilling something the Heart actually WANTS costs you. Cutting a
+		# vein full of wrong-shape cargo is free, because that cargo was already
+		# worth nothing — charging for it taxed exactly the re-plumbing a demand
+		# flip forces you into, on top of the flip itself.
+		var precious := 0
+		for d in v.dots:
+			if d.kind == demand:
+				precious += 1
+		var bleed := float(precious) * CUT_BLEED_BY_DOT
 		if synced:
 			bleed *= 0.25
 		fuel = maxf(0.0, fuel - bleed)
@@ -1192,18 +1220,18 @@ func _deliver(kind: int, to: VNode) -> void:
 				Input.vibrate_handheld(120)
 		var gain := float(FUEL_BY_RES.get(kind, 1.0))
 		if kind != demand and kind != VNode.Res.VOID:
-			gain = WRONG_SHAPE_FUEL * (1.0 + float(combo) * 0.04)
+			# Wrong shape is wasted, not damaging — so no hurt cue. It gets a
+			# flat, dull "wrong note" via swallow() instead: you hear that it
+			# landed and gave you nothing.
+			gain = WRONG_SHAPE_FUEL
 			wasted += 1
 			combo = 0
 			_bad_tempo_flash = 1.0
-			Audio.play("corrupt", -10.0, 0.82)
-			if OS.has_feature("mobile"):
-				Input.vibrate_handheld(60)
 		elif kind != VNode.Res.VOID:
 			gain *= 1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN
 		fuel = clampf(fuel + gain, 0.0, FUEL_CAP)
 		to.pulse = 1.0
-		Audio.swallow(kind, fuel / FUEL_CAP)
+		Audio.swallow(kind, fuel / FUEL_CAP, kind == demand)
 		if kind == VNode.Res.VOID:
 			poisoned += 1
 			if OS.has_feature("mobile"):

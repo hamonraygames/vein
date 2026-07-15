@@ -202,14 +202,22 @@ var _notes_budget := 1
 var _notes_this_beat := 0
 
 
-func swallow(res_kind: int, fullness: float) -> void:
+## `wanted` false means the Heart took a shape it did not ask for. That is a
+## failure, but it is NOT damage — playtest was explicit that the hurt cue must
+## mean "the Heart is being hurt" and nothing else. A wrong shape gets a flat,
+## dull, detuned note instead: you hear it land and give you nothing.
+func swallow(res_kind: int, fullness: float, wanted: bool = true) -> void:
 	if res_kind == VNode.Res.VOID:
-		play("corrupt", -6.0, 0.66)
+		play("hurt", -5.0, 1.0)
 		return
 
 	if _notes_this_beat >= _notes_budget:
 		return
 	_notes_this_beat += 1
+
+	if not wanted:
+		play("raw", -28.0, 0.62)
+		return
 
 	# Near natural pitch — bells, not thuds. Fuller shapes ring lower and
 	# richer; a fuller Heart rings slightly brighter. The range is deliberately
