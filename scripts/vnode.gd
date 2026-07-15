@@ -7,6 +7,9 @@ class_name VNode
 enum Kind { HEART, WELL, FORGE, LOOM }
 enum Res { RAW, REFINED, CLOTH }
 
+## A Forge eats this many RAW to emit one REFINED.
+const FORGE_RATIO := 2
+
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
 const BUFFER_CAP := 6
@@ -25,6 +28,10 @@ var depth := -1
 ## Items waiting here for an outgoing vein with room. When this fills, a Well
 ## stops producing and the pips stack up visibly.
 var buffer: Array[int] = []
+
+## Forge only: RAW waiting to be smelted. Separate from `buffer` so a Forge's
+## backlog of input doesn't block the REFINED it has already made.
+var intake: Array[int] = []
 
 ## 0..1, decays. Drives the swell when the node emits or consumes.
 var pulse := 0.0
@@ -62,15 +69,35 @@ func _process(delta: float) -> void:
 			if buffer.size() < BUFFER_CAP:
 				buffer.append(produces)
 				pulse = 1.0
+	elif kind == Kind.FORGE:
+		_smelt()
 	queue_redraw()
 
 
 func take(kind_in: int) -> bool:
+	# A Forge only swallows RAW; anything already refined passes through as cargo.
+	if kind == Kind.FORGE and kind_in == Res.RAW:
+		if intake.size() >= BUFFER_CAP:
+			return false
+		intake.append(kind_in)
+		return true
 	if buffer.size() >= BUFFER_CAP:
 		return false
 	buffer.append(kind_in)
 	pulse = maxf(pulse, 0.6)
 	return true
+
+
+## Two RAW in, one REFINED out. The conversion halves the item count carrying the
+## same run of fuel, which is why a Forge is the answer to a bursting trunk and
+## not just a fuel multiplier.
+func _smelt() -> void:
+	if intake.size() < FORGE_RATIO or buffer.size() >= BUFFER_CAP:
+		return
+	for i in FORGE_RATIO:
+		intake.pop_front()
+	buffer.append(Res.REFINED)
+	pulse = 1.0
 
 
 ## Round-robin so a node with two downhill veins splits its output between them
@@ -84,12 +111,13 @@ func _draw() -> void:
 	var col := Palette.HEART if kind == Kind.HEART else Palette.of_res(produces)
 	var r := radius() * (1.0 + pulse * (0.16 if kind == Kind.HEART else 0.10))
 
-	if kind == Kind.HEART:
-		_draw_hex(r, col)
-	else:
-		_draw_ring(r, col)
+	match kind:
+		Kind.HEART: _draw_hex(r, col)
+		Kind.FORGE: _draw_tri(r, col)
+		_: _draw_ring(r, col)
 
 	_draw_buffer(r, col)
+	_draw_intake(r)
 
 
 func _draw_hex(r: float, col: Color) -> void:
@@ -126,6 +154,29 @@ func _draw_ring(r: float, col: Color) -> void:
 	fill.a = 0.10 + pulse * 0.22
 	draw_circle(Vector2.ZERO, r, fill)
 	draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, col, 2.5, true)
+
+
+func _draw_tri(r: float, col: Color) -> void:
+	var tri := PackedVector2Array()
+	for i in 3:
+		var a := TAU * (float(i) / 3.0) - PI * 0.5
+		tri.append(Vector2(cos(a), sin(a)) * r * 1.25)
+	var fill := col
+	fill.a = 0.10 + pulse * 0.26
+	draw_colored_polygon(tri, fill)
+	var outline := tri.duplicate()
+	outline.append(tri[0])
+	draw_polyline(outline, col, 2.5, true)
+
+
+## Raw waiting to be smelted, drawn INSIDE the triangle so a starved Forge (one
+## pip, waiting forever for its pair) is distinguishable from a busy one.
+func _draw_intake(r: float) -> void:
+	if kind != Kind.FORGE or intake.is_empty():
+		return
+	for i in mini(intake.size(), BUFFER_CAP):
+		var p := Vector2(-6.0 + 6.0 * float(i % 3), 4.0 + 6.0 * float(i / 3))
+		draw_circle(p, 2.0, Palette.RAW)
 
 
 ## Buffered items orbit the node as pips. A backed-up Well wears its congestion.

@@ -17,31 +17,71 @@ const BurstScene := preload("res://scripts/burst.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
+## Bump whenever tuning changes what a score is worth. A best set on an easier
+## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
+## was unreachable after the rebalance and would just read as broken.
+const TUNING_VERSION := 2
+
 # --- Tuning. Everything the balance depends on lives here. -------------------
 const START_BUDGET := 5
 const FUEL_CAP := 6.0
-const FUEL_PER_ITEM := 1.0
 
-## Appetite grows on a smooth exponential. Lower tau = crueller run.
-const APPETITE_BASE := 0.5
-const APPETITE_TAU := 150.0
+## Fuel per item by resource. A Forge burns two RAW (2.0 of fuel) into one
+## REFINED (3.0), so refining is worth 1.5x — but it costs an extra vein and
+## adds latency, which is the trade. The bigger prize is that it HALVES the item
+## count carrying that fuel, so a Forge in front of a bursting trunk is the tool
+## for congestion, not just a multiplier.
+const FUEL_BY_RES := {
+	VNode.Res.RAW: 1.0,
+	VNode.Res.REFINED: 3.0,
+	VNode.Res.CLOTH: 7.0,
+}
 
-## Beats of exertion before the heart is fully racing.
-const EXERTION_SPAN := 260.0
+## Forges arrive once the Heart's appetite has outgrown raw supply.
+const FIRST_FORGE_TIME := 55.0
+const FORGE_GAP := 70.0
+
+## Appetite grows LINEARLY, on the CLOCK. Both halves of that matter.
+##
+## Linear, because against an exponential curve doubling your supply only buys a
+## fixed increment, so skill is nearly worthless: measured 1 Well -> 109 beats,
+## 2 -> 211, 4 -> 254, 10 -> 266. Five times the supply bought 26% more score.
+## Against a linear curve, survival time scales with supply, so ten Wells is
+## worth roughly ten times one — which is where the doc's 10x expert gap lives.
+##
+## On the clock rather than per beat, because a starving Heart SLOWS (see
+## Beat.RATE_BY_STATE). With beat-indexed escalation, dying slowed the very curve
+## that was killing you — the run stabilised into an endless limp instead of
+## dying. Time doesn't care that you are dying.
+##
+## The pairing is the design: escalation on time, score on beats. A healthy Heart
+## races, so it scores faster AND survives; a dying one crawls, scores nothing,
+## and the curve keeps coming.
+## Bisected against the bot: 0.008 -> ~1060 beats (far too easy), 0.021 -> ~176
+## and the skill gap collapses to 4x because escalation outruns budget growth
+## before you can build anything. 0.016 flattens the spread to 190-216, which
+## means the run is over-determined and your choices stopped mattering. 0.013
+## keeps the bot near 400 beats with a healthy 228-649 spread.
+const APPETITE_BASE := 0.35
+const APPETITE_RATE := 0.013    # per second
+
+## Seconds of exertion before the heart is fully racing.
+const EXERTION_SPAN := 300.0
 
 ## Missed feedings before the beat stops for good.
 const MISSES_STRAINED := 1
 const MISSES_DYING := 3
 const MISSES_FATAL := 6
 
-const FIRST_WELL_BEAT := 16
-const WELL_GAP_START := 22.0
-const WELL_GAP_DECAY := 1.2     # wells arrive faster and faster
-const WELL_GAP_MIN := 13.0
+# Spawns and budget are on the clock for the same reason as appetite.
+const FIRST_WELL_TIME := 10.0
+const WELL_GAP_START := 14.0
+const WELL_GAP_DECAY := 0.8     # wells arrive faster and faster
+const WELL_GAP_MIN := 8.0
 
-const FIRST_BUDGET_BEAT := 34
-const BUDGET_GAP_START := 46.0
-const BUDGET_GAP_GROWTH := 8.0  # ...while veins arrive slower and slower
+const FIRST_BUDGET_TIME := 22.0
+const BUDGET_GAP_START := 30.0
+const BUDGET_GAP_GROWTH := 5.0  # ...while veins arrive slower and slower
 
 const SNAP := 48.0             # magnetic radius; imprecise thumbs feel precise
 const LONG_PRESS := 0.32
@@ -57,6 +97,7 @@ const DRAG_SLOP := 12.0
 @onready var score_label: Label = $Ui/Death/Score
 @onready var best_label: Label = $Ui/Death/Best
 @onready var budget_hint: Node2D = $BudgetHint
+@onready var score_hud: Node2D = $ScoreHud
 
 var rng := RandomNumberGenerator.new()
 var seed_used := 0
@@ -84,9 +125,12 @@ var ruptures := 0
 ## of these is pressure that vanished instead of backing up the network.
 var dropped := 0
 
-var _next_well_beat := FIRST_WELL_BEAT
+## Seconds this run has been alive. The escalation clock — see APPETITE_RATE.
+var run_time := 0.0
+var _next_well_time := FIRST_WELL_TIME
+var _next_forge_time := FIRST_FORGE_TIME
 var _well_gap := WELL_GAP_START
-var _next_budget_beat := FIRST_BUDGET_BEAT
+var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
 
 var _drag_from: VNode = null
@@ -125,14 +169,17 @@ func _load_save() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(SAVE_PATH) != OK:
 		return
-	best = int(cfg.get_value("run", "best", 0))
+	# Lifetime beats survive a rebalance; a best score does not.
 	lifetime_beats = int(cfg.get_value("run", "lifetime", 0))
+	if int(cfg.get_value("run", "tuning", 0)) == TUNING_VERSION:
+		best = int(cfg.get_value("run", "best", 0))
 
 
 func _store_save() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("run", "best", best)
 	cfg.set_value("run", "lifetime", lifetime_beats)
+	cfg.set_value("run", "tuning", TUNING_VERSION)
 	cfg.save(SAVE_PATH)
 
 
@@ -149,12 +196,15 @@ func _maybe_attach_harness() -> void:
 	var shot_path := ""
 	var speed := 0.0
 	var after := 20.0
+	var cap := 0
 
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--probe"):
 			probe_runs = int(a.get_slice("=", 1)) if a.contains("=") else 5
 		elif a.begins_with("--shot="):
 			shot_path = a.get_slice("=", 1)
+		elif a.begins_with("--cap="):
+			cap = int(a.get_slice("=", 1))
 		elif a.begins_with("--speed="):
 			speed = float(a.get_slice("=", 1))
 		elif a.begins_with("--after="):
@@ -166,6 +216,7 @@ func _maybe_attach_harness() -> void:
 			return
 		p.runs = probe_runs
 		p.speed = speed if speed > 0.0 else 60.0
+		p.cap = cap
 		add_child(p)
 	elif shot_path != "":
 		var s: Node = _load_harness("res://tests/shot.gd")
@@ -206,9 +257,11 @@ func start_run(run_seed: int) -> void:
 	dropped = 0
 	_rescue = 0.0
 	_drain_amt = 0.0
-	_next_well_beat = FIRST_WELL_BEAT
+	run_time = 0.0
+	_next_well_time = FIRST_WELL_TIME
+	_next_forge_time = FIRST_FORGE_TIME
 	_well_gap = WELL_GAP_START
-	_next_budget_beat = FIRST_BUDGET_BEAT
+	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
 
 	var vp := design_size()
@@ -250,7 +303,7 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 	var n: VNode = VNodeScene.new()
 	n.kind = kind
 	n.position = pos
-	n.produces = VNode.Res.RAW
+	n.produces = VNode.Res.REFINED if kind == VNode.Kind.FORGE else VNode.Res.RAW
 	node_layer.add_child(n)
 	nodes.append(n)
 	return n
@@ -298,7 +351,7 @@ func _on_beat(index: int) -> void:
 	if not alive:
 		return
 
-	fuel -= appetite(index)
+	fuel -= appetite()
 	if fuel < 0.0:
 		fuel = 0.0
 		misses += 1
@@ -315,27 +368,47 @@ func _on_beat(index: int) -> void:
 	else:
 		Beat.set_state(Beat.State.HEALTHY)
 
-	Beat.set_exertion(float(index) / EXERTION_SPAN)
+	Beat.set_exertion(run_time / EXERTION_SPAN)
 
-	if index >= _next_well_beat:
+
+## Fuel the Heart burns per beat, rising linearly on the run clock.
+func appetite() -> float:
+	return APPETITE_BASE + APPETITE_RATE * run_time
+
+
+## Drives the spawn and budget clocks. Kept out of _on_beat so a slowing Heart
+## cannot slow its own escalation.
+func _tick_escalation(delta: float) -> void:
+	run_time += delta
+
+	if run_time >= _next_well_time:
 		_spawn_well()
-		_next_well_beat += int(_well_gap)
+		_next_well_time += _well_gap
 		_well_gap = maxf(WELL_GAP_MIN, _well_gap - WELL_GAP_DECAY)
 
-	if index >= _next_budget_beat:
+	if run_time >= _next_forge_time:
+		_spawn_node(VNode.Kind.FORGE)
+		_next_forge_time += FORGE_GAP
+
+	if run_time >= _next_budget_time:
 		budget += 1
-		_next_budget_beat += int(_budget_gap)
+		_next_budget_time += _budget_gap
 		_budget_gap += BUDGET_GAP_GROWTH
 		budget_hint.queue_redraw()
 
 
-func appetite(index: int) -> float:
-	return APPETITE_BASE * exp(float(index) / APPETITE_TAU)
-
-
-## New Wells spawn in awkward places, forcing rerouting. Bias to the lower two
-## thirds so everything stays in one-thumb reach.
 func _spawn_well() -> void:
+	_spawn_node(VNode.Kind.WELL)
+
+
+## New nodes spawn in awkward places, forcing rerouting. Bias to the lower two
+## thirds so everything stays in one-thumb reach.
+##
+## A Forge is placed by the opposite rule to a Well: it wants to sit CLOSE to the
+## Heart, because its job is to stand between a cluster of Wells and the trunk
+## they overload. Spawning it out at the rim like a Well would make it unroutable
+## and it would never be worth the veins.
+func _spawn_node(kind: int) -> void:
 	var vp := design_size()
 	var best := Vector2.ZERO
 	var best_score := -INF
@@ -354,15 +427,20 @@ func _spawn_well() -> void:
 		# Must be joinable to *something*, or it is scenery rather than a choice.
 		if near > Vein.MAX_LEN * 0.92:
 			continue
-		# Prefer awkward: far from the heart, but not hugging another node.
-		var s := p.distance_to(heart.position) * 0.6 + near * 0.4
+		var to_heart := p.distance_to(heart.position)
+		var s := 0.0
+		if kind == VNode.Kind.FORGE:
+			s = -to_heart
+		else:
+			# Prefer awkward: far from the heart, but not hugging another node.
+			s = to_heart * 0.6 + near * 0.4
 		if s > best_score:
 			best_score = s
 			best = p
 
 	if best_score == -INF:
 		return
-	_make_node(VNode.Kind.WELL, best)
+	_make_node(kind, best)
 	_rebuild_graph()
 
 
@@ -474,6 +552,7 @@ func _process(delta: float) -> void:
 	if not alive:
 		return
 
+	_tick_escalation(delta)
 	heart.fuel_ratio = fuel / FUEL_CAP
 	_push_from_nodes()
 	for v in veins:
@@ -537,7 +616,7 @@ func _deliver(kind: int, to: VNode) -> void:
 			_rescue = 1.0
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(120)
-		fuel = minf(FUEL_CAP, fuel + FUEL_PER_ITEM)
+		fuel = minf(FUEL_CAP, fuel + float(FUEL_BY_RES.get(kind, 1.0)))
 		to.pulse = 1.0
 	elif not to.take(kind):
 		dropped += 1

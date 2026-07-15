@@ -11,9 +11,12 @@ const REFINED := Color("e4572e")  # triangle — coral
 const CLOTH := Color("e8e3d3")    # square  — bone
 const HEART := Color("f5f2ea")    # hexagon — white
 
-const VEIN_IDLE := Color("2c262e")
-const VEIN_LIVE := Color("4a3f48")
-const VEIN_INERT := Color("1c191d")
+## Veins carry the whole read of the board, so they cannot be near-background.
+## The first pass had them at #2c262e-#4a3f48 against a #0d0d10 canvas, which
+## vanished on a phone in daylight — you could not see your own network.
+const VEIN_IDLE := Color("4a4048")
+const VEIN_LIVE := Color("9c7a52")
+const VEIN_INERT := Color("221e24")
 ## Engorged and about to burst. Darker and angrier than a live vein, never
 ## brighter — a straining vessel should read as bruised, not as energised.
 const VEIN_STRAINED := Color("6b2230")

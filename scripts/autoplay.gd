@@ -25,6 +25,8 @@ static func step(game) -> void:
 	var best := INF
 
 	for n in game.nodes:
+		# Forges count as orphans worth attaching: once a Forge is on the graph,
+		# Wells attach to it by the same rule and its smelting falls out for free.
 		if n.kind == VNode.Kind.HEART or n.depth >= 0:
 			continue
 		for m in game.nodes:

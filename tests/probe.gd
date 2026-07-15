@@ -20,6 +20,10 @@ const RUN_TIMEOUT := 2400.0
 
 var runs := 5
 var speed := 60.0
+## Stop AutoPlay after this many veins. `--cap=1` reproduces the reported "you
+## connect one circle and you never die": if a run survives on a single Well, the
+## escalation is not actually escalating.
+var cap := 0
 
 var _game: Node
 var _idx := 0
@@ -48,7 +52,8 @@ func _process(delta: float) -> void:
 	_accum += delta
 	if _accum >= AUTOPLAY_PERIOD:
 		_accum = 0.0
-		AutoPlay.step(_game)
+		if cap <= 0 or _game.veins.size() < cap:
+			AutoPlay.step(_game)
 
 	if _elapsed > RUN_TIMEOUT:
 		push_error("run %d survived %.0fs of game time without dying" % [_idx + 1, RUN_TIMEOUT])
