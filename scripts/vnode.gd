@@ -4,7 +4,7 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-enum Kind { HEART, WELL, FORGE, LOOM }
+enum Kind { HEART, WELL, FORGE, LOOM, BOOST }
 enum Res { RAW, REFINED, CLOTH, VOID }
 
 ## Tools condense two inputs into one stronger output. A Forge eats RAW and makes
@@ -27,8 +27,39 @@ const CORRUPT_PERIOD := 1.0
 ## and it cascades fast enough that hesitating costs you the limb.
 const SPREAD_TIME := 12.0
 
+## A necrotic node that is never cut eventually collapses outright — you don't
+## just get to sit on a dead Well forever, poisoning at your leisure and never
+## paying for it. This is what makes rot "come and go" instead of accumulating
+## as permanent board clutter: ignore it long enough and the asset itself is
+## gone, on top of whatever it already cost you.
+const COLLAPSE_TIME := 16.0
+## Fraction of COLLAPSE_TIME at which visible fading begins — the collapse
+## equivalent of WITHER_WARN_AT below.
+const COLLAPSE_FADE_AT := 0.6
+
+## An orphaned Well (nothing downstream will ever take what it makes) that sits
+## unconnected this long withers and vanishes. Without this the board only ever
+## grows — every Well you don't use becomes permanent scenery, and playtest read
+## that as "lazy" and static. Wells you ignore are USE-IT-OR-LOSE-IT, which also
+## means the board keeps turning over instead of just filling up.
+##
+## 26s was measured (via the probe's cumulative `withered` counter, added
+## because the live node count alone hid this) to be a severe economy bug, not
+## a pacing fix: budget grows far slower than Wells spawn BY DESIGN — that gap
+## is the core scarcity puzzle, and having more Wells on the board than you can
+## currently afford is the normal, intended state, not neglect. At 26s the bot
+## lost 5-11 Wells a run to wither before it ever got a chance at them, and
+## survival collapsed from ~185 beats to ~120. 70s clears a full budget tier
+## (BUDGET_GAP_START=24 plus growth) with room to spare, so wither only ever
+## catches a Well nobody was ever going to route to, not the normal backlog.
+const WITHER_TIME := 70.0
+## Fraction of WITHER_TIME at which visible fading begins, so vanishing is
+## always something you saw coming, never a surprise deletion.
+const WITHER_WARN_AT := 0.6
+
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
+const BOOST_RADIUS := 16.0
 const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
@@ -62,6 +93,15 @@ var corrupted := false
 var smelt_flash := 0.0
 ## Seconds this node has been rotting its neighbours.
 var spread_accum := 0.0
+## Seconds this node has been corrupted, total. Drives COLLAPSE_TIME.
+var corrupt_age := 0.0
+## Seconds this Well has sat orphaned (depth < 0). Drives WITHER_TIME. Reset to
+## 0 the instant it joins the network, even briefly — only NEGLECT withers.
+var orphan_age := 0.0
+
+## Boost only: which effect this pickup grants. Assigned by the game at spawn so
+## the roll comes from the seeded run RNG and stays deterministic.
+var boost_effect: int = 0
 
 ## Heart only: how full it is, 0..1. Drawn as a level inside the hexagon so the
 ## goal of the game is legible on sight — the vessel is emptying, fill it. This
@@ -76,6 +116,7 @@ var demand: int = Res.RAW
 
 var _emit_accum := 0.0
 var _round_robin := 0
+var _boost_pulse := 0.0
 
 
 func _ready() -> void:
@@ -84,7 +125,11 @@ func _ready() -> void:
 
 
 func radius() -> float:
-	return HEART_RADIUS if kind == Kind.HEART else RADIUS
+	if kind == Kind.HEART:
+		return HEART_RADIUS
+	if kind == Kind.BOOST:
+		return BOOST_RADIUS
+	return RADIUS
 
 
 func _on_beat(_i: int) -> void:
@@ -104,7 +149,44 @@ func _process(delta: float) -> void:
 			_emit()
 	elif kind == Kind.FORGE or kind == Kind.LOOM:
 		_smelt()
+
+	if corrupted:
+		corrupt_age += delta
+	if kind == Kind.WELL and not corrupted:
+		if depth < 0:
+			orphan_age += delta
+		else:
+			orphan_age = 0.0
+
+	# A single modulate fade covers every draw call below, so withering/collapse
+	# never needs touching each shape's alpha by hand. Nothing fades before the
+	# warn point — the whole point is that vanishing is never a surprise.
+	var fade := 1.0
+	var wr := wither_ratio()
+	if wr > WITHER_WARN_AT:
+		fade = 1.0 - (wr - WITHER_WARN_AT) / (1.0 - WITHER_WARN_AT)
+	var cr := collapse_ratio()
+	if cr > COLLAPSE_FADE_AT:
+		fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
+	modulate.a = clampf(fade, 0.0, 1.0)
+
+	if kind == Kind.BOOST:
+		_boost_pulse += delta
+		pulse = maxf(pulse, 0.35 + 0.35 * sin(_boost_pulse * 3.4))
+
 	queue_redraw()
+
+
+## 0..1 toward collapse. Game reads this to know when to remove the node.
+func collapse_ratio() -> float:
+	return clampf(corrupt_age / COLLAPSE_TIME, 0.0, 1.0) if corrupted else 0.0
+
+
+## 0..1 toward withering away from neglect.
+func wither_ratio() -> float:
+	if kind != Kind.WELL or corrupted or depth >= 0:
+		return 0.0
+	return clampf(orphan_age / WITHER_TIME, 0.0, 1.0)
 
 
 func _emit() -> void:
@@ -132,6 +214,19 @@ func corrupt() -> void:
 	# Whatever it was still holding turns with it.
 	buffer.clear()
 	intake.clear()
+	pulse = 1.0
+
+
+## Reverses corrupt(). Only ever called by a CLEANSE boost — the sole way rot
+## is ever undone rather than merely amputated or outrun.
+func uncorrupt() -> void:
+	if not corrupted:
+		return
+	corrupted = false
+	reserve = WELL_YIELD
+	produces = Res.RAW
+	corrupt_age = 0.0
+	spread_accum = 0.0
 	pulse = 1.0
 
 
@@ -195,6 +290,7 @@ func _draw() -> void:
 		Kind.HEART: _draw_hex(r, col)
 		Kind.FORGE: _draw_tri(r, col)
 		Kind.LOOM: _draw_square(r, col)
+		Kind.BOOST: _draw_boost(r)
 		_: _draw_ring(r, col)
 
 	_draw_buffer(r, col)
@@ -273,6 +369,34 @@ func _draw_ring(r: float, col: Color) -> void:
 	if left > 0.0:
 		var start := -PI * 0.5
 		draw_arc(Vector2.ZERO, r, start, start + TAU * left, 32, col, 2.5, true)
+
+
+## A Boost: a four-pointed star that never stops twinkling, the one shape on the
+## board that is not part of the circulatory system. Distinctness IS the message
+## — it does not carry, buffer, or demand; it is a gift, and it disappears the
+## instant a vein reaches it.
+func _draw_boost(r: float) -> void:
+	var s := r * 1.35
+	var spin := float(Time.get_ticks_msec()) * 0.0011
+	var pts := PackedVector2Array()
+	for i in 8:
+		var a := TAU * (float(i) / 8.0) + spin
+		var rr := s if i % 2 == 0 else s * 0.34
+		pts.append(Vector2(cos(a), sin(a)) * rr)
+	pts.append(pts[0])
+
+	var fill := Palette.BOOST
+	fill.a = 0.16 + pulse * 0.3
+	draw_colored_polygon(pts, fill)
+	var edge := Palette.BOOST
+	edge.a = 0.7 + pulse * 0.3
+	draw_polyline(pts, edge, 2.2 + pulse * 1.6, true)
+
+	# A slow halo ring, always present, so a Boost reads as "special" even from
+	# across the board before the player is close enough to see the star.
+	var halo := Palette.BOOST
+	halo.a = 0.10 + 0.06 * sin(spin * 2.3)
+	draw_arc(Vector2.ZERO, r * 2.0, 0.0, TAU, 28, halo, 1.4, true)
 
 
 ## A spent Well, gone necrotic: cold, jagged, and beating out of time with you.

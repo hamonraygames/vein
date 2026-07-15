@@ -135,6 +135,40 @@ const FIRST_BUDGET_TIME := 16.0
 const BUDGET_GAP_START := 24.0
 const BUDGET_GAP_GROWTH := 7.0  # ...while veins arrive slower and slower
 
+## Boosts — the "build your own strategy" lever. A rare, self-consuming pickup:
+## connecting ANY vein to one triggers it immediately, no new verb, no waiting
+## for a dot to arrive. It grants one random effect and both the node and the
+## vein that reached it vanish (refunded — a Boost never costs a permanent slot).
+## This is a real branch, not a freebie: every second spent detouring toward one
+## is a second not spent re-plumbing for the next demand flip.
+const FIRST_BOOST_TIME := 24.0
+const BOOST_GAP := 46.0
+
+enum BoostFx { SURGE, EASE, CLEANSE }
+## Weighted so CLEANSE never wastes itself as a no-op reroll when nothing is
+## corrupted — see _roll_boost.
+const BOOST_WEIGHTS := [0.4, 0.35, 0.25]
+
+const BOOST_SURGE_BUDGET := 1
+const BOOST_EASE_TIME := 9.0   ## seconds appetite growth is frozen
+
+## Rot that is never cut does not get to sit there forever as free clutter,
+## poisoning at your leisure — it collapses outright, taking the asset with it.
+## This is what makes the board turn over instead of only ever accumulating.
+## The fade-warning threshold lives on VNode.COLLAPSE_FADE_AT, next to the
+## corrupt_age it reads.
+
+## Corruption gets meaner as the run does — this is the second half of "the
+## enemy gets worse", on top of the fixed per-Well depletion. Both the vein-borne
+## spread AND a new airborne jump (corruption leaping to an unconnected Well
+## with no vein at all — a roaming blight, not just a plumbing hazard) scale in
+## with intensity, gated to the back half of the run so the opening stays
+## learnable and the mid-late game is where it goes feral.
+const SPREAD_TIME_LATE := 5.0     ## VNode.SPREAD_TIME at intensity 1.0
+const AIRBORNE_AT := 0.42         ## intensity floor before blight can jump gaps
+const AIRBORNE_RADIUS := 190.0
+const AIRBORNE_CHANCE := 0.35     ## per spread-tick, once AIRBORNE_AT is crossed
+
 ## Veins cannot cross. This is the spatial skill check: spaghetti is not a
 ## strategy. A bad draw snaps the crossing vein and bleeds the Heart, which makes
 ## route planning and hand precision matter from the first minute.
@@ -192,6 +226,15 @@ var dropped := 0
 var poisoned := 0
 ## Wells that ran dry and turned this run.
 var corruptions := 0
+## Wells withered from neglect, and rot collapsed outright. Both remove the
+## node itself, so `nodes` undercounts everything that ever appeared once
+## either of these fires — these are the cumulative truth the probe reads
+## instead.
+var withered := 0
+var collapsed := 0
+## Every node ever created, by kind — `nodes.size()` alone undercounts once
+## withering/collapse can remove them mid-run.
+var spawned_wells := 0
 ## Items the Heart accepted but did not want. High counts mean the player (or
 ## bot) failed to re-plumb after a demand flip.
 var wasted := 0
@@ -207,9 +250,20 @@ var run_time := 0.0
 var _next_well_time := FIRST_WELL_TIME
 var _next_forge_time := FIRST_FORGE_TIME
 var _next_loom_time := FIRST_LOOM_TIME
+var _next_boost_time := FIRST_BOOST_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
+
+## Seconds left of an EASE boost. While positive, run_time keeps advancing (the
+## clock, spawns, tempo, and mix all keep escalating) but the separate
+## `_appetite_clock` does not — so EASE is a fuel-economy reprieve, not a pause,
+## and does not trivialise a boosted run.
+var _ease_remaining := 0.0
+var _appetite_clock := 0.0
+## Boosts collected this run, and which effect fired — useful for the probe to
+## confirm they are actually being reached rather than sitting decorative.
+var boosts_taken := 0
 
 var _drag_from: VNode = null
 var _drag_pos := Vector2.ZERO
@@ -340,6 +394,9 @@ func start_run(run_seed: int) -> void:
 	beats = 0
 	ruptures = 0
 	dropped = 0
+	withered = 0
+	collapsed = 0
+	spawned_wells = 0
 	poisoned = 0
 	corruptions = 0
 	wasted = 0
@@ -349,10 +406,14 @@ func start_run(run_seed: int) -> void:
 	_drain_amt = 0.0
 	_sync_flash = 0.0
 	_bad_tempo_flash = 0.0
+	_ease_remaining = 0.0
+	_appetite_clock = 0.0
+	boosts_taken = 0
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
 	_next_loom_time = FIRST_LOOM_TIME
+	_next_boost_time = FIRST_BOOST_TIME
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
@@ -396,6 +457,8 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 	var n: VNode = VNodeScene.new()
 	n.kind = kind
 	n.position = pos
+	if kind == VNode.Kind.WELL:
+		spawned_wells += 1
 	match kind:
 		VNode.Kind.FORGE:
 			n.produces = VNode.Res.REFINED
@@ -468,20 +531,32 @@ func _on_beat(index: int) -> void:
 	else:
 		Beat.set_state(Beat.State.HEALTHY)
 
-	Beat.set_exertion(run_time / EXERTION_SPAN)
-	# The bed escalates on the same clock as the appetite that is killing you.
-	Audio.set_intensity(run_time / EXERTION_SPAN)
+	Beat.set_exertion(intensity())
 
 
-## Fuel the Heart burns per beat, rising linearly on the run clock.
+## 0..1, how far into the escalation curve this run is. The single number
+## everything downstream — exertion, the mix, corruption speed, particle
+## violence — reads to know how crazy things should be right now.
+func intensity() -> float:
+	return clampf(run_time / EXERTION_SPAN, 0.0, 1.0)
+
+
+## Fuel the Heart burns per beat, rising linearly on the run clock — except
+## while an EASE boost is active, when it rises on `_appetite_clock` instead,
+## which simply stops advancing for BOOST_EASE_TIME seconds.
 func appetite() -> float:
-	return APPETITE_BASE + APPETITE_RATE * run_time
+	return APPETITE_BASE + APPETITE_RATE * _appetite_clock
 
 
 ## Drives the spawn and budget clocks. Kept out of _on_beat so a slowing Heart
 ## cannot slow its own escalation.
 func _tick_escalation(delta: float) -> void:
 	run_time += delta
+
+	if _ease_remaining > 0.0:
+		_ease_remaining = maxf(0.0, _ease_remaining - delta)
+	else:
+		_appetite_clock += delta
 
 	var want: int = demand
 	for t in DEMAND_TIERS:
@@ -509,6 +584,10 @@ func _tick_escalation(delta: float) -> void:
 	if run_time >= _next_loom_time:
 		_spawn_node(VNode.Kind.LOOM)
 		_next_loom_time += LOOM_GAP
+
+	if run_time >= _next_boost_time:
+		_spawn_node(VNode.Kind.BOOST)
+		_next_boost_time += BOOST_GAP
 
 	if run_time >= _next_budget_time:
 		budget += 1
@@ -573,8 +652,37 @@ func _spawn_node(kind: int) -> void:
 
 	if best_score == -INF:
 		return
-	_make_node(kind, best)
+	var n := _make_node(kind, best)
+	if kind == VNode.Kind.BOOST:
+		n.boost_effect = _roll_boost()
 	_rebuild_graph()
+
+
+## Rolled from the seeded run RNG, not global randf() — the whole sim stays
+## deterministic given a seed, which is what the Daily and the probe both rely
+## on. CLEANSE only makes sense with something to cleanse; falling back to
+## SURGE when nothing is corrupted means a boost is never a wasted no-op.
+func _roll_boost() -> int:
+	var has_target := false
+	for n in nodes:
+		if n.corrupted:
+			has_target = true
+			break
+
+	var weights := BOOST_WEIGHTS.duplicate()
+	if not has_target:
+		weights[BoostFx.CLEANSE] = 0.0
+
+	var total := 0.0
+	for w in weights:
+		total += w
+	var roll := rng.randf() * total
+	var acc := 0.0
+	for i in weights.size():
+		acc += weights[i]
+		if roll <= acc:
+			return i
+	return BoostFx.SURGE
 
 
 # --- Graph: everything flows downhill toward demand -------------------------
@@ -622,6 +730,15 @@ func in_reach(a: VNode, b: VNode) -> bool:
 func _add_vein(a: VNode, b: VNode) -> void:
 	if a == b or not can_afford() or _find_vein(a, b) != null or not in_reach(a, b):
 		return
+
+	# A Boost is not part of the flow graph — reaching for one is a detour, not
+	# a route. It triggers the instant a vein touches it, at full value: no
+	# crossing-vein penalty, no tempo requirement, because punishing a reward
+	# pickup for incidental geometry would just feel arbitrary.
+	if a.kind == VNode.Kind.BOOST or b.kind == VNode.Kind.BOOST:
+		_take_boost(a if a.kind == VNode.Kind.BOOST else b)
+		return
+
 	var synced := _tempo_action()
 	var crossed := _crossing_vein(a, b)
 	if crossed != null:
@@ -666,6 +783,64 @@ func _tempo_quality() -> float:
 	return minf(Beat.phase, 1.0 - Beat.phase)
 
 
+## Apply a Boost's effect and remove the node. This is the payoff for the
+## detour — it has to be as visible and audible as a rupture, just warm instead
+## of violent.
+func _take_boost(n: VNode) -> void:
+	boosts_taken += 1
+	match n.boost_effect:
+		BoostFx.SURGE:
+			budget += BOOST_SURGE_BUDGET
+			budget_hint.queue_redraw()
+		BoostFx.EASE:
+			_ease_remaining += BOOST_EASE_TIME
+		BoostFx.CLEANSE:
+			var target: VNode = null
+			var best := INF
+			for c in nodes:
+				if not c.corrupted:
+					continue
+				var d := c.position.distance_to(n.position)
+				if d < best:
+					best = d
+					target = c
+			if target != null:
+				target.uncorrupt()
+			else:
+				budget += BOOST_SURGE_BUDGET
+
+	var burst: Node2D = BurstScene.new()
+	vein_layer.add_child(burst)
+	var ring: Array[Vector2] = []
+	var kinds: Array[int] = []
+	for i in 10:
+		var a := TAU * float(i) / 10.0
+		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
+		kinds.append(0)
+	burst.spawn(ring, kinds, rng.randi(), Palette.BOOST)
+
+	Audio.play("refined", -2.0, 1.8)
+	if OS.has_feature("mobile"):
+		Input.vibrate_handheld(160)
+
+	_remove_node(n)
+
+
+## Shared teardown for a node leaving the board outside of the normal
+## rupture/cut paths — Boost pickups, withered Wells, collapsed rot. Always
+## drops any vein still attached (there should be at most one for a Boost;
+## a withered/collapsed node is by definition orphaned or about to be cut).
+func _remove_node(n: VNode) -> void:
+	for v in veins.duplicate():
+		if v.a == n or v.b == n:
+			_remove_vein(v)
+	nodes.erase(n)
+	n.queue_free()
+	if heart == n:
+		heart = null
+	_rebuild_graph()
+
+
 ## A trunk carried more than it could bear. The dots in flight scatter and die,
 ## the vein is destroyed, and the budget point comes back — so a rupture is a
 ## loss of throughput and position, never of resources you can't rebuild.
@@ -680,7 +855,7 @@ func _on_ruptured(v: Vein) -> void:
 	if not pts.is_empty():
 		var burst: Node2D = BurstScene.new()
 		vein_layer.add_child(burst)
-		burst.spawn(pts, kinds, rng.randi())
+		burst.spawn(pts, kinds, rng.randi(), Color(0, 0, 0, 0), intensity())
 
 	Audio.play("rupture", -3.0, randf_range(0.9, 1.1))
 	if OS.has_feature("mobile"):
@@ -705,7 +880,7 @@ func _remove_vein(v: Vein, surgical := false) -> void:
 			kinds.append(d.kind)
 		var burst: Node2D = BurstScene.new()
 		vein_layer.add_child(burst)
-		burst.spawn(pts, kinds, rng.randi())
+		burst.spawn(pts, kinds, rng.randi(), Color(0, 0, 0, 0), intensity())
 		Audio.play("rupture", -8.0, 0.75)
 	veins.erase(v)
 	v.queue_free()
@@ -762,15 +937,39 @@ func _process(delta: float) -> void:
 
 	_tick_escalation(delta)
 	_tick_corruption(delta)
+	_tick_lifecycle(delta)
 	heart.fuel_ratio = fuel / FUEL_CAP
 	_push_from_nodes()
 	for v in veins:
 		for kind in v.advance(delta):
 			_deliver(kind, v.sink())
 
+	# Driven every frame, not per-beat: a dying run's beats slow way down, and
+	# the mix must keep evolving smoothly through that instead of freezing
+	# between rare beats. This is the whole fix for "the sound doesn't
+	# progress" — it is now a continuous function of the run, not a state
+	# machine that jumps between fixed stages.
+	Audio.set_intensity(intensity())
+	Audio.set_tension(float(combo) / float(COMBO_CAP))
+	Audio.set_corruption(_corruption_ratio())
+
 	budget_hint.queue_redraw()
 	drag_layer.queue_redraw()
 	queue_redraw()
+
+
+## Fraction of live Wells currently corrupted. Drives the corruption drone —
+## the mix should sicken continuously as rot spreads, not just spike once per
+## infection event.
+func _corruption_ratio() -> float:
+	var wells := 0
+	var rotted := 0
+	for n in nodes:
+		if n.kind == VNode.Kind.WELL:
+			wells += 1
+			if n.corrupted:
+				rotted += 1
+	return 0.0 if wells == 0 else float(rotted) / float(wells)
 
 
 func _draw() -> void:
@@ -822,18 +1021,33 @@ func _draw() -> void:
 ## poison the Heart — it takes the neighbours with it, so the punishment for
 ## ignoring one dead lifeline is losing that whole limb of your network.
 func _tick_corruption(delta: float) -> void:
+	# Rot gets meaner as the run does: the vein-borne spread tightens toward
+	# SPREAD_TIME_LATE, and past AIRBORNE_AT it can also leap to an unconnected
+	# Well with no vein at all — a second, distinct threat (a roaming blight,
+	# not a plumbing hazard) that only matters once the run is far enough along
+	# that the opening stays learnable.
+	var exert := intensity()
+	var spread_time := lerpf(VNode.SPREAD_TIME, SPREAD_TIME_LATE, exert)
+	var airborne := exert >= AIRBORNE_AT
+
 	var newly: Array[VNode] = []
 	for n in nodes:
 		if not n.corrupted:
 			continue
 		n.spread_accum += delta
-		if n.spread_accum < VNode.SPREAD_TIME:
+		if n.spread_accum < spread_time:
 			continue
 		n.spread_accum = 0.0
+
 		for v in veins:
 			var o := v.other(n)
-			if o != null and not o.corrupted and o.kind == VNode.Kind.WELL:
+			if o != null and not o.corrupted and o.kind == VNode.Kind.WELL and o not in newly:
 				newly.append(o)
+
+		if airborne and rng.randf() < AIRBORNE_CHANCE:
+			var jumped := _nearest_orphan_well(n.position, AIRBORNE_RADIUS)
+			if jumped != null and jumped not in newly:
+				newly.append(jumped)
 
 	for n in newly:
 		n.corrupt()
@@ -841,6 +1055,39 @@ func _tick_corruption(delta: float) -> void:
 		Audio.play("corrupt", -4.0, 0.62)
 		if OS.has_feature("mobile"):
 			Input.vibrate_handheld(140)
+
+
+func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
+	var best: VNode = null
+	var best_d := within
+	for n in nodes:
+		if n.kind != VNode.Kind.WELL or n.corrupted:
+			continue
+		var d := from.distance_to(n.position)
+		if d < best_d:
+			best_d = d
+			best = n
+	return best
+
+
+## Wells nobody ever wired in wither away; rot nobody ever cut collapses
+## outright. Both remove the node itself (see _remove_node), which is what
+## keeps the board turning over instead of only ever accumulating — every
+## object that appears either gets used, gets cut, or eventually leaves.
+func _tick_lifecycle(_delta: float) -> void:
+	for n in nodes.duplicate():
+		if n.wither_ratio() >= 1.0:
+			withered += 1
+			_remove_node(n)
+		elif n.collapse_ratio() >= 1.0:
+			collapsed += 1
+			var burst: Node2D = BurstScene.new()
+			vein_layer.add_child(burst)
+			var pts: Array[Vector2] = [n.position]
+			var kinds: Array[int] = [VNode.Res.VOID]
+			burst.spawn(pts, kinds, rng.randi(), Color(0, 0, 0, 0), intensity())
+			Audio.play("corrupt", -6.0, 0.4)
+			_remove_node(n)
 
 
 ## Every node with something buffered tries to hand it downhill.

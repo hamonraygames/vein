@@ -68,35 +68,29 @@ func _record() -> void:
 	var beats: int = _game.beats
 	_results.append(beats)
 
+	# "wells live / fed" is a snapshot at death, not a lifetime count — once
+	# corruption makes cut-and-replace a normal part of play, most Wells that
+	# ever mattered have already been recycled by the time a run ends, so this
+	# undercounts throughput. `spawned` (cumulative) plus `withered`/`collapsed`
+	# (also cumulative) are the numbers that actually describe a run.
 	var wells := 0
 	var fed := 0
-	var inert := 0
 	for n in _game.nodes:
 		if n.kind == VNode.Kind.WELL:
 			wells += 1
 			if n.depth >= 0:
 				fed += 1
-	var peak := 0.0
-	var heart_degree := 0
-	for v in _game.veins:
-		if v.dir == Vein.Dir.INERT:
-			inert += 1
-		peak = maxf(peak, v.peak_stress)
-		if v.a == _game.heart or v.b == _game.heart:
-			heart_degree += 1
-
-	var full_buffers := 0
-	for n in _game.nodes:
-		if n.kind != VNode.Kind.HEART and n.depth >= 0 and n.buffer.size() >= VNode.BUFFER_CAP:
-			full_buffers += 1
 
 	var rotted := 0
 	for n in _game.nodes:
 		if n.corrupted:
 			rotted += 1
 
-	print("run %d: beat %4d | budget %2d | wells %2d (%d fed) | rotted %d | poisoned %d | wasted %d | ruptures %d"
-		% [_idx + 1, beats, _game.budget, wells, fed, rotted, _game.poisoned, _game.wasted, _game.ruptures])
+	print(("run %d: beat %4d | rt %5.1f | budget %2d | spawned %2d live %2d (%d fed) | withered %d"
+		+ " collapsed %d rotted %d | poisoned %d | wasted %d | ruptures %d | boosts %d")
+		% [_idx + 1, beats, _game.run_time, _game.budget, _game.spawned_wells, wells, fed,
+			_game.withered, _game.collapsed, rotted, _game.poisoned, _game.wasted, _game.ruptures,
+			_game.boosts_taken])
 
 	_idx += 1
 	if _idx >= runs:

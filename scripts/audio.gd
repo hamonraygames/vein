@@ -1,14 +1,25 @@
 extends Node
 ## All sound. Autoload, subscribed to Beat like everything else.
 ##
-## Two layers, because the run needs both halves:
+## Playtest, twice: "the sound doesn't progress, it should progress as the game
+## progresses." The first version deserved that — three tracks hard-switched at
+## two fixed thresholds, silent between switches. That is a slideshow, not
+## progression. This version has no discrete stages left in it at all: every
+## input (intensity, tension, corruption) is a continuous 0..1 signal read every
+## frame, and every bed volume/pitch is a continuous function of those signals,
+## recomputed every frame in `_process`. There is no event that "starts" the
+## next phase of the mix — it just always is what the run currently is.
 ##
-## 1. A MUSIC BED that gains intensity as the run escalates — this is the "it
-##    starts easy and then gets crazy" channel. Tracks are crossfaded by stage,
-##    not restarted, so escalation is felt rather than announced.
-## 2. BEAT-SYNCED ONE-SHOTS: the heart itself, and a note per item the Heart
-##    swallows. The economy plays over the bed, so a fat network is audibly
-##    busier than a thin one.
+## Three continuous layers:
+## 1. MUSIC BEDS, blended (not switched) by a moving weight curve over
+##    intensity, so two adjacent tracks are usually both partially audible and
+##    the crossover is a smear, not a cut. Pitch climbs continuously with
+##    intensity too.
+## 2. A CORRUPTION DRONE, volume tracking the live fraction of rotted Wells —
+##    the mix should sicken exactly as fast as the board does, not on a timer.
+## 3. BEAT-SYNCED ONE-SHOTS, whose density (not just volume) scales with
+##    intensity and combo TENSION — a fat, skillfully-played network is
+##    audibly busier than a thin one, continuously, beat to beat.
 ##
 ## Everything here is real recorded CC0 material (see assets/CREDITS.md).
 ## Nothing is synthesised — filtered-noise "audio" has been rejected on this
@@ -29,25 +40,33 @@ const SFX := {
 	"corrupt": "res://assets/audio/corrupt.ogg",
 }
 
-## Stage thresholds on `intensity` (0..1) at which each bed takes over.
+## Where each bed sits on the 0..1 intensity axis. Blending is a triangular
+## weight around each centre (see _bed_weight), so at intensity 0.3 — between
+## calm's 0.0 and driving's 0.45 — BOTH are audible at partial volume, not one
+## or the other. Nothing about the mix ever jumps.
 const BED_ORDER := ["calm", "driving", "frantic"]
-const BED_AT := [0.0, 0.18, 0.46]
+const BED_CENTRE := [0.0, 0.45, 1.0]
 
-const FADE := 0.9
 const MUSIC_DB := -15.0
+const BLEND_RATE := 1.4      ## how fast volume chases its (constantly moving) target
+const PITCH_RATE := 0.6
 ## One-shots are pooled: a busy network fires a lot of notes per beat and
 ## allocating players per note would stutter on a mid-range phone.
-const VOICES := 14
+const VOICES := 16
+
+## Corruption drone: a low, quiet, looped use of the same "corrupt" hit,
+## pitched far down into a sustained sick tone rather than a stab.
+const DRONE_DB := -22.0
+const DRONE_PITCH := 0.28
 
 var intensity := 0.0
+var tension := 0.0     ## 0..1, from the combo streak — see set_tension
+var corruption := 0.0  ## 0..1, live fraction of rotted Wells — see set_corruption
 
 var _beds: Array[AudioStreamPlayer] = []
-## One live fade per bed. Without this, every _select_bed spawns a fresh tween
-## per player while the previous one is still running, and the two fight over
-## volume_db — the incoming bed measured -75dB (silent) when it should have been
-## at -9dB. Stale fades must be killed, not out-voted.
-var _fades: Array[Tween] = []
-var _bed_idx := -1
+var _bed_volumes: Array[float] = []   ## current (smoothed) volume_db per bed
+var _drone: AudioStreamPlayer
+var _drone_volume := -80.0
 var _voices: Array[AudioStreamPlayer] = []
 var _next_voice := 0
 var _streams := {}
@@ -77,7 +96,17 @@ func _ready() -> void:
 		p.bus = "Master"
 		add_child(p)
 		_beds.append(p)
-		_fades.append(null)
+		_bed_volumes.append(-80.0)
+
+	if _streams.has("corrupt"):
+		_drone = AudioStreamPlayer.new()
+		var dst: AudioStream = _streams["corrupt"]
+		_set_loop(dst)
+		_drone.stream = dst
+		_drone.volume_db = -80.0
+		_drone.pitch_scale = DRONE_PITCH
+		_drone.bus = "Master"
+		add_child(_drone)
 
 	for i in VOICES:
 		var v := AudioStreamPlayer.new()
@@ -87,6 +116,7 @@ func _ready() -> void:
 
 	_ready_ok = _beds.size() > 0
 	Beat.beat.connect(_on_beat)
+	set_process(true)
 
 
 ## Godot does not loop mp3/ogg by default, and a bed that stops 90 seconds in
@@ -102,41 +132,89 @@ func start() -> void:
 	if not _ready_ok:
 		return
 	intensity = 0.0
-	_bed_idx = -1
-	for p in _beds:
-		if not p.playing:
-			p.play()
-		p.volume_db = -80.0
-	_select_bed(0)
+	tension = 0.0
+	corruption = 0.0
+	for i in _beds.size():
+		if not _beds[i].playing:
+			_beds[i].play()
+		_beds[i].volume_db = -80.0
+		_bed_volumes[i] = -80.0
+	if _drone != null:
+		if not _drone.playing:
+			_drone.play()
+		_drone.volume_db = -80.0
+		_drone_volume = -80.0
 
 
 func stop_all() -> void:
 	for p in _beds:
 		p.stop()
+	if _drone != null:
+		_drone.stop()
 
 
-## 0..1 from the game's escalation clock. Drives which bed is audible.
+## 0..1 from the game's escalation clock. This is the master "how crazy is it
+## right now" signal — everything else in the mix reads it.
 func set_intensity(v: float) -> void:
 	intensity = clampf(v, 0.0, 1.0)
-	var want := 0
-	for i in BED_AT.size():
-		if intensity >= BED_AT[i]:
-			want = i
-	if want != _bed_idx:
-		_select_bed(want)
 
 
-func _select_bed(i: int) -> void:
-	if i < 0 or i >= _beds.size():
+## 0..1 from the live combo streak. A clean run under skillful play should
+## sound MORE alive, not just louder — tension nudges the blend toward the
+## next bed up and thickens the one-shot layer, so playing well is something
+## you hear, beat to beat, not just something the score records.
+func set_tension(v: float) -> void:
+	tension = clampf(v, 0.0, 1.0)
+
+
+## 0..1, live fraction of Wells currently rotted. Drives the corruption drone
+## continuously — the mix sickens exactly as fast as the board does.
+func set_corruption(v: float) -> void:
+	corruption = clampf(v, 0.0, 1.0)
+
+
+## Triangular weight: 1.0 exactly at this bed's centre, falling linearly to 0.0
+## at the neighbouring centres. Two adjacent beds are audible simultaneously
+## everywhere except exactly on a centre, which is what makes the crossfade a
+## continuous smear instead of a switch.
+func _bed_weight(i: int, blend: float) -> float:
+	var c: float = BED_CENTRE[i]
+	var lo: float = BED_CENTRE[i - 1] if i > 0 else -1.0
+	var hi: float = BED_CENTRE[i + 1] if i < BED_CENTRE.size() - 1 else 2.0
+	if blend <= c:
+		return 1.0 if lo < -0.5 else clampf((blend - lo) / (c - lo), 0.0, 1.0)
+	return 1.0 if hi > 1.5 else clampf(1.0 - (blend - c) / (hi - c), 0.0, 1.0)
+
+
+func _process(delta: float) -> void:
+	if not _ready_ok:
 		return
-	_bed_idx = i
-	for j in _beds.size():
-		var target := MUSIC_DB if j == i else -80.0
-		if _fades[j] != null and _fades[j].is_valid():
-			_fades[j].kill()
-		var tw := create_tween()
-		_fades[j] = tw
-		tw.tween_property(_beds[j], "volume_db", target, FADE)
+
+	# Tension pulls the blend point ahead of the clock — playing a hot streak
+	# should visibly (audibly) drag the mix toward the next stage, then relax
+	# back as the clock's own intensity resumes control.
+	var blend := clampf(intensity + tension * 0.22, 0.0, 1.0)
+
+	for i in _beds.size():
+		var target := MUSIC_DB + linear_to_db(maxf(_bed_weight(i, blend), 0.0001))
+		_bed_volumes[i] = _approach(_bed_volumes[i], target, BLEND_RATE, delta)
+		_beds[i].volume_db = _bed_volumes[i]
+		var pitch_target := 1.0 + blend * 0.08 + tension * 0.05
+		_beds[i].pitch_scale = _approach(_beds[i].pitch_scale, pitch_target, PITCH_RATE, delta)
+
+	if _drone != null:
+		var drone_target := -80.0 if corruption <= 0.001 \
+			else DRONE_DB + linear_to_db(corruption)
+		_drone_volume = _approach(_drone_volume, drone_target, 1.1, delta)
+		_drone.volume_db = _drone_volume
+		_drone.pitch_scale = DRONE_PITCH + corruption * 0.1
+
+
+## Exponential approach — used for both volume_db and pitch_scale. In dB space
+## this makes a fade sound like a constant-rate fade throughout instead of
+## front-loaded, which is the reason it is not a plain lerp.
+func _approach(from: float, to: float, rate: float, delta: float) -> float:
+	return lerpf(from, to, 1.0 - exp(-rate * maxf(delta, 0.0)))
 
 
 ## The heart is the anchor of the mix and must always be the loudest thing in it.
@@ -155,12 +233,17 @@ const BEAT_BY_STATE := {
 func _on_beat(_i: int) -> void:
 	var cfg: Dictionary = BEAT_BY_STATE.get(Beat.state, BEAT_BY_STATE[Beat.State.HEALTHY])
 	var pitch: float = cfg.pitch
-	# A racing heart late in a healthy run tightens up rather than staying calm.
+	# A racing heart late in a healthy run tightens up rather than staying calm,
+	# and a hot streak tightens it further still — the beat itself carries
+	# tension, continuously, not just the bed underneath it.
 	if Beat.state == Beat.State.HEALTHY:
-		pitch = lerpf(1.0, 1.16, intensity)
+		pitch = lerpf(1.0, 1.16, intensity) + tension * 0.05
 	play(cfg.key, cfg.db, pitch)
-	# Each beat is a fresh budget of note voices — see `swallow`.
+	# Each beat is a fresh budget of note voices — see `swallow`. The budget
+	# itself grows with intensity: a calm heart should sound sparse, a racing
+	# one should sound busy, continuously, not in three fixed steps.
 	_notes_this_beat = 0
+	_notes_budget = NOTES_PER_BEAT_BASE + int(round((intensity + tension * 0.4) * NOTES_PER_BEAT_MAX_BONUS))
 
 
 ## Fire a one-shot. `pitch` lets callers detune — starvation should sound wrong.
@@ -187,7 +270,14 @@ func play(key: String, db: float = -8.0, pitch: float = 1.0) -> void:
 ##     stuck buzzer. Extra arrivals still land, they just don't all speak.
 ##   - Poison keeps its full voice. A VOID hit is rare and must always cut
 ##     through — that one is meant to alarm you.
-const NOTES_PER_BEAT := 2
+##
+## The per-beat budget is no longer fixed at 2 — it scales continuously with
+## intensity and tension (set in _on_beat), so the density of the mix itself
+## is part of the progression, not just its volume.
+const NOTES_PER_BEAT_BASE := 1
+const NOTES_PER_BEAT_MAX_BONUS := 4
+
+var _notes_budget := NOTES_PER_BEAT_BASE
 
 var _notes_this_beat := 0
 
@@ -197,7 +287,7 @@ func swallow(res_kind: int, fullness: float) -> void:
 		play("corrupt", -6.0, 0.66)
 		return
 
-	if _notes_this_beat >= NOTES_PER_BEAT:
+	if _notes_this_beat >= _notes_budget:
 		return
 	_notes_this_beat += 1
 

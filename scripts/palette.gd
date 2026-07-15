@@ -28,6 +28,7 @@ const VEIN_INERT := Color("221e24")
 const VEIN_STRAINED := Color("6b2230")
 
 const WARM := Color("ffb765")     # the rescue flash
+const BOOST := WARM               # power-ups share the "good thing happening" hue
 
 
 static func of_res(kind: int) -> Color:
