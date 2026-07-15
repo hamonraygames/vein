@@ -227,6 +227,10 @@ func _maybe_attach_harness() -> void:
 		p.speed = speed if speed > 0.0 else 60.0
 		p.cap = cap
 		add_child(p)
+	elif "--audiocheck" in OS.get_cmdline_user_args():
+		var a: Node = _load_harness("res://tests/audiocheck.gd")
+		if a != null:
+			add_child(a)
 	elif shot_path != "":
 		var s: Node = _load_harness("res://tests/shot.gd")
 		if s == null:
@@ -248,6 +252,7 @@ func _load_harness(path: String) -> Node:
 # --- Run lifecycle ----------------------------------------------------------
 
 func start_run(run_seed: int) -> void:
+	Audio.start()
 	for n in nodes:
 		n.queue_free()
 	for v in veins:
@@ -322,6 +327,7 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 
 func _on_stopped(total: int) -> void:
 	alive = false
+	Audio.stop_all()
 	# The run can die mid panic-pinch; never leave the world dilated. Only undo
 	# our own dilation — blindly writing 1.0 here would stomp the time scale the
 	# dev harnesses set, which silently dropped the probe back to real time.
@@ -380,6 +386,8 @@ func _on_beat(index: int) -> void:
 		Beat.set_state(Beat.State.HEALTHY)
 
 	Beat.set_exertion(run_time / EXERTION_SPAN)
+	# The bed escalates on the same clock as the appetite that is killing you.
+	Audio.set_intensity(run_time / EXERTION_SPAN)
 
 
 ## Fuel the Heart burns per beat, rising linearly on the run clock.
@@ -525,6 +533,7 @@ func _on_ruptured(v: Vein) -> void:
 		vein_layer.add_child(burst)
 		burst.spawn(pts, kinds, rng.randi())
 
+	Audio.play("rupture", -3.0, randf_range(0.9, 1.1))
 	if OS.has_feature("mobile"):
 		Input.vibrate_handheld(180)
 
@@ -595,6 +604,7 @@ func _tick_corruption(delta: float) -> void:
 	for n in newly:
 		n.corrupt()
 		corruptions += 1
+		Audio.play("corrupt", -4.0, 0.62)
 		if OS.has_feature("mobile"):
 			Input.vibrate_handheld(140)
 
@@ -654,6 +664,7 @@ func _deliver(kind: int, to: VNode) -> void:
 				Input.vibrate_handheld(120)
 		fuel = clampf(fuel + float(FUEL_BY_RES.get(kind, 1.0)), 0.0, FUEL_CAP)
 		to.pulse = 1.0
+		Audio.swallow(kind, fuel / FUEL_CAP)
 		if kind == VNode.Res.VOID:
 			poisoned += 1
 			if OS.has_feature("mobile"):
