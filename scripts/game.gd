@@ -169,10 +169,10 @@ const AIRBORNE_AT := 0.42         ## intensity floor before blight can jump gaps
 const AIRBORNE_RADIUS := 190.0
 const AIRBORNE_CHANCE := 0.35     ## per spread-tick, once AIRBORNE_AT is crossed
 
-## Veins cannot cross. This is the spatial skill check: spaghetti is not a
-## strategy. A bad draw snaps the crossing vein and bleeds the Heart, which makes
-## route planning and hand precision matter from the first minute.
-const CROSS_BLEED := 1.0
+## Veins cannot cross — this is the spatial skill check: spaghetti is not a
+## strategy. A bad draw is simply REFUSED (see _add_vein), not punished; it used
+## to bleed fuel and destroy the crossed vein instead, which silently ate the
+## Heart's most-needed rescue connection right where veins most converge.
 const OFFBEAT_BLEED := 0.45
 const SYNC_FUEL := 0.18
 const PERFECT_WINDOW := 0.11
@@ -739,16 +739,23 @@ func _add_vein(a: VNode, b: VNode) -> void:
 		_take_boost(a if a.kind == VNode.Kind.BOOST else b)
 		return
 
-	var synced := _tempo_action()
-	var crossed := _crossing_vein(a, b)
-	if crossed != null:
-		fuel = maxf(0.0, fuel - CROSS_BLEED * (0.55 if synced else 1.0))
-		_rescue = 0.0
-		Audio.play("rupture", -2.0, 1.25)
-		if OS.has_feature("mobile"):
-			Input.vibrate_handheld(260)
-		_on_ruptured(crossed)
+	# Crossing BLOCKS the connection — it does not destroy the crossed vein.
+	#
+	# Playtest: "when the heart changes to square and I connect square to it, I
+	# die." Root cause: the Heart is where the most veins converge, so the
+	# rescue connection you most need to complete is also the one geometrically
+	# likeliest to cross something. The old behaviour silently failed to create
+	# the new vein AND bled fuel AND ruptured a different, unrelated vein — from
+	# the player's side the drag visually snapped, nothing looked wrong, and the
+	# game had actually destroyed a load-bearing connection and cost fuel while
+	# never delivering the CLOTH that would have saved them. Spaghetti-avoidance
+	# is still a real constraint (the drag preview still warns in red and the
+	# connection is refused), it just no longer punishes you for a geometry
+	# mistake with more than "try a different angle."
+	if _crossing_vein(a, b) != null:
 		return
+
+	var synced := _tempo_action()
 	var v: Vein = VeinScene.new()
 	# Alternate the bend so parallel veins fan out instead of overlapping.
 	v.setup(a, b, 1.0 if veins.size() % 2 == 0 else -1.0)
