@@ -15,15 +15,16 @@ const FORGE_RATIO := 2
 ## something downstream will take the item. So the trunk you lean on hardest is
 ## the one that dies first, and an unconnected Well keeps its reserve forever.
 ## That is the whole enemy design — every strength eats itself.
-const WELL_YIELD := 70.0
+const WELL_YIELD := 72.0
 
 ## A spent Well does not politely stop. It goes necrotic and starts pumping VOID
 ## down the vein you built to it, faster than it ever gave you RAW. You must cut
 ## it — which costs you the throughput you had come to depend on.
 const CORRUPT_PERIOD := 1.0
 
-## Seconds a corrupted node takes to rot its live neighbours. Neglect cascades.
-const SPREAD_TIME := 9.0
+## Seconds a corrupted node takes to rot its live neighbours. Neglect cascades,
+## and it cascades fast enough that hesitating costs you the limb.
+const SPREAD_TIME := 12.0
 
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
@@ -56,6 +57,8 @@ var pulse := 0.0
 ## without a number, and plan the reroute before it kills you.
 var reserve := WELL_YIELD
 var corrupted := false
+## 0..1, decays. The visible "two went in, one came out" moment.
+var smelt_flash := 0.0
 ## Seconds this node has been rotting its neighbours.
 var spread_accum := 0.0
 
@@ -85,6 +88,7 @@ func _on_beat(_i: int) -> void:
 
 func _process(delta: float) -> void:
 	pulse = maxf(0.0, pulse - delta * 3.2)
+	smelt_flash = maxf(0.0, smelt_flash - delta * 2.4)
 	if kind == Kind.WELL or corrupted:
 		_emit_accum += delta
 		var period := CORRUPT_PERIOD if corrupted else WELL_PERIOD
@@ -155,6 +159,11 @@ func _smelt() -> void:
 		intake.pop_front()
 	buffer.append(Res.REFINED)
 	pulse = 1.0
+	# The moment two become one, made loud. A Forge that silently swaps pips
+	# teaches nothing — it just sits there as an unexplained red triangle, which
+	# is exactly how it read in playtest.
+	smelt_flash = 1.0
+	Audio.play("refined", -20.0, 1.35)
 
 
 ## Round-robin so a node with two downhill veins splits its output between them
@@ -244,17 +253,36 @@ func _draw_necrotic(r: float) -> void:
 	draw_polyline(spikes, Palette.VOID, 2.0, true)
 
 
+## A Forge. Playtest: "what is the red triangle, I don't know what it's about."
+##
+## Two failures, both mine. A hard-edged red triangle is a universal HAZARD sign,
+## so the factory wore the costume of a warning — now that VOID owns danger
+## (cold violet), a Forge is drawn dimmer and softer when idle so it reads as
+## equipment rather than an alarm. And it never demonstrated itself: it silently
+## swapped pips. The smelt is now an event you can see and hear.
 func _draw_tri(r: float, col: Color) -> void:
 	var tri := PackedVector2Array()
 	for i in 3:
 		var a := TAU * (float(i) / 3.0) - PI * 0.5
-		tri.append(Vector2(cos(a), sin(a)) * r * 1.25)
+		tri.append(Vector2(cos(a), sin(a)) * r * (1.25 + smelt_flash * 0.12))
+
 	var fill := col
-	fill.a = 0.10 + pulse * 0.26
+	fill.a = 0.07 + pulse * 0.20 + smelt_flash * 0.45
 	draw_colored_polygon(tri, fill)
+
+	var edge := col
+	# Idle equipment sits back; a working Forge lights up.
+	edge.a = 0.45 + pulse * 0.3 + smelt_flash * 0.55
 	var outline := tri.duplicate()
 	outline.append(tri[0])
-	draw_polyline(outline, col, 2.5, true)
+	draw_polyline(outline, edge, 2.5 + smelt_flash * 2.0, true)
+
+	# The output leaving: a ring blooming outward on the beat it was made.
+	if smelt_flash > 0.0:
+		var halo := Palette.REFINED
+		halo.a = smelt_flash * 0.7
+		draw_arc(Vector2.ZERO, r * (1.3 + (1.0 - smelt_flash) * 1.1), 0.0, TAU, 26,
+			halo, 2.0 + smelt_flash * 2.0, true)
 
 
 ## Raw waiting to be smelted, drawn INSIDE the triangle so a starved Forge (one

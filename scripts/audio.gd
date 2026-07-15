@@ -139,10 +139,28 @@ func _select_bed(i: int) -> void:
 		tw.tween_property(_beds[j], "volume_db", target, FADE)
 
 
+## The heart is the anchor of the mix and must always be the loudest thing in it.
+## It also has to TELL you it is dying without a single visual: as the state
+## degrades the beat drops in pitch and gets heavier, so a heart in trouble
+## sounds laboured and wrong long before you read the board. The rate itself
+## already slows (Beat.RATE_BY_STATE); this is the timbre on top of that.
+const BEAT_BY_STATE := {
+	Beat.State.HEALTHY: {"key": "beat_slow", "db": -3.0, "pitch": 1.0},
+	Beat.State.STRAINED: {"key": "beat_fast", "db": -2.0, "pitch": 1.1},
+	Beat.State.DYING: {"key": "beat_slow", "db": -1.0, "pitch": 0.66},
+	Beat.State.STOPPED: {"key": "beat_slow", "db": -1.0, "pitch": 0.5},
+}
+
+
 func _on_beat(_i: int) -> void:
-	# The heart is the metronome, and it is the loudest thing in the mix.
-	var key := "beat_fast" if Beat.state != Beat.State.HEALTHY or intensity > 0.5 else "beat_slow"
-	play(key, -4.0)
+	var cfg: Dictionary = BEAT_BY_STATE.get(Beat.state, BEAT_BY_STATE[Beat.State.HEALTHY])
+	var pitch: float = cfg.pitch
+	# A racing heart late in a healthy run tightens up rather than staying calm.
+	if Beat.state == Beat.State.HEALTHY:
+		pitch = lerpf(1.0, 1.16, intensity)
+	play(cfg.key, cfg.db, pitch)
+	# Each beat is a fresh budget of note voices — see `swallow`.
+	_notes_this_beat = 0
 
 
 ## Fire a one-shot. `pitch` lets callers detune — starvation should sound wrong.
@@ -157,14 +175,33 @@ func play(key: String, db: float = -8.0, pitch: float = 1.0) -> void:
 	v.play()
 
 
-## The Heart swallowing something. Pitch rises with how full it is, so a healthy
-## network plays UP and a starving one sags — the mix tells you the state before
-## you look.
+## The Heart swallowing something.
+##
+## Playtest: "the dots hitting the heart sound is annoying." It was — every
+## single arrival fired a bright metal ding at -14dB, so a healthy network
+## machine-gunned the mix and drowned out the heartbeat, which is supposed to be
+## the anchor. Three fixes, all needed:
+##   - Pitched DOWN into a soft thud rather than a ring, and cut way back in
+##     level so it sits under the heart instead of over it.
+##   - Rate-limited per beat: a fat network should sound busy, not like a
+##     stuck buzzer. Extra arrivals still land, they just don't all speak.
+##   - Poison keeps its full voice. A VOID hit is rare and must always cut
+##     through — that one is meant to alarm you.
+const NOTES_PER_BEAT := 3
+
+var _notes_this_beat := 0
+
+
 func swallow(res_kind: int, fullness: float) -> void:
-	match res_kind:
-		2, 3:
-			play("corrupt", -5.0, 0.72)
-		1:
-			play("refined", -11.0, lerpf(0.86, 1.18, fullness))
-		_:
-			play("raw", -14.0, lerpf(0.82, 1.26, fullness))
+	if res_kind == VNode.Res.VOID:
+		play("corrupt", -6.0, 0.66)
+		return
+
+	if _notes_this_beat >= NOTES_PER_BEAT:
+		return
+	_notes_this_beat += 1
+
+	if res_kind == VNode.Res.REFINED:
+		play("refined", -22.0, lerpf(0.52, 0.68, fullness))
+	else:
+		play("raw", -26.0, lerpf(0.44, 0.58, fullness))

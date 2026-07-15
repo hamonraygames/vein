@@ -66,8 +66,21 @@ const FORGE_GAP := 70.0
 ## before you can build anything. 0.016 flattens the spread to 190-216, which
 ## means the run is over-determined and your choices stopped mattering. 0.013
 ## keeps the bot near 400 beats with a healthy 228-649 spread.
-const APPETITE_BASE := 0.35
-const APPETITE_RATE := 0.013    # per second
+## The slap in the face is START_FUEL, not APPETITE_BASE.
+##
+## Raising BASE to 0.9 did open hard — and collapsed the skill gap to ~1.1x
+## (2 Wells died at 137, the bot managed 146). A steep floor kills everyone
+## early, so extra supply buys nothing and mastery stops paying. Same failure as
+## the old exponential curve, wearing a different hat.
+##
+## Elden Ring doesn't raise the floor for the whole game; it demands you play
+## correctly IMMEDIATELY and then pays mastery for hours. So the Heart now OPENS
+## nearly empty: connect both Wells in the first seconds or die, no grace period,
+## nothing explained. That is a slap skill can answer, and it leaves the curve's
+## headroom intact.
+const START_FUEL := 1.6
+const APPETITE_BASE := 0.42
+const APPETITE_RATE := 0.009    # per second
 
 ## Seconds of exertion before the heart is fully racing.
 const EXERTION_SPAN := 300.0
@@ -111,7 +124,7 @@ var veins: Array[Vein] = []
 var heart: VNode
 
 var budget := START_BUDGET
-var fuel := FUEL_CAP
+var fuel := START_FUEL
 var misses := 0
 var alive := false
 ## Mirrors Beat.index. The score, and what the harnesses read.
@@ -264,7 +277,7 @@ func start_run(run_seed: int) -> void:
 	rng.seed = seed_used
 
 	budget = START_BUDGET
-	fuel = FUEL_CAP
+	fuel = START_FUEL
 	misses = 0
 	beats = 0
 	ruptures = 0
