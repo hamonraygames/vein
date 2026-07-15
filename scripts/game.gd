@@ -48,10 +48,10 @@ const CUT_BLEED_BY_DOT := 0.35
 
 ## Tools arrive before the Heart asks for them. Seeing the piece first makes the
 ## demand flip feel like a test, not a hidden rule.
-const FIRST_FORGE_TIME := 20.0
-const FORGE_GAP := 42.0
-const FIRST_LOOM_TIME := 58.0
-const LOOM_GAP := 72.0
+const FIRST_FORGE_TIME := 10.0
+const FORGE_GAP := 21.0
+const FIRST_LOOM_TIME := 29.0
+const LOOM_GAP := 36.0
 
 ## What the Heart DEMANDS, by run-second. This is the game.
 ##
@@ -71,8 +71,8 @@ const LOOM_GAP := 72.0
 ## triangle, and only the triangle node makes triangles.
 const DEMAND_TIERS := [
 	{"at": 0.0, "res": VNode.Res.RAW},
-	{"at": 28.0, "res": VNode.Res.REFINED},
-	{"at": 74.0, "res": VNode.Res.CLOTH},
+	{"at": 14.0, "res": VNode.Res.REFINED},
+	{"at": 37.0, "res": VNode.Res.CLOTH},
 ]
 
 ## Feeding the Heart something it did not ask for. This is not "less efficient";
@@ -115,25 +115,34 @@ const WRONG_SHAPE_FUEL := -0.85
 ## headroom intact.
 const START_FUEL := 0.95
 const APPETITE_BASE := 0.50
-const APPETITE_RATE := 0.012    # per second
+const APPETITE_RATE := 0.024    # per second
 
 ## Seconds of exertion before the heart is fully racing.
-const EXERTION_SPAN := 300.0
+const EXERTION_SPAN := 150.0
 
 ## Missed feedings before the beat stops for good.
 const MISSES_STRAINED := 1
 const MISSES_DYING := 3
 const MISSES_FATAL := 6
 
-# Spawns and budget are on the clock for the same reason as appetite.
-const FIRST_WELL_TIME := 6.0
-const WELL_GAP_START := 11.0
-const WELL_GAP_DECAY := 0.9     # wells arrive faster and faster
-const WELL_GAP_MIN := 6.5
+## Hard cap on live Wells. Playtest: "the circles grow and grow" — the board
+## only ever accumulated. Wither alone can't hold the line, because it only
+## catches Wells that are ORPHANED, and doubling the spawn rate doubled the
+## inflow. Past this cap, a new Well displaces the most-neglected existing one
+## (the oldest orphan) rather than piling on: the board churns instead of
+## silting up, and the screen stays readable at phone size. Connected Wells are
+## never displaced — you never lose something you were actually using.
+const MAX_LIVE_WELLS := 14
 
-const FIRST_BUDGET_TIME := 16.0
-const BUDGET_GAP_START := 24.0
-const BUDGET_GAP_GROWTH := 7.0  # ...while veins arrive slower and slower
+# Spawns and budget are on the clock for the same reason as appetite.
+const FIRST_WELL_TIME := 3.0
+const WELL_GAP_START := 5.5
+const WELL_GAP_DECAY := 0.45     # wells arrive faster and faster
+const WELL_GAP_MIN := 3.25
+
+const FIRST_BUDGET_TIME := 8.0
+const BUDGET_GAP_START := 12.0
+const BUDGET_GAP_GROWTH := 3.5  # ...while veins arrive slower and slower
 
 ## Boosts — the "build your own strategy" lever. A rare, self-consuming pickup:
 ## connecting ANY vein to one triggers it immediately, no new verb, no waiting
@@ -141,8 +150,13 @@ const BUDGET_GAP_GROWTH := 7.0  # ...while veins arrive slower and slower
 ## vein that reached it vanish (refunded — a Boost never costs a permanent slot).
 ## This is a real branch, not a freebie: every second spent detouring toward one
 ## is a second not spent re-plumbing for the next demand flip.
-const FIRST_BOOST_TIME := 24.0
-const BOOST_GAP := 46.0
+## Playtest: "no boosts, combos, crazy features" — they existed, but at 24s/46s
+## a run barely contained one, and after halving the escalation clock it would
+## have contained none. A mechanic the player never sees may as well not be
+## implemented. Frequent enough that a Boost is a recurring decision ("detour
+## for it, or hold the line?") rather than a once-a-run curiosity.
+const FIRST_BOOST_TIME := 7.0
+const BOOST_GAP := 14.0
 
 enum BoostFx { SURGE, EASE, CLEANSE }
 ## Weighted so CLEANSE never wastes itself as a no-op reroll when nothing is
@@ -150,7 +164,9 @@ enum BoostFx { SURGE, EASE, CLEANSE }
 const BOOST_WEIGHTS := [0.4, 0.35, 0.25]
 
 const BOOST_SURGE_BUDGET := 1
-const BOOST_EASE_TIME := 9.0   ## seconds appetite growth is frozen
+## Halved with everything else on the escalation clock — a 9s freeze against a
+## 150s span would be twice the reprieve it used to be.
+const BOOST_EASE_TIME := 4.5
 
 ## Rot that is never cut does not get to sit there forever as free clutter,
 ## poisoning at your leisure — it collapses outright, taking the asset with it.
@@ -596,7 +612,29 @@ func _tick_escalation(delta: float) -> void:
 		budget_hint.queue_redraw()
 
 
+## New Wells displace the most-neglected old one once the board is full, so the
+## count stays flat and readable instead of climbing all run. Only orphans are
+## ever displaced — a Well you actually wired in is safe.
 func _spawn_well() -> void:
+	var live: Array[VNode] = []
+	for n in nodes:
+		if n.kind == VNode.Kind.WELL and not n.corrupted:
+			live.append(n)
+
+	if live.size() >= MAX_LIVE_WELLS:
+		var oldest: VNode = null
+		for n in live:
+			if n.depth >= 0:
+				continue
+			if oldest == null or n.orphan_age > oldest.orphan_age:
+				oldest = n
+		# Everything is connected and we're at cap: the player has earned a full
+		# board, so skip this spawn rather than deleting something in use.
+		if oldest == null:
+			return
+		withered += 1
+		_remove_node(oldest)
+
 	_spawn_node(VNode.Kind.WELL)
 
 
@@ -917,6 +955,8 @@ func _segments_cross(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> bool
 # --- Sim --------------------------------------------------------------------
 
 func _process(delta: float) -> void:
+	# A frame hitch must not teleport the sim — see Beat.MAX_DELTA.
+	delta = minf(delta, Beat.MAX_DELTA)
 	_rescue = maxf(0.0, _rescue - delta * 2.2)
 	_sync_flash = maxf(0.0, _sync_flash - delta * 3.8)
 	_bad_tempo_flash = maxf(0.0, _bad_tempo_flash - delta * 4.4)

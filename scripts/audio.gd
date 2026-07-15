@@ -28,14 +28,27 @@ extends Node
 ## Nothing is synthesised — filtered-noise "audio" has been rejected on this
 ## project before and it is not worth re-litigating.
 
-const TRACK := "res://assets/audio/megawall.mp3"
-const TRACK_DB := -24.0   ## quiet — background, not a narrator
+## An AMBIENT DRONE, not a song. Playtest: "don't like the song itself, there's
+## a drum sound I don't like." Every track shipped so far was a composed piece
+## with its own percussion and structure, which fights the heartbeat for the
+## same job — VEIN already has a rhythm section (the Heart), so the background
+## must not have one. A drone has no beat to compete with and nothing to get
+## sick of on loop.
+const TRACK := "res://assets/audio/ambient_dark.ogg"
+## Barely-there. Twice now this has been "still too loud"; scenery should sit
+## under the heartbeat, not beside it.
+const TRACK_DB := -34.0
 
 const SFX := {
 	"beat_slow": "res://assets/audio/heartbeat_slow.wav",
 	"beat_fast": "res://assets/audio/heartbeat_fast.wav",
-	"raw": "res://assets/audio/note_raw.ogg",
-	"refined": "res://assets/audio/note_refined.ogg",
+	# Bells, played near their natural pitch. The old feed notes were metal
+	# dings pitched DOWN to 0.44-0.68, which is exactly what turns a ring into
+	# a dull muffled thump — the "drum sound" in the report was almost
+	# certainly this, firing on every delivery. A bell at ~1.0 reads as a
+	# chime, which is what feeding should sound like.
+	"raw": "res://assets/audio/feed_soft.wav",
+	"refined": "res://assets/audio/feed_rich.wav",
 	"rupture": "res://assets/audio/rupture.ogg",
 	"corrupt": "res://assets/audio/corrupt.ogg",
 }
@@ -198,15 +211,21 @@ func swallow(res_kind: int, fullness: float) -> void:
 		return
 	_notes_this_beat += 1
 
+	# Near natural pitch — bells, not thuds. Fuller shapes ring lower and
+	# richer; a fuller Heart rings slightly brighter. The range is deliberately
+	# narrow (0.9-1.25) because dragging a bell far off its recorded pitch is
+	# what made these sound like drums in the first place.
 	if res_kind == VNode.Res.CLOTH:
-		play("refined", -20.0, lerpf(0.38, 0.50, fullness))
+		play("refined", -20.0, lerpf(0.90, 1.02, fullness))
 	elif res_kind == VNode.Res.REFINED:
-		play("refined", -22.0, lerpf(0.52, 0.68, fullness))
+		play("refined", -22.0, lerpf(1.02, 1.14, fullness))
 	else:
-		play("raw", -26.0, lerpf(0.44, 0.58, fullness))
+		play("raw", -25.0, lerpf(1.10, 1.25, fullness))
 
 
+## An on-beat edit. Climbs the scale as the combo builds, so a hot streak is an
+## audible run of rising bells rather than a repeated blip.
 func sync_hit(combo: int, perfect: bool) -> void:
-	var pitch := 0.70 + float(combo) * 0.045
-	var db := -18.0 + minf(float(combo), 8.0) * 0.8
+	var pitch := 1.0 + float(combo) * 0.055
+	var db := -20.0 + minf(float(combo), 8.0) * 0.8
 	play("refined" if perfect else "raw", db, pitch)

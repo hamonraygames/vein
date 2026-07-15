@@ -24,8 +24,14 @@ Audio="*res://scripts/audio.gd"
 
 window/size/viewport_width=540
 window/size/viewport_height=1170
-window/size/window_width_override=432
-window/size/window_height_override=936
+; Desktop-only window size. The design space above (540x1170) is a real phone
+; aspect (19.5:9, e.g. iPhone 12+ at 1170px tall), so this is NOT a made-up
+; shape — but on a laptop the window is bounded by screen height, and at
+; 432x936 it was rendering the 540-wide design space at 80% scale, which is why
+; everything read as small. This fills the available height instead (~975 of a
+; typical 982-point laptop workspace) so the board renders near 1:1.
+window/size/window_width_override=450
+window/size/window_height_override=975
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=1

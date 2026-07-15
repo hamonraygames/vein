@@ -11,6 +11,23 @@ signal stopped(total_beats: int)
 
 enum State { HEALTHY, STRAINED, DYING, STOPPED }
 
+## Ceiling on a single frame's delta, shared by every system that advances the
+## sim (Beat, game.gd, vnode.gd). A frame hitch must never teleport the world.
+##
+## Found via the probe: the first frame of a launch (asset load, shader compile)
+## takes ~150ms of real time, and at the probe's Engine.time_scale=60 that ONE
+## frame's delta became NINE game-seconds. Run 1 of every batch silently jumped
+## to run_time 9.0 before AutoPlay could act — spawning wells, a Forge and a
+## Boost instantly — while Beat only ever emits ONE beat per frame no matter how
+## much time accumulated, so the Heart starved and "died at beat 7". That was a
+## harness artifact reported as a balance number for who knows how long, and it
+## also explains why identical seeds gave different results.
+##
+## Must stay below the shortest beat interval (60/BPM_MAXED = 0.45s) or beats
+## get dropped on a slow frame. Clamping caps the probe's effective speedup at
+## MAX_DELTA * real_fps, which is a fair trade for numbers that are true.
+const MAX_DELTA := 0.25
+
 ## Base rate at the start of a run. The heart races as the run escalates — see
 ## `set_exertion` — which is both thematic (tachycardia under strain) and what
 ## makes late beats accumulate faster.
@@ -84,6 +101,7 @@ func interval() -> float:
 func _process(delta: float) -> void:
 	if not running:
 		return
+	delta = minf(delta, MAX_DELTA)
 	var iv := interval()
 	if iv == INF:
 		return

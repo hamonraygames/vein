@@ -25,14 +25,14 @@ const CORRUPT_PERIOD := 1.0
 
 ## Seconds a corrupted node takes to rot its live neighbours. Neglect cascades,
 ## and it cascades fast enough that hesitating costs you the limb.
-const SPREAD_TIME := 12.0
+const SPREAD_TIME := 6.0
 
 ## A necrotic node that is never cut eventually collapses outright — you don't
 ## just get to sit on a dead Well forever, poisoning at your leisure and never
 ## paying for it. This is what makes rot "come and go" instead of accumulating
 ## as permanent board clutter: ignore it long enough and the asset itself is
 ## gone, on top of whatever it already cost you.
-const COLLAPSE_TIME := 16.0
+const COLLAPSE_TIME := 8.0
 ## Fraction of COLLAPSE_TIME at which visible fading begins — the collapse
 ## equivalent of WITHER_WARN_AT below.
 const COLLAPSE_FADE_AT := 0.6
@@ -43,16 +43,17 @@ const COLLAPSE_FADE_AT := 0.6
 ## that as "lazy" and static. Wells you ignore are USE-IT-OR-LOSE-IT, which also
 ## means the board keeps turning over instead of just filling up.
 ##
-## 26s was measured (via the probe's cumulative `withered` counter, added
-## because the live node count alone hid this) to be a severe economy bug, not
-## a pacing fix: budget grows far slower than Wells spawn BY DESIGN — that gap
-## is the core scarcity puzzle, and having more Wells on the board than you can
-## currently afford is the normal, intended state, not neglect. At 26s the bot
-## lost 5-11 Wells a run to wither before it ever got a chance at them, and
-## survival collapsed from ~185 beats to ~120. 70s clears a full budget tier
-## (BUDGET_GAP_START=24 plus growth) with room to spare, so wither only ever
-## catches a Well nobody was ever going to route to, not the normal backlog.
-const WITHER_TIME := 70.0
+## This MUST stay comfortably longer than a budget tier, or it is an economy
+## bug rather than a pacing fix. Budget grows far slower than Wells spawn BY
+## DESIGN — that gap is the core scarcity puzzle, and having more Wells on the
+## board than you can currently afford is the normal, intended state, not
+## neglect. Measured (via the probe's cumulative `withered` counter, added
+## because the live node count alone hid this): when this was set to ~2.7x the
+## budget gap the bot lost 5-11 Wells a run before it could ever reach them and
+## survival collapsed ~185 -> ~120 beats. Keep it near 3x BUDGET_GAP_START so
+## wither only ever catches a Well nobody was going to route to.
+## Scales with the escalation clock: halved when everything else halved.
+const WITHER_TIME := 35.0
 ## Fraction of WITHER_TIME at which visible fading begins, so vanishing is
 ## always something you saw coming, never a surprise deletion.
 const WITHER_WARN_AT := 0.6
@@ -139,6 +140,8 @@ func _on_beat(_i: int) -> void:
 
 
 func _process(delta: float) -> void:
+	# A frame hitch must not teleport the sim — see Beat.MAX_DELTA.
+	delta = minf(delta, Beat.MAX_DELTA)
 	pulse = maxf(0.0, pulse - delta * 3.2)
 	smelt_flash = maxf(0.0, smelt_flash - delta * 2.4)
 	if kind == Kind.WELL or corrupted:
