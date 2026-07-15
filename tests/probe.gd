@@ -95,8 +95,8 @@ func _record() -> void:
 		if n.corrupted:
 			rotted += 1
 
-	print("run %d: beat %4d | budget %2d | wells %2d (%d fed) | rotted %d | poisoned %d | ruptures %d"
-		% [_idx + 1, beats, _game.budget, wells, fed, rotted, _game.poisoned, _game.ruptures])
+	print("run %d: beat %4d | budget %2d | wells %2d (%d fed) | rotted %d | poisoned %d | wasted %d | ruptures %d"
+		% [_idx + 1, beats, _game.budget, wells, fed, rotted, _game.poisoned, _game.wasted, _game.ruptures])
 
 	_idx += 1
 	if _idx >= runs:

@@ -67,6 +67,12 @@ var spread_accum := 0.0
 ## is the one thing the player must understand and it must never need a number.
 var fuel_ratio := 1.0
 
+## Heart only: the shape it is asking for. Drawn as a glyph inside the hexagon,
+## which is the entire teaching mechanism for Forges — the Heart visibly wants a
+## triangle, and the only thing on the board that makes triangles is the triangle
+## node. No text, no tutorial, no red-triangle mystery.
+var demand: int = Res.RAW
+
 var _emit_accum := 0.0
 var _round_robin := 0
 
@@ -213,6 +219,29 @@ func _draw_hex(r: float, col: Color) -> void:
 	var outline := hex.duplicate()
 	outline.append(hex[0])
 	draw_polyline(outline, col, 3.0, true)
+
+	_draw_demand(r)
+
+
+## The shape the Heart is asking for, floating inside it. This is the only
+## instruction VEIN ever gives, and it gives it wordlessly.
+func _draw_demand(r: float) -> void:
+	var c: Color = Palette.of_res(demand)
+	c.a = 0.85 + pulse * 0.15
+	var s := r * 0.34
+
+	match demand:
+		Res.REFINED:
+			var tri := PackedVector2Array()
+			for i in 3:
+				var a := TAU * (float(i) / 3.0) - PI * 0.5
+				tri.append(Vector2(cos(a), sin(a)) * s * 1.2)
+			tri.append(tri[0])
+			draw_polyline(tri, c, 2.4, true)
+		Res.CLOTH:
+			draw_rect(Rect2(-s * 0.8, -s * 0.8, s * 1.6, s * 1.6), c, false, 2.4)
+		_:
+			draw_arc(Vector2.ZERO, s * 0.85, 0.0, TAU, 22, c, 2.4, true)
 
 
 func _draw_ring(r: float, col: Color) -> void:

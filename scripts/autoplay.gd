@@ -32,6 +32,13 @@ static func step(game) -> void:
 	if not game.can_afford():
 		return
 
+	# When the Heart wants REFINED, a Well wired straight to it is feeding the
+	# Heart garbage (WRONG_SHAPE_FUEL). The only useful shape is
+	# Well -> Forge -> Heart, so a Forge on the graph is worth more than any
+	# number of direct Wells. Without this the bot keeps pumping circles into a
+	# Heart that stopped wanting them and measures its own blindness.
+	var need_forge: bool = game.demand == VNode.Res.REFINED
+
 	var pick: VNode = null
 	var target: VNode = null
 	var best := INF
@@ -45,6 +52,12 @@ static func step(game) -> void:
 			if m.depth < 0 or not game.in_reach(n, m):
 				continue
 			var score: float = float(m.depth) * 10000.0 + n.position.distance_to(m.position)
+			# Getting a Forge connected, and then feeding it, outranks everything.
+			if need_forge:
+				if n.kind == VNode.Kind.FORGE:
+					score -= 1000000.0
+				elif m.kind == VNode.Kind.FORGE:
+					score -= 500000.0
 			if score < best:
 				best = score
 				pick = n

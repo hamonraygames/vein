@@ -42,8 +42,33 @@ const FUEL_BY_RES := {
 }
 
 ## Forges arrive once the Heart's appetite has outgrown raw supply.
-const FIRST_FORGE_TIME := 55.0
-const FORGE_GAP := 70.0
+const FIRST_FORGE_TIME := 38.0
+const FORGE_GAP := 55.0
+
+## What the Heart DEMANDS, by run-second. This is the game.
+##
+## The Forge was built as an optional fuel multiplier — an abstract 1.5x you
+## cannot see — and playtest was blunt: "the red triangle is not understandable
+## even to me." Correct, because an optional thing explains nothing. The doc
+## always said it: "the Heart starts demanding refined shapes, not raw ones."
+##
+## Now the Heart wants ONE shape at a time and shows you which. Off-demand items
+## are near-worthless (WRONG_SHAPE_FUEL), so when it flips to triangles your
+## entire circle network is suddenly feeding it garbage and you must re-plumb
+## every Well through a Forge, against the budget, against reach, while it
+## starves. That is the strategy that was missing: the board you built is
+## invalidated on a clock, and the whole run is about restructuring under fire.
+##
+## It also makes the Forge self-teaching — the Heart is visibly asking for a
+## triangle, and only the triangle node makes triangles.
+const DEMAND_TIERS := [
+	{"at": 0.0, "res": VNode.Res.RAW},
+	{"at": 42.0, "res": VNode.Res.REFINED},
+]
+
+## Feeding the Heart something it did not ask for. Not zero — a starving Heart
+## will still take scraps — but nowhere near enough to live on.
+const WRONG_SHAPE_FUEL := 0.12
 
 ## Appetite grows LINEARLY, on the CLOCK. Both halves of that matter.
 ##
@@ -146,6 +171,12 @@ var dropped := 0
 var poisoned := 0
 ## Wells that ran dry and turned this run.
 var corruptions := 0
+## Items the Heart accepted but did not want. High counts mean the player (or
+## bot) failed to re-plumb after a demand flip.
+var wasted := 0
+
+## The shape the Heart wants right now. Drawn inside it — see VNode._draw_hex.
+var demand: int = VNode.Res.RAW
 
 ## Seconds this run has been alive. The escalation clock — see APPETITE_RATE.
 var run_time := 0.0
@@ -284,6 +315,8 @@ func start_run(run_seed: int) -> void:
 	dropped = 0
 	poisoned = 0
 	corruptions = 0
+	wasted = 0
+	demand = VNode.Res.RAW
 	_rescue = 0.0
 	_drain_amt = 0.0
 	run_time = 0.0
@@ -413,6 +446,20 @@ func appetite() -> float:
 func _tick_escalation(delta: float) -> void:
 	run_time += delta
 
+	var want: int = demand
+	for t in DEMAND_TIERS:
+		if run_time >= t.at:
+			want = t.res
+	if want != demand:
+		demand = want
+		heart.demand = want
+		# The Heart changing its mind is the loudest event in the run: everything
+		# you built is now feeding it the wrong thing.
+		heart.pulse = 1.0
+		Audio.play("corrupt", -6.0, 1.5)
+		if OS.has_feature("mobile"):
+			Input.vibrate_handheld(220)
+
 	if run_time >= _next_well_time:
 		_spawn_well()
 		_next_well_time += _well_gap
@@ -445,27 +492,40 @@ func _spawn_node(kind: int) -> void:
 	var best := Vector2.ZERO
 	var best_score := -INF
 
-	for _i in 48:
-		var p := Vector2(
-			rng.randf_range(56.0, vp.x - 56.0),
-			# Squaring the roll pulls the distribution downward.
-			lerpf(vp.y * 0.14, vp.y * 0.93, sqrt(rng.randf()))
-		)
+	# Grow OUTWARD from a node already on the board, at a uniformly random angle.
+	#
+	# Playtest: "the circles mostly spawn at the bottom." Two biases were stacked
+	# and compounded: sqrt(randf()) pulled the y-roll downward, AND the score
+	# rewarded distance from the Heart — which sits at 44% height, so the bottom
+	# edge (573px away) beat the top (351px) every single time. Rejection
+	# sampling over the whole rect also wasted most candidates, since anything
+	# beyond MAX_LEN of everything is unjoinable. Seeding from an existing node
+	# at a random bearing fills the board evenly and every candidate is reachable
+	# by construction.
+	for _i in 64:
+		var anchor: VNode = nodes[rng.randi() % nodes.size()]
+		var bearing := rng.randf() * TAU
+		var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.9)
+		var p := anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
+		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+			continue
+
 		var near := INF
 		for n in nodes:
 			near = minf(near, p.distance_to(n.position))
 		if near < 104.0:
 			continue
-		# Must be joinable to *something*, or it is scenery rather than a choice.
-		if near > Vein.MAX_LEN * 0.92:
-			continue
+
 		var to_heart := p.distance_to(heart.position)
 		var s := 0.0
 		if kind == VNode.Kind.FORGE:
+			# A Forge must stand between a cluster of Wells and the Heart.
 			s = -to_heart
 		else:
-			# Prefer awkward: far from the heart, but not hugging another node.
-			s = to_heart * 0.6 + near * 0.4
+			# Prefer awkward — elbow room from neighbours — WITHOUT preferring a
+			# compass direction. Distance from the Heart is deliberately not a
+			# term here; that was the bias.
+			s = near
 		if s > best_score:
 			best_score = s
 			best = p
@@ -675,7 +735,11 @@ func _deliver(kind: int, to: VNode) -> void:
 			_rescue = 1.0
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(120)
-		fuel = clampf(fuel + float(FUEL_BY_RES.get(kind, 1.0)), 0.0, FUEL_CAP)
+		var gain := float(FUEL_BY_RES.get(kind, 1.0))
+		if kind != demand and kind != VNode.Res.VOID:
+			gain = WRONG_SHAPE_FUEL
+			wasted += 1
+		fuel = clampf(fuel + gain, 0.0, FUEL_CAP)
 		to.pulse = 1.0
 		Audio.swallow(kind, fuel / FUEL_CAP)
 		if kind == VNode.Res.VOID:
