@@ -14,6 +14,9 @@ const HEART := Color("f5f2ea")    # hexagon — white
 const VEIN_IDLE := Color("2c262e")
 const VEIN_LIVE := Color("4a3f48")
 const VEIN_INERT := Color("1c191d")
+## Engorged and about to burst. Darker and angrier than a live vein, never
+## brighter — a straining vessel should read as bruised, not as energised.
+const VEIN_STRAINED := Color("6b2230")
 
 const WARM := Color("ffb765")     # the rescue flash
 

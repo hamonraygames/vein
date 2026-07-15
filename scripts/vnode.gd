@@ -29,6 +29,11 @@ var buffer: Array[int] = []
 ## 0..1, decays. Drives the swell when the node emits or consumes.
 var pulse := 0.0
 
+## Heart only: how full it is, 0..1. Drawn as a level inside the hexagon so the
+## goal of the game is legible on sight — the vessel is emptying, fill it. This
+## is the one thing the player must understand and it must never need a number.
+var fuel_ratio := 1.0
+
 var _emit_accum := 0.0
 var _round_robin := 0
 
@@ -88,16 +93,32 @@ func _draw() -> void:
 
 
 func _draw_hex(r: float, col: Color) -> void:
-	var pts := PackedVector2Array()
+	var hex := PackedVector2Array()
 	for i in 6:
 		var a := TAU * (float(i) / 6.0) - PI * 0.5
-		pts.append(Vector2(cos(a), sin(a)) * r)
-	pts.append(pts[0])
-	# Inner glow scales with the swell — a full heart looks lit from inside.
-	var fill := col
-	fill.a = 0.10 + pulse * 0.30
-	draw_colored_polygon(pts, fill)
-	draw_polyline(pts, col, 3.0, true)
+		hex.append(Vector2(cos(a), sin(a)) * r)
+
+	# A dim wash so an empty Heart is still a shape, not a hole.
+	var base := col
+	base.a = 0.07 + pulse * 0.10
+	draw_colored_polygon(hex, base)
+
+	# The level itself: clip the hexagon to everything below the fuel line. A
+	# falling waterline is read instantly and without instruction; a bar or a
+	# number would be neither.
+	if fuel_ratio > 0.001:
+		var line_y := r - 2.0 * r * clampf(fuel_ratio, 0.0, 1.0)
+		var below := PackedVector2Array([
+			Vector2(-r, line_y), Vector2(r, line_y), Vector2(r, r), Vector2(-r, r),
+		])
+		var fill := col
+		fill.a = 0.34 + pulse * 0.34
+		for poly in Geometry2D.intersect_polygons(hex, below):
+			draw_colored_polygon(poly, fill)
+
+	var outline := hex.duplicate()
+	outline.append(hex[0])
+	draw_polyline(outline, col, 3.0, true)
 
 
 func _draw_ring(r: float, col: Color) -> void:

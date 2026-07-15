@@ -20,7 +20,7 @@ func _draw() -> void:
 	if total <= 0:
 		return
 
-	var vp := get_viewport_rect().size
+	var vp: Vector2 = game.design_size()
 	var span := float(total) * STROKE_W + float(total - 1) * GAP
 	var x := (vp.x - span) * 0.5
 	var y := vp.y - MARGIN_BOTTOM

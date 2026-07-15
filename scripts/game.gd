@@ -13,6 +13,9 @@ extends Node2D
 # loop, which is exactly how tests/ runs it.
 const VNodeScene := preload("res://scripts/vnode.gd")
 const VeinScene := preload("res://scripts/vein.gd")
+const BurstScene := preload("res://scripts/burst.gd")
+
+const SAVE_PATH := "user://vein.cfg"
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 const START_BUDGET := 5
@@ -21,24 +24,24 @@ const FUEL_PER_ITEM := 1.0
 
 ## Appetite grows on a smooth exponential. Lower tau = crueller run.
 const APPETITE_BASE := 0.5
-const APPETITE_TAU := 420.0
+const APPETITE_TAU := 150.0
 
 ## Beats of exertion before the heart is fully racing.
-const EXERTION_SPAN := 800.0
+const EXERTION_SPAN := 260.0
 
 ## Missed feedings before the beat stops for good.
 const MISSES_STRAINED := 1
 const MISSES_DYING := 3
 const MISSES_FATAL := 6
 
-const FIRST_WELL_BEAT := 40
-const WELL_GAP_START := 58.0
-const WELL_GAP_DECAY := 3.0    # wells arrive faster and faster
-const WELL_GAP_MIN := 34.0
+const FIRST_WELL_BEAT := 16
+const WELL_GAP_START := 22.0
+const WELL_GAP_DECAY := 1.2     # wells arrive faster and faster
+const WELL_GAP_MIN := 13.0
 
-const FIRST_BUDGET_BEAT := 100
-const BUDGET_GAP_START := 130.0
-const BUDGET_GAP_GROWTH := 20.0  # ...while veins arrive slower and slower
+const FIRST_BUDGET_BEAT := 34
+const BUDGET_GAP_START := 46.0
+const BUDGET_GAP_GROWTH := 8.0  # ...while veins arrive slower and slower
 
 const SNAP := 48.0             # magnetic radius; imprecise thumbs feel precise
 const LONG_PRESS := 0.32
@@ -52,6 +55,7 @@ const DRAG_SLOP := 12.0
 @onready var drain: ColorRect = $Fx/Drain
 @onready var death_ui: Control = $Ui/Death
 @onready var score_label: Label = $Ui/Death/Score
+@onready var best_label: Label = $Ui/Death/Best
 @onready var budget_hint: Node2D = $BudgetHint
 
 var rng := RandomNumberGenerator.new()
@@ -67,6 +71,18 @@ var misses := 0
 var alive := false
 ## Mirrors Beat.index. The score, and what the harnesses read.
 var beats := 0
+
+## The number to beat. There is no winning in VEIN — every run ends — so the
+## only thing that can pull a player back is their own last best.
+var best := 0
+var lifetime_beats := 0
+var beat_best_this_run := false
+## Ruptures this run. If this stays at zero, trunk capacity never binds and
+## layout still does not matter — the probe watches it for exactly that reason.
+var ruptures := 0
+## Items destroyed on arrival at a node whose buffer was already full. Every one
+## of these is pressure that vanished instead of backing up the network.
+var dropped := 0
 
 var _next_well_beat := FIRST_WELL_BEAT
 var _well_gap := WELL_GAP_START
@@ -100,8 +116,24 @@ func _ready() -> void:
 	death_ui.hide()
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
+	_load_save()
 	start_run(0)
 	_maybe_attach_harness()
+
+
+func _load_save() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load(SAVE_PATH) != OK:
+		return
+	best = int(cfg.get_value("run", "best", 0))
+	lifetime_beats = int(cfg.get_value("run", "lifetime", 0))
+
+
+func _store_save() -> void:
+	var cfg := ConfigFile.new()
+	cfg.set_value("run", "best", best)
+	cfg.set_value("run", "lifetime", lifetime_beats)
+	cfg.save(SAVE_PATH)
 
 
 ## Dev harnesses, driven off the command line so they run inside a normal project
@@ -170,6 +202,8 @@ func start_run(run_seed: int) -> void:
 	fuel = FUEL_CAP
 	misses = 0
 	beats = 0
+	ruptures = 0
+	dropped = 0
 	_rescue = 0.0
 	_drain_amt = 0.0
 	_next_well_beat = FIRST_WELL_BEAT
@@ -177,18 +211,39 @@ func start_run(run_seed: int) -> void:
 	_next_budget_beat = FIRST_BUDGET_BEAT
 	_budget_gap = BUDGET_GAP_START
 
-	var vp := get_viewport_rect().size
+	var vp := design_size()
 	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
 
-	# Two wells to open with. Close enough that the first connection is obvious
-	# and the player learns the verb without being told it.
-	_make_node(VNode.Kind.WELL, Vector2(vp.x * 0.20, vp.y * 0.70))
-	_make_node(VNode.Kind.WELL, Vector2(vp.x * 0.80, vp.y * 0.64))
+	# Two wells to open with, placed relative to the Heart and inside its reach:
+	# the first connection must be obvious, so the player learns the verb by
+	# doing it rather than being told. Anchoring these to the viewport corners
+	# instead would put them out of reach and open the run already lost.
+	# One above, one below. New Wells only spawn within reach of an existing node,
+	# so the network grows outward from these two — seeding both below the Heart
+	# meant it could only ever creep downward and the top third of the screen
+	# stayed empty for the whole run.
+	_make_node(VNode.Kind.WELL, heart.position + Vector2(-142, -118))
+	_make_node(VNode.Kind.WELL, heart.position + Vector2(146, 122))
 
 	death_ui.hide()
 	alive = true
 	Beat.reset()
 	_rebuild_graph()
+
+
+## The playfield, in design space — NOT get_viewport_rect().
+##
+## One screen is the whole world (no pan, no zoom), and the stretch mode maps
+## this rect onto whatever the device is. Reading the live viewport instead
+## breaks the sim wherever the window is not 540x1170: headless reports a square
+## 1170x1170, which pushed every Well past Vein.MAX_LEN and quietly made the
+## probe unwinnable. Layout must not depend on the window, or the seed no longer
+## determines the run.
+func design_size() -> Vector2:
+	return Vector2(
+		float(ProjectSettings.get_setting("display/window/size/viewport_width", 540)),
+		float(ProjectSettings.get_setting("display/window/size/viewport_height", 1170)),
+	)
 
 
 func _make_node(kind: int, pos: Vector2) -> VNode:
@@ -207,7 +262,20 @@ func _on_stopped(total: int) -> void:
 	# our own dilation — blindly writing 1.0 here would stomp the time scale the
 	# dev harnesses set, which silently dropped the probe back to real time.
 	_end_dilation()
+
+	lifetime_beats += total
+	beat_best_this_run = total > best
+	if beat_best_this_run:
+		best = total
+	_store_save()
+
 	score_label.text = "Your heart beat %s times." % _commas(total)
+	# The target. Without something to beat, "one more run" has no hook — and
+	# VEIN has no win state to offer instead.
+	if beat_best_this_run:
+		best_label.text = "Your best yet."
+	else:
+		best_label.text = "Best  %s" % _commas(best)
 	death_ui.show()
 
 
@@ -268,7 +336,7 @@ func appetite(index: int) -> float:
 ## New Wells spawn in awkward places, forcing rerouting. Bias to the lower two
 ## thirds so everything stays in one-thumb reach.
 func _spawn_well() -> void:
-	var vp := get_viewport_rect().size
+	var vp := design_size()
 	var best := Vector2.ZERO
 	var best_score := -INF
 
@@ -282,6 +350,9 @@ func _spawn_well() -> void:
 		for n in nodes:
 			near = minf(near, p.distance_to(n.position))
 		if near < 104.0:
+			continue
+		# Must be joinable to *something*, or it is scenery rather than a choice.
+		if near > Vein.MAX_LEN * 0.92:
 			continue
 		# Prefer awkward: far from the heart, but not hugging another node.
 		var s := p.distance_to(heart.position) * 0.6 + near * 0.4
@@ -331,15 +402,44 @@ func _find_vein(a: VNode, b: VNode) -> Vein:
 	return null
 
 
+## Can these two ever be joined directly? Reach is the constraint the whole
+## puzzle rests on — see Vein.MAX_LEN.
+func in_reach(a: VNode, b: VNode) -> bool:
+	return a.position.distance_to(b.position) <= Vein.MAX_LEN
+
+
 func _add_vein(a: VNode, b: VNode) -> void:
-	if a == b or not can_afford() or _find_vein(a, b) != null:
+	if a == b or not can_afford() or _find_vein(a, b) != null or not in_reach(a, b):
 		return
 	var v: Vein = VeinScene.new()
 	# Alternate the bend so parallel veins fan out instead of overlapping.
 	v.setup(a, b, 1.0 if veins.size() % 2 == 0 else -1.0)
+	v.ruptured.connect(_on_ruptured)
 	vein_layer.add_child(v)
 	veins.append(v)
 	_rebuild_graph()
+
+
+## A trunk carried more than it could bear. The dots in flight scatter and die,
+## the vein is destroyed, and the budget point comes back — so a rupture is a
+## loss of throughput and position, never of resources you can't rebuild.
+func _on_ruptured(v: Vein) -> void:
+	ruptures += 1
+	var pts: Array[Vector2] = []
+	var kinds: Array[int] = []
+	for d in v.dots:
+		pts.append(v.sample(d.t))
+		kinds.append(d.kind)
+
+	if not pts.is_empty():
+		var burst: Node2D = BurstScene.new()
+		vein_layer.add_child(burst)
+		burst.spawn(pts, kinds, rng.randi())
+
+	if OS.has_feature("mobile"):
+		Input.vibrate_handheld(180)
+
+	_remove_vein(v)
 
 
 func _remove_vein(v: Vein) -> void:
@@ -374,6 +474,7 @@ func _process(delta: float) -> void:
 	if not alive:
 		return
 
+	heart.fuel_ratio = fuel / FUEL_CAP
 	_push_from_nodes()
 	for v in veins:
 		for kind in v.advance(delta):
@@ -390,14 +491,40 @@ func _push_from_nodes() -> void:
 			continue
 		var outs: Array[Vein] = []
 		for v in veins:
-			if v.source() == n and v.has_room():
+			if v.source() == n:
 				outs.append(v)
 		if outs.is_empty():
 			continue
-		var pick := outs[n.next_out(outs.size())]
-		if pick.inject(n.buffer[0]):
-			n.buffer.remove_at(0)
-			n.pulse = 1.0
+
+		# Sample the backlog BEFORE pushing: the push below removes an item, so
+		# checking afterwards always reads one short of full and never trips.
+		var was_full := n.buffer.size() >= VNode.BUFFER_CAP
+
+		# Round-robin so a node with two downhill veins splits between them, but
+		# fall through to the others rather than stalling on a full one.
+		var placed := false
+		var start := n.next_out(outs.size())
+		for i in outs.size():
+			var v: Vein = outs[(start + i) % outs.size()]
+			if v.inject(n.buffer[0]):
+				n.buffer.remove_at(0)
+				n.pulse = 1.0
+				placed = true
+				break
+
+		# Strain is "this node cannot clear its backlog through these veins", not
+		# "nothing moved this frame". A node pushes at most one item per frame but
+		# can receive several from its children in the same frame, so it sits
+		# permanently full — dropping the excess — while still placing one item
+		# every frame. Keying off `placed` alone therefore reported healthy veins
+		# right up until the run starved.
+		# Only a genuinely full backlog counts as strain. A failed push on its own
+		# does not: items must sit DOT_SPACING apart, so every vein refuses on
+		# most frames simply waiting for the gap to open, and treating that as
+		# blockage ruptured healthy direct links carrying a quarter of capacity.
+		if was_full:
+			for v in outs:
+				v.note_blocked()
 
 
 func _deliver(kind: int, to: VNode) -> void:
@@ -412,11 +539,8 @@ func _deliver(kind: int, to: VNode) -> void:
 				Input.vibrate_handheld(120)
 		fuel = minf(FUEL_CAP, fuel + FUEL_PER_ITEM)
 		to.pulse = 1.0
-	else:
-		if not to.take(kind):
-			# Nowhere to put it. Weekend 2 turns this into a rupture; for now the
-			# item is simply lost and the pips upstream stack visibly.
-			pass
+	elif not to.take(kind):
+		dropped += 1
 
 
 # --- Input: one thumb, one verb ---------------------------------------------
@@ -496,14 +620,25 @@ func _on_release(p: Vector2) -> void:
 func _draw_drag() -> void:
 	if _drag_from == null or not alive:
 		return
+
+	# How far this node can reach. Only shown while dragging — the constraint
+	# appears exactly when it is the question being asked, and never otherwise.
+	var reach := Palette.HEART
+	reach.a = 0.10
+	drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN, 0.0, TAU, 64, reach, 1.5, true)
+
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
-	var col := Palette.VEIN_LIVE
+	var stretched := _drag_from.position.distance_to(end) > Vein.MAX_LEN
+
+	var col := Palette.VEIN_STRAINED if stretched else Palette.VEIN_LIVE
 	col.a = 0.75
 	drag_layer.draw_line(_drag_from.position, end, col, 3.0, true)
 
-	var ok := to != null and to != _drag_from and can_afford() and _find_vein(_drag_from, to) == null
-	if to != null:
-		var ring := Palette.WARM if ok else Palette.VEIN_LIVE
-		ring.a = 0.8
-		drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU, 28, ring, 2.0, true)
+	if to == null:
+		return
+	var ok := to != _drag_from and can_afford() and _find_vein(_drag_from, to) == null \
+		and in_reach(_drag_from, to)
+	var ring := Palette.WARM if ok else Palette.VEIN_STRAINED
+	ring.a = 0.85
+	drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU, 28, ring, 2.0, true)

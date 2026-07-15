@@ -71,12 +71,23 @@ func _record() -> void:
 			wells += 1
 			if n.depth >= 0:
 				fed += 1
+	var peak := 0.0
+	var heart_degree := 0
 	for v in _game.veins:
 		if v.dir == Vein.Dir.INERT:
 			inert += 1
+		peak = maxf(peak, v.peak_stress)
+		if v.a == _game.heart or v.b == _game.heart:
+			heart_degree += 1
 
-	print("run %d: beat %5d | appetite %5.2f | budget %2d | wells %2d (%d fed) | inert veins %d"
-		% [_idx + 1, beats, _game.appetite(beats), _game.budget, wells, fed, inert])
+	var full_buffers := 0
+	for n in _game.nodes:
+		if n.kind != VNode.Kind.HEART and n.depth >= 0 and n.buffer.size() >= VNode.BUFFER_CAP:
+			full_buffers += 1
+
+	print("run %d: beat %4d | budget %2d | wells %2d (%d fed) | heart-links %d | peak stress %.2f/6.0s | backed-up %d | dropped %d | ruptures %d"
+		% [_idx + 1, beats, _game.budget, wells, fed, heart_degree, peak, full_buffers,
+			_game.dropped, _game.ruptures])
 
 	_idx += 1
 	if _idx >= runs:
