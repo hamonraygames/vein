@@ -1,0 +1,60 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://scripts/game.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/budget_hint.gd" id="2"]
+[ext_resource type="Shader" path="res://assets/shaders/drain.gdshader" id="3"]
+[ext_resource type="Script" path="res://scripts/reheart.gd" id="4"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = ExtResource("3")
+shader_parameter/drain = 0.0
+shader_parameter/warm = 0.0
+
+[node name="Game" type="Node2D"]
+script = ExtResource("1")
+
+[node name="VeinLayer" type="Node2D" parent="."]
+
+[node name="NodeLayer" type="Node2D" parent="."]
+
+[node name="DragLayer" type="Node2D" parent="."]
+z_index = 15
+
+[node name="BudgetHint" type="Node2D" parent="."]
+z_index = 20
+script = ExtResource("2")
+
+[node name="Fx" type="CanvasLayer" parent="."]
+layer = 1
+
+[node name="Drain" type="ColorRect" parent="Fx"]
+material = SubResource("ShaderMaterial_1")
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Ui" type="CanvasLayer" parent="."]
+layer = 2
+
+[node name="Death" type="Control" parent="Ui"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Reheart" type="Control" parent="Ui/Death"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("4")
+
+[node name="Score" type="Label" parent="Ui/Death"]
+anchor_left = 0.0
+anchor_top = 0.42
+anchor_right = 1.0
+anchor_bottom = 0.5
+theme_override_colors/font_color = Color(0.961, 0.949, 0.918, 0.85)
+theme_override_font_sizes/font_size = 26
+text = "Your heart beat 0 times."
+horizontal_alignment = 1
+vertical_alignment = 1
+mouse_filter = 2

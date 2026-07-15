@@ -1,0 +1,10 @@
+# Godot 4 import cache / generated data
+.godot/
+/android/
+export_presets.cfg
+
+# Build output
+/build/
+*.tmp
+
+.DS_Store

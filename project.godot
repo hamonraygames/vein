@@ -1,0 +1,40 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="VEIN"
+run/main_scene="res://scenes/game.tscn"
+config/features=PackedStringArray("4.7", "Mobile")
+config/icon="res://icon.svg"
+
+[autoload]
+
+Beat="*res://scripts/beat.gd"
+
+[display]
+
+window/size/viewport_width=540
+window/size/viewport_height=1170
+window/size/window_width_override=432
+window/size/window_height_override=936
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=1
+
+[input_devices]
+
+pointing/emulate_touch_from_mouse=true
+
+[rendering]
+
+renderer/rendering_method="mobile"
+anti_aliasing/quality/msaa_2d=2
+environment/defaults/default_clear_color=Color(0.051, 0.051, 0.063, 1)
