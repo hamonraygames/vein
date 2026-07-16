@@ -112,6 +112,18 @@ var mutation_id: int = 0
 ## both — it is a fork, not two separate pickups.
 var mutation_pair: VNode = null
 
+## Forge/Loom only: true for the first Forge and the first Loom the player
+## ever sees (persisted across runs in game.gd's save, see seen_forge/
+## seen_loom) — plays a short looping demonstration of its own recipe before
+## settling into the normal idle rendering. Playtest: the static recipe pips
+## alone ("what is the red triangle, I don't know what it's about") were not
+## enough — this shows the exact motion the player will later cause
+## themselves, without a word of text.
+var teach := false
+var _teach_t := 0.0
+const TEACH_REPS := 3
+const TEACH_REP_TIME := 1.8
+
 ## Heart only: how full it is, 0..1. Drawn as a level inside the hexagon so the
 ## goal of the game is legible on sight — the vessel is emptying, fill it. This
 ## is the one thing the player must understand and it must never need a number.
@@ -154,6 +166,10 @@ func _process(delta: float) -> void:
 	delta = minf(delta, Beat.MAX_DELTA)
 	pulse = maxf(0.0, pulse - delta * 3.2)
 	smelt_flash = maxf(0.0, smelt_flash - delta * 2.4)
+	if teach:
+		_teach_t += delta
+		if _teach_t >= TEACH_REPS * TEACH_REP_TIME:
+			teach = false
 	if kind == Kind.WELL or corrupted:
 		_emit_accum += delta
 		var period := CORRUPT_PERIOD if corrupted else WELL_PERIOD
@@ -517,6 +533,8 @@ func _draw_tri(r: float, col: Color) -> void:
 	draw_polyline(outline, edge, 2.5 + smelt_flash * 2.0, true)
 
 	_draw_forge_recipe(r)
+	if teach:
+		_draw_teach_demo(r, Res.RAW)
 
 	# The output leaving: a ring blooming outward on the beat it was made.
 	if smelt_flash > 0.0:
@@ -541,6 +559,8 @@ func _draw_square(r: float, col: Color) -> void:
 	draw_rect(rect, edge, false, 2.5 + smelt_flash * 2.0)
 
 	_draw_loom_recipe(r)
+	if teach:
+		_draw_teach_demo(r, Res.REFINED)
 
 	if smelt_flash > 0.0:
 		var halo := Palette.CLOTH
@@ -548,6 +568,39 @@ func _draw_square(r: float, col: Color) -> void:
 		var h := side * (0.72 + (1.0 - smelt_flash) * 0.55)
 		draw_rect(Rect2(Vector2(-h, -h), Vector2(h * 2.0, h * 2.0)), halo, false,
 			2.0 + smelt_flash * 2.0)
+
+
+## Loops a few times on this tool's first-ever appearance: two ghost dots of
+## `input_res` fall in from outside, the node flashes, one ghost dot of
+## `produces` (the output) leaves. This is the exact motion a real feed will
+## later cause — showing it before the player has built anything teaches the
+## recipe without a word, where the static recipe pips alone did not.
+func _draw_teach_demo(r: float, input_res: int) -> void:
+	var phase := fmod(_teach_t, TEACH_REP_TIME) / TEACH_REP_TIME
+
+	if phase < 0.55:
+		var t := phase / 0.55
+		var ease := t * t
+		var col := Palette.of_res(input_res)
+		col.a = 0.85 * (1.0 - ease * 0.3)
+		for side in [-1.0, 1.0]:
+			var from := Vector2(side * r * 0.9, -r * 2.6)
+			var to := Vector2(side * r * 0.22, -r * 0.1)
+			var p := from.lerp(to, ease)
+			draw_circle(p, 3.2, col)
+	elif phase < 0.65:
+		var burst := 1.0 - (phase - 0.55) / 0.10
+		var ring := Palette.WARM
+		ring.a = burst * 0.55
+		draw_arc(Vector2.ZERO, r * 1.15, 0.0, TAU, 24, ring, 2.0 + burst * 2.0, true)
+	else:
+		var t2 := (phase - 0.65) / 0.35
+		var ease2 := t2 * t2
+		var col2 := Palette.of_res(produces)
+		col2.a = 0.9 * (1.0 - ease2)
+		var from2 := Vector2(0.0, r * 0.1)
+		var to2 := Vector2(0.0, r * 2.6)
+		draw_circle(from2.lerp(to2, ease2), 3.6, col2)
 
 
 func _draw_forge_recipe(r: float) -> void:

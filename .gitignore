@@ -1,7 +1,9 @@
 # Godot 4 import cache / generated data
 .godot/
 /android/
-export_presets.cfg
+# export_presets.cfg is tracked (needed by CI to know the Web export preset)
+# — checked for secrets before un-ignoring it; all code_sign_identity/
+# keystore fields are empty, nothing here is sensitive.
 
 # Build output
 /build/

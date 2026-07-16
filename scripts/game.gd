@@ -128,13 +128,19 @@ const WRONG_SHAPE_FUEL := 0.05
 ## early, so extra supply buys nothing and mastery stops paying. Same failure as
 ## the old exponential curve, wearing a different hat.
 ##
-## Elden Ring doesn't raise the floor for the whole game; it demands you play
-## correctly IMMEDIATELY and then pays mastery for hours. So the Heart now OPENS
-## nearly empty: connect both Wells in the first seconds or die, no grace period,
-## nothing explained. That is a slap skill can answer, and it leaves the curve's
-## headroom intact.
-const START_FUEL := 0.95
-const APPETITE_BASE := 0.50
+## REVERSED (July 2026, real playtest, not a probe number): "the Heart now
+## OPENS nearly empty, no grace period" above was the previous answer, and it
+## was wrong for a first-time human even though the bot handled it fine — a
+## bot doesn't need a moment to read the board, aim a thumb, and learn the one
+## verb. "Connect both Wells or die in the first two beats" reads as "the game
+## is just hard," not "I am bad at this and will get better," which is the
+## entire hook a run-based game needs. The fix is NOT the same mistake as
+## raising BASE to 0.9: that made the whole CURVE steeper (appetite forever
+## after also punished), while this only widens the OPENING buffer — the
+## late-game slope (APPETITE_RATE, unchanged) is what still has to produce the
+## skill gap, and it does (see probe numbers below). Slow start, hard finish.
+const START_FUEL := 2.6
+const APPETITE_BASE := 0.22
 const APPETITE_RATE := 0.024    # per second
 
 ## Seconds of exertion before the heart is fully racing.
@@ -304,6 +310,11 @@ var beats := 0
 var best := 0
 var lifetime_beats := 0
 var beat_best_this_run := false
+## Persisted across runs (see _load_save/_store_save) — drives VNode.teach so
+## the recipe demonstration plays on the first Forge/Loom the player EVER
+## sees, not every run once they already understand it.
+var seen_forge := false
+var seen_loom := false
 ## Ruptures this run. If this stays at zero, trunk capacity never binds and
 ## layout still does not matter — the probe watches it for exactly that reason.
 var ruptures := 0
@@ -377,6 +388,10 @@ var _touch_time := 0.0
 var _touching := false
 var _dilating := false
 var _moved := false
+## What the press landed on, before we know whether it turns into a drag or
+## stays a stationary tap — see _on_press/_on_move/_on_release.
+var _press_node: VNode = null
+var _press_vein: Vein = null
 
 var _rescue := 0.0
 var _drain_amt := 0.0
@@ -412,6 +427,8 @@ func _load_save() -> void:
 	lifetime_beats = int(cfg.get_value("run", "lifetime", 0))
 	if int(cfg.get_value("run", "tuning", 0)) == TUNING_VERSION:
 		best = int(cfg.get_value("run", "best", 0))
+	seen_forge = bool(cfg.get_value("run", "seen_forge", false))
+	seen_loom = bool(cfg.get_value("run", "seen_loom", false))
 
 
 func _store_save() -> void:
@@ -419,6 +436,8 @@ func _store_save() -> void:
 	cfg.set_value("run", "best", best)
 	cfg.set_value("run", "lifetime", lifetime_beats)
 	cfg.set_value("run", "tuning", TUNING_VERSION)
+	cfg.set_value("run", "seen_forge", seen_forge)
+	cfg.set_value("run", "seen_loom", seen_loom)
 	cfg.save(SAVE_PATH)
 
 
@@ -768,9 +787,24 @@ func _spawn_node(kind: int) -> void:
 	# sampling over the whole rect also wasted most candidates, since anything
 	# beyond MAX_LEN of everything is unjoinable. Seeding from an existing node
 	# at a random bearing fills the board evenly and every candidate is reachable
-	# by construction.
+	# by construction — reachable from the ANCHOR, at least.
+	#
+	# The anchor pool used to be every node on the board, connected or not.
+	# That let a new Well/tool spawn off an already-orphaned node, growing an
+	# island that could end up in reach of nothing the Heart's live network
+	# ever touches — reported as "sometimes there's no possible move at all."
+	# Anchoring to the connected component only guarantees every new node is
+	# reachable from something you can actually build to right now (the Heart
+	# itself always qualifies, so this pool is never empty).
+	var connected: Array[VNode] = []
+	for n in nodes:
+		if n.depth >= 0:
+			connected.append(n)
+	if connected.is_empty():
+		connected = nodes
+
 	for _i in 64:
-		var anchor: VNode = nodes[rng.randi() % nodes.size()]
+		var anchor: VNode = connected[rng.randi() % connected.size()]
 		var bearing := rng.randf() * TAU
 		var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.9)
 		var p := anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
@@ -802,6 +836,14 @@ func _spawn_node(kind: int) -> void:
 	var n := _make_node(kind, best)
 	if kind == VNode.Kind.BOOST:
 		n.boost_effect = _roll_boost()
+	elif kind == VNode.Kind.FORGE and not seen_forge:
+		seen_forge = true
+		n.teach = true
+		_store_save()
+	elif kind == VNode.Kind.LOOM and not seen_loom:
+		seen_loom = true
+		n.teach = true
+		_store_save()
 	_rebuild_graph()
 
 
@@ -1475,13 +1517,28 @@ func _on_press(p: Vector2) -> void:
 	_moved = false
 	_touch_start = p
 	_drag_pos = p
-	_drag_from = _node_at(p)
+	# Don't commit to "start a new vein from this node" yet. Near the Heart,
+	# every vein converges inside its own 48px SNAP radius — that radius
+	# exists to make DRAGGING forgiving, but it used to also swallow a
+	# stationary tap aimed at cutting one of those veins (18px HIT_RADIUS,
+	# much tighter) before the vein hit-test ever got a look, so the tap
+	# silently no-opped via _add_vein(heart, heart). Recording both
+	# candidates and deciding at release/move time (see below) fixes that
+	# without changing how an actual drag behaves.
+	_press_node = _node_at(p)
+	_press_vein = _vein_at(p)
+	_drag_from = null
 
 
 func _on_move(p: Vector2) -> void:
 	_drag_pos = p
-	if p.distance_to(_touch_start) > DRAG_SLOP:
+	if not _moved and p.distance_to(_touch_start) > DRAG_SLOP:
 		_moved = true
+		# The gesture just became a real drag: commit to "new connection from
+		# the pressed node" even if a vein also happened to be under the
+		# initial touch point — near the Heart that's the common case, not
+		# an edge case, since veins fan out from point-blank range.
+		_drag_from = _press_node
 
 
 func _on_release(p: Vector2) -> void:
@@ -1499,9 +1556,11 @@ func _on_release(p: Vector2) -> void:
 		return
 
 	if not _moved:
-		var v := _vein_at(p)
-		if v != null:
-			_remove_vein(v, true)
+		# A stationary tap: prefer cutting whatever vein was precisely under
+		# the thumb over starting a connection from a node that merely
+		# caught it in its wider magnetic radius.
+		if _press_vein != null:
+			_remove_vein(_press_vein, true)
 
 
 ## The provisional vein under the thumb, plus a highlight on whatever it would

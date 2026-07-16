@@ -1,0 +1,76 @@
+name: Deploy web build
+
+# Godot's web export does NOT content-hash filenames (index.wasm/.pck/.js are
+# the same name every build), so every asset below uses a short,
+# must-revalidate cache instead of "immutable" and the job always finishes
+# with a CloudFront invalidation. Skipping either leaves returning visitors
+# on a stale WASM binary against a newer .pck under an unchanged URL — see
+# deploy_web.sh, which this mirrors for local/manual deploys.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC -> AWS, no long-lived secret involved
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: barichello/godot-ci:4.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export Web build
+        run: |
+          mkdir -p build/web
+          godot --headless --export-release "Web" build/web/index.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: build/web
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-build
+          path: build/web
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::393903547387:role/vein-github-actions-deploy
+          aws-region: eu-north-1
+
+      - name: Sync to S3 and invalidate CloudFront
+        env:
+          BUCKET: vein-web-393903547387
+          DISTRIBUTION_ID: E1RKD9V8MS5VYU
+        run: |
+          cd build/web
+          aws s3 sync . "s3://$BUCKET/" --delete \
+            --exclude "*.wasm" --exclude "*.pck" --exclude "*.js" --exclude "*.png" --exclude "*.html" \
+            --cache-control "public, max-age=3600, must-revalidate"
+
+          aws s3 cp index.wasm "s3://$BUCKET/index.wasm" \
+            --content-type "application/wasm" --cache-control "public, max-age=3600, must-revalidate"
+          aws s3 cp index.pck "s3://$BUCKET/index.pck" \
+            --content-type "application/octet-stream" --cache-control "public, max-age=3600, must-revalidate"
+          for f in index.js index.audio.worklet.js index.audio.position.worklet.js; do
+            aws s3 cp "$f" "s3://$BUCKET/$f" \
+              --content-type "application/javascript" --cache-control "public, max-age=3600, must-revalidate"
+          done
+          for f in index.png index.icon.png index.apple-touch-icon.png; do
+            aws s3 cp "$f" "s3://$BUCKET/$f" \
+              --content-type "image/png" --cache-control "public, max-age=3600, must-revalidate"
+          done
+          aws s3 cp index.html "s3://$BUCKET/index.html" \
+            --content-type "text/html" --cache-control "public, max-age=60"
+
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
