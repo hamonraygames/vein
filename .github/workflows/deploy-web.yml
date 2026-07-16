@@ -61,6 +61,16 @@ jobs:
           name: web-build
           path: build/web
 
+      # TEMPORARY: decode the actual OIDC token GitHub issues so the trust
+      # policy's sub/aud conditions can be matched exactly instead of by
+      # guesswork — remove once configure-aws-credentials succeeds.
+      - name: Debug OIDC claims
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq . || \
+          echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq .
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::393903547387:role/vein-github-actions-deploy
