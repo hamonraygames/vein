@@ -20,6 +20,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: barichello/godot-ci:4.7
+    env:
+      # GitHub Actions overrides HOME to /github/home inside container: jobs,
+      # but this image's export templates are baked in under root's actual
+      # home (/root/.local/share/godot/export_templates/). Godot resolves
+      # the template search path from $HOME, so left at the GH Actions
+      # default it looks in an empty directory and fails with "No export
+      # template found" even though the templates are right there in the
+      # image. Confirmed via `docker run barichello/godot-ci:4.7` directly
+      # (HOME=/root, templates present) vs the real failing run's log
+      # (looked under /github/home instead).
+      HOME: /root
     steps:
       - uses: actions/checkout@v4
 
