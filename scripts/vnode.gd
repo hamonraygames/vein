@@ -4,7 +4,7 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-enum Kind { HEART, WELL, FORGE, LOOM, BOOST }
+enum Kind { HEART, WELL, FORGE, LOOM, BOOST, MUTATION }
 enum Res { RAW, REFINED, CLOTH, VOID }
 
 ## Tools condense two inputs into one stronger output. A Forge eats RAW and makes
@@ -61,6 +61,7 @@ const WITHER_WARN_AT := 0.6
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
 const BOOST_RADIUS := 16.0
+const MUTATION_RADIUS := 19.0
 const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
@@ -104,6 +105,13 @@ var orphan_age := 0.0
 ## the roll comes from the seeded run RNG and stays deterministic.
 var boost_effect: int = 0
 
+## Mutation only: which permanent perk this choice grants (game.gd's Mutation
+## enum, referenced here only as a plain int to avoid a circular preload).
+var mutation_id: int = 0
+## Mutation only: the other half of this choice. Taking either one removes
+## both — it is a fork, not two separate pickups.
+var mutation_pair: VNode = null
+
 ## Heart only: how full it is, 0..1. Drawn as a level inside the hexagon so the
 ## goal of the game is legible on sight — the vessel is emptying, fill it. This
 ## is the one thing the player must understand and it must never need a number.
@@ -130,6 +138,8 @@ func radius() -> float:
 		return HEART_RADIUS
 	if kind == Kind.BOOST:
 		return BOOST_RADIUS
+	if kind == Kind.MUTATION:
+		return MUTATION_RADIUS
 	return RADIUS
 
 
@@ -173,7 +183,7 @@ func _process(delta: float) -> void:
 		fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
 	modulate.a = clampf(fade, 0.0, 1.0)
 
-	if kind == Kind.BOOST:
+	if kind == Kind.BOOST or kind == Kind.MUTATION:
 		_boost_pulse += delta
 		pulse = maxf(pulse, 0.35 + 0.35 * sin(_boost_pulse * 3.4))
 
@@ -240,13 +250,19 @@ func reserve_ratio() -> float:
 
 
 func take(kind_in: int) -> bool:
-	# Tools cannot launder rot into food — VOID passes straight through them and
-	# on to the Heart, so routing poison through equipment is not an escape hatch.
 	if _accepts_tool_input(kind_in):
 		if intake.size() >= BUFFER_CAP:
 			return false
 		intake.append(kind_in)
 		return true
+	# A Forge/Loom fed the wrong raw material (e.g. RAW wired straight into a
+	# Loom, skipping the Forge) is refused, not passed through as phantom
+	# cargo — otherwise it silently rides the output buffer untouched and
+	# reaches the Heart still mislabeled, which read as "I built the chain and
+	# died anyway." VOID is the one deliberate exception: tools cannot launder
+	# rot into food, so poison still passes straight through to the Heart.
+	if (kind == Kind.FORGE or kind == Kind.LOOM) and kind_in != Res.VOID:
+		return false
 	if buffer.size() >= BUFFER_CAP:
 		return false
 	buffer.append(kind_in)
@@ -294,6 +310,7 @@ func _draw() -> void:
 		Kind.FORGE: _draw_tri(r, col)
 		Kind.LOOM: _draw_square(r, col)
 		Kind.BOOST: _draw_boost(r)
+		Kind.MUTATION: _draw_mutation(r)
 		_: _draw_ring(r, col)
 
 	_draw_buffer(r, col)
@@ -400,6 +417,63 @@ func _draw_boost(r: float) -> void:
 	var halo := Palette.BOOST
 	halo.a = 0.10 + 0.06 * sin(spin * 2.3)
 	draw_arc(Vector2.ZERO, r * 2.0, 0.0, TAU, 28, halo, 1.4, true)
+
+
+## A Mutation: a slow diamond, always spawned in a pair. Taking either one
+## removes both — a fork, not a freebie, so its silhouette must read as
+## "deliberate choice" rather than "gift" even though it shares Boost's warm
+## hue and drag-to-trigger verb. The inner mark (see _draw_mutation_mark) is
+## the only thing distinguishing which perk this half of the fork grants.
+func _draw_mutation(r: float) -> void:
+	var s := r * 1.15
+	var spin := float(Time.get_ticks_msec()) * 0.0009
+	var dia := PackedVector2Array()
+	for i in 4:
+		var a := TAU * (float(i) / 4.0) + spin + PI * 0.25
+		dia.append(Vector2(cos(a), sin(a)) * s)
+	dia.append(dia[0])
+
+	var fill := Palette.WARM
+	fill.a = 0.12 + pulse * 0.22
+	draw_colored_polygon(dia, fill)
+	var edge := Palette.WARM
+	edge.a = 0.65 + pulse * 0.3
+	draw_polyline(dia, edge, 2.2 + pulse * 1.3, true)
+
+	var halo := Palette.WARM
+	halo.a = 0.08 + 0.05 * sin(spin * 2.1)
+	draw_arc(Vector2.ZERO, r * 1.8, 0.0, TAU, 24, halo, 1.2, true)
+
+	_draw_mutation_mark(r * 0.42)
+
+
+## Shape-only, per the palette rule ("colour is a redundant channel"). Learned
+## by feel over repeat runs, same as a Forge's triangle or a Loom's square.
+func _draw_mutation_mark(s: float) -> void:
+	var col := Palette.WARM
+	col.a = 0.9
+	match mutation_id:
+		0: # thick trunks — two bold parallel bars, a fat pipe
+			draw_line(Vector2(-s, -s * 0.35), Vector2(s, -s * 0.35), col, 2.2)
+			draw_line(Vector2(-s, s * 0.35), Vector2(s, s * 0.35), col, 2.2)
+		1: # long reach — a four-point burst, reaching outward
+			for i in 4:
+				var a := TAU * float(i) / 4.0
+				draw_line(Vector2.ZERO, Vector2(cos(a), sin(a)) * s * 1.3, col, 2.0)
+		2: # reservoir — a single full droplet
+			draw_circle(Vector2.ZERO, s * 0.62, col)
+		3: # rapid pulse — a heartbeat blip
+			var pts := PackedVector2Array([
+				Vector2(-s, 0.0), Vector2(-s * 0.35, 0.0), Vector2(-s * 0.1, -s),
+				Vector2(s * 0.1, s), Vector2(s * 0.35, 0.0), Vector2(s, 0.0),
+			])
+			draw_polyline(pts, col, 1.8, true)
+		_: # steady hands — a calm, wide wave
+			var pts := PackedVector2Array()
+			for i in 9:
+				var t := float(i) / 8.0
+				pts.append(Vector2(lerpf(-s, s, t), sin(t * TAU) * s * 0.4))
+			draw_polyline(pts, col, 1.8, true)
 
 
 ## A spent Well, gone necrotic: cold, jagged, and beating out of time with you.

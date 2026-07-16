@@ -75,6 +75,12 @@ var peak_stress := 0.0
 var tempo_grade := 0
 var _blocked := false
 
+## Baked in at creation from the run's THICK_TRUNKS mutation state (see
+## game.gd's _mut_capacity_mult), same as tempo_grade — a vein you draw after
+## taking the perk carries more; one you already built does not retroactively
+## thicken, so the choice is felt as "rebuild around this," not a free stat.
+var capacity_mult := 1.0
+
 
 func setup(from: VNode, to: VNode, bend_sign: float) -> void:
 	a = from
@@ -139,8 +145,9 @@ func sink() -> VNode:
 func has_room() -> bool:
 	if dir == Dir.INERT or length <= 0.0:
 		return false
+	var spacing := DOT_SPACING / maxf(capacity_mult, 0.01)
 	for d in dots:
-		if d.t * length < DOT_SPACING:
+		if d.t * length < spacing:
 			return false
 	return true
 
@@ -199,7 +206,8 @@ func advance(delta: float) -> Array[int]:
 			keep.append(d)
 	dots = keep
 
-	var occupancy := clampf(float(dots.size()) * DOT_SPACING / maxf(length, 1.0), 0.0, 1.0)
+	var occupancy := clampf(
+		float(dots.size()) * (DOT_SPACING / maxf(capacity_mult, 0.01)) / maxf(length, 1.0), 0.0, 1.0)
 	peak_occupancy = maxf(peak_occupancy, occupancy)
 	_flow = _smooth(_flow, occupancy, 3.0, delta)
 

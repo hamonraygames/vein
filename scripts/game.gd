@@ -48,9 +48,18 @@ const CUT_BLEED_BY_DOT := 0.35
 
 ## Tools arrive before the Heart asks for them. Seeing the piece first makes the
 ## demand flip feel like a test, not a hidden rule.
-const FIRST_FORGE_TIME := 10.0
+##
+## FIRST_FORGE_TIME used to be 10.0 against a REFINED flip at t=14 — only 4s to
+## notice the Forge, draw 2 veins, and let material travel + smelt, which the
+## probe showed was unwinnable BY ANYONE: cap=1/2/4 all died within a beat or
+## two of each other (21/26/26-27), seed-independent, because nothing can
+## reach the Heart as REFINED before ~t=18-20 no matter how fast you play.
+## That is a scripted death, not a skill test. Pulled both tools' lead time
+## forward so a fast, correct build can actually beat its flip; the flip
+## itself stays exactly as sudden.
+const FIRST_FORGE_TIME := 4.0
 const FORGE_GAP := 21.0
-const FIRST_LOOM_TIME := 29.0
+const FIRST_LOOM_TIME := 19.0
 const LOOM_GAP := 36.0
 
 ## What the Heart DEMANDS, by run-second. This is the game.
@@ -179,6 +188,57 @@ const BOOST_SURGE_BUDGET := 1
 ## 150s span would be twice the reprieve it used to be.
 const BOOST_EASE_TIME := 4.5
 
+## The Heart mutates. At each of three fixed moments a run offers TWO of these,
+## presented as a pair — see _spawn_mutation_pair — and taking either one
+## removes both, permanently reshaping every system for the rest of the run.
+##
+## This is the answer to "use your talent to plan ahead": DEMAND_TIERS and
+## corruption are things you REACT to, but a mutation is a build decision you
+## make BEFORE you know exactly how the rest of the run will punish it. Every
+## perk pairs a real benefit with a real, felt cost — no free multipliers, per
+## the WRONG_SHAPE_FUEL lesson (an invisible or costless bonus explains
+## nothing and gets ignored). A returning player learns to read the inner mark
+## on sight, the same way a Forge's triangle or a Loom's square are learned,
+## and picks based on which fork suits the network they are mid-building.
+enum Mutation { THICK_TRUNKS, LONG_REACH, RESERVOIR, RAPID_PULSE, STEADY_HANDS }
+
+## Spaced across the run rather than tied 1:1 to DEMAND_TIERS: one early
+## (before the first flip even lands, a foundational bet), one right before
+## REFINED, one with real lead before CLOTH. Three real forks in one run is
+## enough to matter without turning every flip into a shopping trip.
+const MUTATION_TIMES := [3.0, 12.0, 30.0]
+
+## THICK_TRUNKS' cost lands on budget, not appetite, because its benefit
+## (per-vein throughput) is exactly what makes a slower-growing budget bearable
+## — you are trading vein COUNT for vein QUALITY, a direct, legible swap.
+const MUT_THICK_TRUNKS_CAPACITY := 1.6
+const MUT_THICK_TRUNKS_BUDGET_GAP := 1.35
+
+## LONG_REACH's cost lands on appetite because reach is a spatial cheat code
+## (skip a hop, thin the board) — the clock has to bite harder to keep it from
+## trivialising the routing puzzle MAX_LEN exists to create.
+const MUT_LONG_REACH_RANGE := 1.35
+const MUT_LONG_REACH_APPETITE := 1.25
+
+## RESERVOIR trades the wrong-shape safety net away entirely: with more room to
+## bank fuel ahead of a flip, getting caught unprepared should hurt like it
+## used to before WRONG_SHAPE_FUEL existed, not like a further-softened miss.
+const MUT_RESERVOIR_FUEL_CAP := 3.0
+
+## RAPID_PULSE raises score-rate (beats accumulate faster) at the cost of
+## surviving a bad stretch — one fewer missed feeding before the beat stops.
+const MUT_RAPID_PULSE_BPM := 1.22
+const MUT_RAPID_PULSE_MISSES := 1
+## Floor so stacking this perk twice can never make the Heart fatally fragile
+## on a single miss — MISSES_DYING (3) plus one is the least forgiving allowed.
+const MUT_MISSES_FATAL_FLOOR := 4
+
+## STEADY_HANDS widens the window that pays out SYNC_FUEL at all, at the cost
+## of how much a perfect hit is worth — a forgiveness-for-ceiling trade for
+## players who want the rhythm layer to stop punishing imprecise thumbs.
+const MUT_STEADY_HANDS_WINDOW := 1.6
+const MUT_STEADY_HANDS_SYNC_FUEL := 0.55
+
 ## Rot that is never cut does not get to sit there forever as free clutter,
 ## poisoning at your leisure — it collapses outright, taking the asset with it.
 ## This is what makes the board turn over instead of only ever accumulating.
@@ -283,6 +343,22 @@ var _next_boost_time := FIRST_BOOST_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
+var _next_mutation_idx := 0
+
+## Mutation-driven modifiers, all defaulting to a no-op and reset every run in
+## start_run(). Multiplicative, so stacking the same perk twice (two different
+## MUTATION_TIMES can offer the same one) compounds rather than overwrites.
+var _mut_capacity_mult := 1.0
+var _mut_reach_mult := 1.0
+var _mut_budget_gap_mult := 1.0
+var _mut_appetite_rate_mult := 1.0
+var _mut_fuel_cap_bonus := 0.0
+var _mut_wrong_shape_fuel := WRONG_SHAPE_FUEL
+var _mut_misses_fatal_delta := 0
+var _mut_good_window_mult := 1.0
+var _mut_sync_fuel_mult := 1.0
+## Taken this run, for the probe to confirm the fork is actually being reached.
+var mutations_taken := 0
 
 ## Seconds left of an EASE boost. While positive, run_time keeps advancing (the
 ## clock, spawns, tempo, and mix all keep escalating) but the separate
@@ -446,6 +522,17 @@ func start_run(run_seed: int) -> void:
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
+	_next_mutation_idx = 0
+	_mut_capacity_mult = 1.0
+	_mut_reach_mult = 1.0
+	_mut_budget_gap_mult = 1.0
+	_mut_appetite_rate_mult = 1.0
+	_mut_fuel_cap_bonus = 0.0
+	_mut_wrong_shape_fuel = WRONG_SHAPE_FUEL
+	_mut_misses_fatal_delta = 0
+	_mut_good_window_mult = 1.0
+	_mut_sync_fuel_mult = 1.0
+	mutations_taken = 0
 
 	var vp := design_size()
 	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
@@ -550,7 +637,7 @@ func _on_beat(index: int) -> void:
 	elif misses > 0:
 		misses -= 1
 
-	if misses >= MISSES_FATAL:
+	if misses >= MISSES_FATAL + _mut_misses_fatal_delta:
 		Beat.stop()
 		return
 	elif misses >= MISSES_DYING:
@@ -574,7 +661,12 @@ func intensity() -> float:
 ## while an EASE boost is active, when it rises on `_appetite_clock` instead,
 ## which simply stops advancing for BOOST_EASE_TIME seconds.
 func appetite() -> float:
-	return APPETITE_BASE + APPETITE_RATE * _appetite_clock
+	return APPETITE_BASE + APPETITE_RATE * _mut_appetite_rate_mult * _appetite_clock
+
+
+## FUEL_CAP plus whatever RESERVOIR mutations this run has banked.
+func fuel_cap() -> float:
+	return FUEL_CAP + _mut_fuel_cap_bonus
 
 
 ## Drives the spawn and budget clocks. Kept out of _on_beat so a slowing Heart
@@ -618,10 +710,14 @@ func _tick_escalation(delta: float) -> void:
 		_spawn_node(VNode.Kind.BOOST)
 		_next_boost_time += BOOST_GAP
 
+	if _next_mutation_idx < MUTATION_TIMES.size() and run_time >= MUTATION_TIMES[_next_mutation_idx]:
+		_spawn_mutation_pair()
+		_next_mutation_idx += 1
+
 	if run_time >= _next_budget_time:
 		budget += 1
 		_next_budget_time += _budget_gap
-		_budget_gap += BUDGET_GAP_GROWTH
+		_budget_gap += BUDGET_GAP_GROWTH * _mut_budget_gap_mult
 		budget_hint.queue_redraw()
 
 
@@ -736,6 +832,90 @@ func _roll_boost() -> int:
 	return BoostFx.SURGE
 
 
+## Spawns the two halves of one fork, symmetric about the Heart so both are
+## always in easy one-thumb reach — this is a decision the run hands you, not
+## a detour you have to earn like a Boost. Rolled from the seeded rng, same as
+## everything else, so a given seed always offers the same choice.
+func _spawn_mutation_pair() -> void:
+	var pool: Array = [
+		Mutation.THICK_TRUNKS, Mutation.LONG_REACH, Mutation.RESERVOIR,
+		Mutation.RAPID_PULSE, Mutation.STEADY_HANDS,
+	]
+	var i := rng.randi() % pool.size()
+	var id_a: int = pool[i]
+	pool.remove_at(i)
+	var id_b: int = pool[rng.randi() % pool.size()]
+
+	var vp := design_size()
+	var ang := rng.randf() * TAU
+	var a_pos: Vector2 = heart.position + Vector2(cos(ang), sin(ang)) * 96.0
+	var b_pos: Vector2 = heart.position + Vector2(cos(ang + PI), sin(ang + PI)) * 96.0
+	a_pos.x = clampf(a_pos.x, 40.0, vp.x - 40.0)
+	a_pos.y = clampf(a_pos.y, 60.0, vp.y - 60.0)
+	b_pos.x = clampf(b_pos.x, 40.0, vp.x - 40.0)
+	b_pos.y = clampf(b_pos.y, 60.0, vp.y - 60.0)
+
+	var na := _make_node(VNode.Kind.MUTATION, a_pos)
+	var nb := _make_node(VNode.Kind.MUTATION, b_pos)
+	na.mutation_id = id_a
+	nb.mutation_id = id_b
+	na.mutation_pair = nb
+	nb.mutation_pair = na
+	_rebuild_graph()
+
+
+## Applies a chosen perk's permanent, run-long modifiers. Multiplicative and
+## additive on top of whatever earlier mutations already did, so a seed that
+## offers the same perk twice compounds it rather than re-rolling a no-op.
+func _apply_mutation(id: int) -> void:
+	match id:
+		Mutation.THICK_TRUNKS:
+			_mut_capacity_mult *= MUT_THICK_TRUNKS_CAPACITY
+			_mut_budget_gap_mult *= MUT_THICK_TRUNKS_BUDGET_GAP
+		Mutation.LONG_REACH:
+			_mut_reach_mult *= MUT_LONG_REACH_RANGE
+			_mut_appetite_rate_mult *= MUT_LONG_REACH_APPETITE
+		Mutation.RESERVOIR:
+			_mut_fuel_cap_bonus += MUT_RESERVOIR_FUEL_CAP
+			_mut_wrong_shape_fuel = 0.0
+		Mutation.RAPID_PULSE:
+			Beat.bpm_mult *= MUT_RAPID_PULSE_BPM
+			_mut_misses_fatal_delta = maxi(
+				_mut_misses_fatal_delta - MUT_RAPID_PULSE_MISSES,
+				MUT_MISSES_FATAL_FLOOR - MISSES_FATAL)
+		Mutation.STEADY_HANDS:
+			_mut_good_window_mult *= MUT_STEADY_HANDS_WINDOW
+			_mut_sync_fuel_mult *= MUT_STEADY_HANDS_SYNC_FUEL
+
+
+## A vein reaching either half of a fork resolves the WHOLE fork — the road
+## not taken has to visibly vanish, or the choice never reads as a choice.
+func _take_mutation(n: VNode) -> void:
+	_apply_mutation(n.mutation_id)
+	mutations_taken += 1
+
+	var burst: Node2D = BurstScene.new()
+	vein_layer.add_child(burst)
+	var ring: Array[Vector2] = []
+	var kinds: Array[int] = []
+	for i in 10:
+		var a := TAU * float(i) / 10.0
+		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
+		kinds.append(0)
+	burst.spawn(ring, kinds, rng.randi(), Palette.WARM)
+
+	Audio.play("refined", -2.0, 1.5)
+	if OS.has_feature("mobile"):
+		Input.vibrate_handheld(200)
+
+	var sibling := n.mutation_pair
+	n.mutation_pair = null
+	_remove_node(n)
+	if sibling != null and is_instance_valid(sibling):
+		sibling.mutation_pair = null
+		_remove_node(sibling)
+
+
 # --- Graph: everything flows downhill toward demand -------------------------
 
 func _rebuild_graph() -> void:
@@ -773,9 +953,10 @@ func _find_vein(a: VNode, b: VNode) -> Vein:
 
 
 ## Can these two ever be joined directly? Reach is the constraint the whole
-## puzzle rests on — see Vein.MAX_LEN.
+## puzzle rests on — see Vein.MAX_LEN. A LONG_REACH mutation raises the
+## multiplier for the rest of the run.
 func in_reach(a: VNode, b: VNode) -> bool:
-	return a.position.distance_to(b.position) <= Vein.MAX_LEN
+	return a.position.distance_to(b.position) <= Vein.MAX_LEN * _mut_reach_mult
 
 
 func _add_vein(a: VNode, b: VNode) -> void:
@@ -788,6 +969,12 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	# pickup for incidental geometry would just feel arbitrary.
 	if a.kind == VNode.Kind.BOOST or b.kind == VNode.Kind.BOOST:
 		_take_boost(a if a.kind == VNode.Kind.BOOST else b)
+		return
+
+	# A Mutation fork resolves the same way a Boost does: instant, free of the
+	# tempo/crossing rules below, and it never becomes a real edge in the graph.
+	if a.kind == VNode.Kind.MUTATION or b.kind == VNode.Kind.MUTATION:
+		_take_mutation(a if a.kind == VNode.Kind.MUTATION else b)
 		return
 
 	# Crossing BLOCKS the connection — it does not destroy the crossed vein.
@@ -811,6 +998,8 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	# Alternate the bend so parallel veins fan out instead of overlapping.
 	v.setup(a, b, 1.0 if veins.size() % 2 == 0 else -1.0)
 	v.tempo_grade = combo if synced else -1
+	# Baked in at creation, same as tempo_grade — see Vein.capacity_mult.
+	v.capacity_mult = _mut_capacity_mult
 	v.ruptured.connect(_on_ruptured)
 	vein_layer.add_child(v)
 	veins.append(v)
@@ -819,10 +1008,11 @@ func _add_vein(a: VNode, b: VNode) -> void:
 
 func _tempo_action() -> bool:
 	var q := _tempo_quality()
-	if q <= GOOD_WINDOW:
+	if q <= GOOD_WINDOW * _mut_good_window_mult:
 		combo = mini(combo + (2 if q <= PERFECT_WINDOW else 1), COMBO_CAP)
 		_sync_flash = 1.0
-		fuel = clampf(fuel + SYNC_FUEL * (1.0 + float(combo) * 0.08), 0.0, FUEL_CAP)
+		var gain := SYNC_FUEL * _mut_sync_fuel_mult * (1.0 + float(combo) * 0.08)
+		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		Audio.sync_hit(combo, q <= PERFECT_WINDOW)
 		if OS.has_feature("mobile"):
 			Input.vibrate_handheld(30 + combo * 6)
@@ -1013,7 +1203,7 @@ func _process(delta: float) -> void:
 	_tick_escalation(delta)
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
-	heart.fuel_ratio = fuel / FUEL_CAP
+	heart.fuel_ratio = fuel / fuel_cap()
 	_push_from_nodes()
 	for v in veins:
 		for kind in v.advance(delta):
@@ -1222,16 +1412,18 @@ func _deliver(kind: int, to: VNode) -> void:
 		if kind != demand and kind != VNode.Res.VOID:
 			# Wrong shape is wasted, not damaging — so no hurt cue. It gets a
 			# flat, dull "wrong note" via swallow() instead: you hear that it
-			# landed and gave you nothing.
-			gain = WRONG_SHAPE_FUEL
+			# landed and gave you nothing. A RESERVOIR mutation drops this to
+			# zero — more banked fuel, but no safety net at all if you are
+			# caught unprepared.
+			gain = _mut_wrong_shape_fuel
 			wasted += 1
 			combo = 0
 			_bad_tempo_flash = 1.0
-		elif kind != VNode.Res.VOID:
+		elif kind == demand and kind != VNode.Res.VOID:
 			gain *= 1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN
-		fuel = clampf(fuel + gain, 0.0, FUEL_CAP)
+		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		to.pulse = 1.0
-		Audio.swallow(kind, fuel / FUEL_CAP, kind == demand)
+		Audio.swallow(kind, fuel / fuel_cap(), kind == demand)
 		if kind == VNode.Res.VOID:
 			poisoned += 1
 			if OS.has_feature("mobile"):

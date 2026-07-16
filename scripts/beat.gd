@@ -52,6 +52,10 @@ var phase := 0.0
 ## 0..1, raised by the game as appetite escalates.
 var exertion := 0.0
 
+## Set by a RAPID_PULSE mutation — a permanent tempo hike for the rest of the
+## run, on top of exertion's own curve. Reset with everything else in reset().
+var bpm_mult := 1.0
+
 var _accum := 0.0
 var _haptics := false
 
@@ -65,6 +69,7 @@ func reset() -> void:
 	index = 0
 	phase = 0.0
 	exertion = 0.0
+	bpm_mult = 1.0
 	_accum = 0.0
 	state = State.HEALTHY
 	running = true
@@ -92,7 +97,7 @@ func set_exertion(v: float) -> void:
 
 
 func interval() -> float:
-	var bpm := lerpf(BPM_CALM, BPM_MAXED, exertion) * float(RATE_BY_STATE[state])
+	var bpm := lerpf(BPM_CALM, BPM_MAXED, exertion) * bpm_mult * float(RATE_BY_STATE[state])
 	if bpm <= 0.0:
 		return INF
 	return 60.0 / bpm
