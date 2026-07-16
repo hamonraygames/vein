@@ -23,6 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Import project (populates .godot/, which is gitignored)
+        run: godot --headless --editor --quit --path . || true
+        # Godot's own exit code on this warm-up run is unreliable across
+        # versions (it can exit non-zero after a clean import), so this step
+        # is allowed to "fail" — the actual proof it worked is the export
+        # step immediately after either succeeding or not.
+
       - name: Export Web build
         run: |
           mkdir -p build/web
