@@ -61,7 +61,11 @@ const WITHER_WARN_AT := 0.6
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
 const BOOST_RADIUS := 16.0
-const MUTATION_RADIUS := 19.0
+## Bigger than Boost (16) despite the same "one-shot pickup" verb — a
+## Mutation is a permanent, run-defining choice picked once under time
+## pressure with no chance to learn it by feel like a Forge/Loom recipe, so
+## it has to read clearly on the first glance, not the tenth.
+const MUTATION_RADIUS := 24.0
 const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
@@ -111,6 +115,16 @@ var mutation_id: int = 0
 ## Mutation only: the other half of this choice. Taking either one removes
 ## both — it is a fork, not two separate pickups.
 var mutation_pair: VNode = null
+
+## Heart only: every mutation perk taken this run, pushed in from game.gd's
+## active_mutations the moment a fork resolves (same pattern as demand/
+## fuel_ratio below). Drawn orbiting the Heart itself — not a separate HUD
+## tray — because the Heart is the one thing in VEIN that already carries
+## every other piece of run state (fuel level, demand) on its own body, and
+## a permanent rule change belongs on the thing whose rules it changed, the
+## same way Notcoin's coin or Hamster Kombat's hamster visibly wears every
+## upgrade instead of parking them in a sidebar.
+var mutation_marks: Array[int] = []
 
 ## Forge/Loom only: true for the first Forge and the first Loom the player
 ## ever sees (persisted across runs in game.gd's save, see seen_forge/
@@ -362,6 +376,25 @@ func _draw_hex(r: float, col: Color) -> void:
 	draw_polyline(outline, col, 3.0, true)
 
 	_draw_demand(r)
+	_draw_mutation_marks(r)
+
+
+## Every mutation taken this run, orbiting the Heart permanently — the Heart
+## wears every rule change on its own body, same spot every time, so which
+## marks are out there becomes as learnable as the demand glyph itself.
+func _draw_mutation_marks(r: float) -> void:
+	if mutation_marks.is_empty():
+		return
+	var n := mutation_marks.size()
+	for i in n:
+		var a := TAU * (float(i) / float(maxi(n, 5))) - PI * 0.5
+		var p := Vector2(cos(a), sin(a)) * (r + 16.0)
+		var ring := Palette.WARM
+		ring.a = 0.16
+		draw_circle(p, 11.0, ring)
+		var col := Palette.WARM
+		col.a = 0.6 + pulse * 0.2
+		draw_mark(self, mutation_marks[i], p, 6.5, col)
 
 
 ## The shape the Heart is asking for, floating inside it. This is the only
@@ -460,36 +493,40 @@ func _draw_mutation(r: float) -> void:
 	halo.a = 0.08 + 0.05 * sin(spin * 2.1)
 	draw_arc(Vector2.ZERO, r * 1.8, 0.0, TAU, 24, halo, 1.2, true)
 
-	_draw_mutation_mark(r * 0.42)
+	draw_mark(self, mutation_id, Vector2.ZERO, r * 0.62, Palette.WARM)
 
 
-## Shape-only, per the palette rule ("colour is a redundant channel"). Learned
-## by feel over repeat runs, same as a Forge's triangle or a Loom's square.
-func _draw_mutation_mark(s: float) -> void:
-	var col := Palette.WARM
-	col.a = 0.9
-	match mutation_id:
+## Shape-only, per the palette rule ("colour is a redundant channel"). Static
+## so both the pick-time diamond AND the persistent tray (see game.gd's
+## MutationHint) can draw the exact same glyph — a mark that only ever
+## appears once, at pick time, on a shape the player is choosing between two
+## of under time pressure, cannot be learned by feel. The tray is what makes
+## repeat-play recognition possible at all: this is the shared vocabulary.
+static func draw_mark(ci: CanvasItem, mut_id: int, center: Vector2, s: float, col: Color) -> void:
+	match mut_id:
 		0: # thick trunks — two bold parallel bars, a fat pipe
-			draw_line(Vector2(-s, -s * 0.35), Vector2(s, -s * 0.35), col, 2.2)
-			draw_line(Vector2(-s, s * 0.35), Vector2(s, s * 0.35), col, 2.2)
+			ci.draw_line(center + Vector2(-s, -s * 0.35), center + Vector2(s, -s * 0.35), col, 3.0)
+			ci.draw_line(center + Vector2(-s, s * 0.35), center + Vector2(s, s * 0.35), col, 3.0)
 		1: # long reach — a four-point burst, reaching outward
 			for i in 4:
 				var a := TAU * float(i) / 4.0
-				draw_line(Vector2.ZERO, Vector2(cos(a), sin(a)) * s * 1.3, col, 2.0)
+				ci.draw_line(center, center + Vector2(cos(a), sin(a)) * s * 1.3, col, 2.8)
 		2: # reservoir — a single full droplet
-			draw_circle(Vector2.ZERO, s * 0.62, col)
+			ci.draw_circle(center, s * 0.62, col)
 		3: # rapid pulse — a heartbeat blip
 			var pts := PackedVector2Array([
 				Vector2(-s, 0.0), Vector2(-s * 0.35, 0.0), Vector2(-s * 0.1, -s),
 				Vector2(s * 0.1, s), Vector2(s * 0.35, 0.0), Vector2(s, 0.0),
 			])
-			draw_polyline(pts, col, 1.8, true)
+			for i in pts.size():
+				pts[i] += center
+			ci.draw_polyline(pts, col, 2.6, true)
 		_: # steady hands — a calm, wide wave
 			var pts := PackedVector2Array()
 			for i in 9:
 				var t := float(i) / 8.0
-				pts.append(Vector2(lerpf(-s, s, t), sin(t * TAU) * s * 0.4))
-			draw_polyline(pts, col, 1.8, true)
+				pts.append(center + Vector2(lerpf(-s, s, t), sin(t * TAU) * s * 0.4))
+			ci.draw_polyline(pts, col, 2.6, true)
 
 
 ## A spent Well, gone necrotic: cold, jagged, and beating out of time with you.

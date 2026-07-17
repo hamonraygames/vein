@@ -370,6 +370,13 @@ var _mut_good_window_mult := 1.0
 var _mut_sync_fuel_mult := 1.0
 ## Taken this run, for the probe to confirm the fork is actually being reached.
 var mutations_taken := 0
+## Which perks, in pick order — MutationHint reads this to draw a persistent
+## tray of the same marks shown at pick time. The pick itself is a one-shot,
+## time-pressured choice between two abstract glyphs on a shape that then
+## vanishes — with nothing left on screen afterward, there was no way to ever
+## learn what a mark meant, no matter how many runs you played. The tray is
+## what turns it into something learnable by feel, same as a Forge's triangle.
+var active_mutations: Array[int] = []
 
 ## Seconds left of an EASE boost. While positive, run_time keeps advancing (the
 ## clock, spawns, tempo, and mix all keep escalating) but the separate
@@ -552,6 +559,7 @@ func start_run(run_seed: int) -> void:
 	_mut_good_window_mult = 1.0
 	_mut_sync_fuel_mult = 1.0
 	mutations_taken = 0
+	active_mutations.clear()
 
 	var vp := design_size()
 	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
@@ -928,6 +936,9 @@ func _apply_mutation(id: int) -> void:
 		Mutation.STEADY_HANDS:
 			_mut_good_window_mult *= MUT_STEADY_HANDS_WINDOW
 			_mut_sync_fuel_mult *= MUT_STEADY_HANDS_SYNC_FUEL
+	active_mutations.append(id)
+	if heart != null:
+		heart.mutation_marks = active_mutations
 
 
 ## A vein reaching either half of a fork resolves the WHOLE fork — the road
