@@ -14,6 +14,7 @@ extends Node2D
 const VNodeScene := preload("res://scripts/vnode.gd")
 const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
+const FloatTextScene := preload("res://scripts/float_text.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
@@ -941,6 +942,24 @@ func _apply_mutation(id: int) -> void:
 		heart.mutation_marks = active_mutations
 
 
+## The headline number for a perk's primary effect — same "eat it, see the
+## multiplier" confirmation Notcoin/Hamster Kombat give a booster, so the
+## payoff is legible the instant it's taken, not just inferred later from
+## how the run happens to feel.
+func _mutation_headline(id: int) -> String:
+	match id:
+		Mutation.THICK_TRUNKS:
+			return "×%.1f" % MUT_THICK_TRUNKS_CAPACITY
+		Mutation.LONG_REACH:
+			return "×%.1f" % MUT_LONG_REACH_RANGE
+		Mutation.RESERVOIR:
+			return "+%d" % roundi(MUT_RESERVOIR_FUEL_CAP)
+		Mutation.RAPID_PULSE:
+			return "×%.2f" % MUT_RAPID_PULSE_BPM
+		_: # STEADY_HANDS
+			return "×%.1f" % MUT_STEADY_HANDS_WINDOW
+
+
 ## A vein reaching either half of a fork resolves the WHOLE fork — the road
 ## not taken has to visibly vanish, or the choice never reads as a choice.
 func _take_mutation(n: VNode) -> void:
@@ -956,6 +975,10 @@ func _take_mutation(n: VNode) -> void:
 		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
 		kinds.append(0)
 	burst.spawn(ring, kinds, rng.randi(), Palette.WARM)
+
+	var pop: Node2D = FloatTextScene.new()
+	vein_layer.add_child(pop)
+	pop.spawn(_mutation_headline(n.mutation_id), n.position, Palette.WARM, 20)
 
 	Audio.play("refined", -2.0, 1.5)
 	if OS.has_feature("mobile"):
@@ -1096,12 +1119,15 @@ func _tempo_quality() -> float:
 ## of violent.
 func _take_boost(n: VNode) -> void:
 	boosts_taken += 1
+	var headline := ""
 	match n.boost_effect:
 		BoostFx.SURGE:
 			budget += BOOST_SURGE_BUDGET
 			budget_hint.queue_redraw()
+			headline = "+%d" % BOOST_SURGE_BUDGET
 		BoostFx.EASE:
 			_ease_remaining += BOOST_EASE_TIME
+			headline = "+%ds" % roundi(BOOST_EASE_TIME)
 		BoostFx.CLEANSE:
 			var target: VNode = null
 			var best := INF
@@ -1114,8 +1140,11 @@ func _take_boost(n: VNode) -> void:
 					target = c
 			if target != null:
 				target.uncorrupt()
+				# No clean number for "cured" — the target's own visible
+				# un-rotting is the confirmation, not a popup here.
 			else:
 				budget += BOOST_SURGE_BUDGET
+				headline = "+%d" % BOOST_SURGE_BUDGET
 
 	var burst: Node2D = BurstScene.new()
 	vein_layer.add_child(burst)
@@ -1126,6 +1155,11 @@ func _take_boost(n: VNode) -> void:
 		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
 		kinds.append(0)
 	burst.spawn(ring, kinds, rng.randi(), Palette.BOOST)
+
+	if headline != "":
+		var pop: Node2D = FloatTextScene.new()
+		vein_layer.add_child(pop)
+		pop.spawn(headline, n.position, Palette.BOOST, 20)
 
 	Audio.play("refined", -2.0, 1.8)
 	if OS.has_feature("mobile"):
@@ -1481,8 +1515,33 @@ func _deliver(kind: int, to: VNode) -> void:
 			poisoned += 1
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(90)
+		_pop_gain(kind, gain, to.position)
 	elif not to.take(kind):
 		dropped += 1
+
+
+## The Notcoin/Hamster-Kombat confirmation: a number pops out of the Heart
+## and fades, right where the value actually landed, instead of only ever
+## showing up as a fuel line that rose too gradually to read as "that
+## delivery was worth more than the last one." Skipped for near-zero
+## wrong-shape drops (WRONG_SHAPE_FUEL is ~0 by design) — a "+0" popup would
+## read as a bug, not as the intended "this was worthless" silence.
+func _pop_gain(kind: int, gain: float, at: Vector2) -> void:
+	if absf(gain) < 0.5:
+		return
+	var rounded := roundi(gain)
+	var col: Color
+	var text: String
+	if kind == VNode.Res.VOID:
+		col = Palette.VOID
+		text = "%d" % rounded
+	else:
+		col = Palette.HEART
+		text = "+%d" % rounded
+	var pop: Node2D = FloatTextScene.new()
+	vein_layer.add_child(pop)
+	var jitter := Vector2(rng.randf_range(-8.0, 8.0), -6.0)
+	pop.spawn(text, at + jitter, col)
 
 
 # --- Input: one thumb, one verb ---------------------------------------------
