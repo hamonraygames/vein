@@ -21,7 +21,7 @@ const SAVE_PATH := "user://vein.cfg"
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 3
+const TUNING_VERSION := 4
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 const START_BUDGET := 4
@@ -303,8 +303,17 @@ var budget := START_BUDGET
 var fuel := START_FUEL
 var misses := 0
 var alive := false
-## Mirrors Beat.index. The score, and what the harnesses read.
+## Mirrors Beat.index. Survival time in heartbeats — what the harnesses read
+## and what the death screen's "your heart beat N times" reports. Not the
+## score; see `score` below.
 var beats := 0
+
+## The live score, shown in the HUD and compared against `best`. Reactive to
+## every popped number (see _pop_gain) rather than to survival alone — a
+## delivery that pops "+3" adds exactly 3 here, so the number on screen means
+## what it visibly did. Clamped at 0: a bad stretch can cost you ground, but a
+## displayed score dropping below zero would read as broken.
+var score := 0
 
 ## The number to beat. There is no winning in VEIN — every run ends — so the
 ## only thing that can pull a player back is their own last best.
@@ -541,6 +550,7 @@ func start_run(run_seed: int) -> void:
 	fuel = START_FUEL
 	misses = 0
 	beats = 0
+	score = 0
 	ruptures = 0
 	dropped = 0
 	withered = 0
@@ -641,9 +651,12 @@ func _on_stopped(total: int) -> void:
 	_end_dilation()
 
 	lifetime_beats += total
-	beat_best_this_run = total > best
+	# Best is tracked against `score`, not survival time — the two used to be the
+	# same number (beats), which is exactly what made a "+3" pop feel disconnected
+	# from anything: it never moved the number a player was actually chasing.
+	beat_best_this_run = score > best
 	if beat_best_this_run:
-		best = total
+		best = score
 	_store_save()
 
 	score_label.text = "Your heart beat %s times." % _commas(total)
@@ -1324,7 +1337,7 @@ func _process(delta: float) -> void:
 	_push_from_nodes()
 	for v in veins:
 		for kind in v.advance(delta):
-			_deliver(kind, v.sink())
+			_deliver(kind, v, v.sink())
 
 	# Driven every frame, not per-beat: a dying run's beats slow way down, and
 	# the mix must keep evolving smoothly through that instead of freezing
@@ -1515,7 +1528,7 @@ func _push_from_nodes() -> void:
 				v.note_blocked()
 
 
-func _deliver(kind: int, to: VNode) -> void:
+func _deliver(kind: int, v: Vein, to: VNode) -> void:
 	if to == null:
 		return
 	if to.kind == VNode.Kind.HEART:
@@ -1526,12 +1539,15 @@ func _deliver(kind: int, to: VNode) -> void:
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(120)
 		var gain := float(FUEL_BY_RES.get(kind, 1.0))
-		if kind != demand and kind != VNode.Res.VOID:
-			# Wrong shape is wasted, not damaging — so no hurt cue. It gets a
-			# flat, dull "wrong note" via swallow() instead: you hear that it
-			# landed and gave you nothing. A RESERVOIR mutation drops this to
-			# zero — more banked fuel, but no safety net at all if you are
-			# caught unprepared.
+		var off_demand := kind != demand and kind != VNode.Res.VOID
+		if off_demand:
+			# Wrong shape is wasted, not damaging — so no hurt cue and no fuel
+			# penalty. It gets a flat, dull "wrong note" via swallow() instead:
+			# you hear that it landed and gave you nothing. A RESERVOIR mutation
+			# drops this to zero — more banked fuel, but no safety net at all if
+			# you are caught unprepared. It still gets a visible (not numeric,
+			# not score-costing) alarm below — see _pop_gain — so a stale
+			# network reads as something to go fix, not free clutter to ignore.
 			gain = _mut_wrong_shape_fuel
 			wasted += 1
 			combo = 0
@@ -1545,21 +1561,55 @@ func _deliver(kind: int, to: VNode) -> void:
 			poisoned += 1
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(90)
-		_pop_gain(kind, gain, to.position)
+		var entry := _vein_entry_point(v, to)
+		var out_dir := entry - to.position
+		out_dir = out_dir.normalized() if out_dir.length() > 0.001 else Vector2.UP
+		_pop_gain(kind, gain, entry, out_dir, off_demand)
 	elif not to.take(kind):
 		dropped += 1
+
+
+## Where a delivered item visibly crossed into `to` — the point on its rim
+## facing back along the vein it just travelled, not the node's centre.
+## Every vein converges on the same centre point, so a pop anchored there
+## couldn't be read back to the delivery that caused it; anchoring it to the
+## vein's own approach direction ties the number to the actual blood that
+## just arrived.
+func _vein_entry_point(v: Vein, to: VNode) -> Vector2:
+	var near := v.sample(0.9)
+	var approach := to.position - near
+	if approach.length() < 0.001:
+		return to.position
+	return to.position - approach.normalized() * to.radius()
 
 
 ## The Notcoin/Hamster-Kombat confirmation: a number pops out of the Heart
 ## and fades, right where the value actually landed, instead of only ever
 ## showing up as a fuel line that rose too gradually to read as "that
-## delivery was worth more than the last one." Skipped for near-zero
-## wrong-shape drops (WRONG_SHAPE_FUEL is ~0 by design) — a "+0" popup would
-## read as a bug, not as the intended "this was worthless" silence.
-func _pop_gain(kind: int, gain: float, at: Vector2) -> void:
+## delivery was worth more than the last one." The score moves by exactly
+## what pops — a "+3" here is a +3 there, not a disconnected fuel readout.
+##
+## Wrong-shape drops (off_demand) are worth ~0 fuel by design (see
+## WRONG_SHAPE_FUEL) — a numeric "+0" would read as a bug, and charging the
+## score for them would resurrect the exact failure the WRONG_SHAPE_FUEL
+## rewrite fixed (a working network becoming worse than no network). They
+## still get a small, muted, non-numeric mark instead of total silence: proof
+## that the delivery landed and did nothing, so a stale network reads as
+## something to go re-plumb, not free clutter to leave connected forever.
+func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand := false) -> void:
+	# Jitter across the direction of drift, not against it — a sideways nudge
+	# reads as "the same arrival, imprecisely placed"; a nudge along `out_dir`
+	# would just look like a longer or shorter drift.
+	var jitter := out_dir.rotated(PI * 0.5) * rng.randf_range(-6.0, 6.0)
+	if off_demand:
+		var mark: Node2D = FloatTextScene.new()
+		vein_layer.add_child(mark)
+		mark.spawn("×", at + jitter, Palette.VEIN_STRAINED, 13, out_dir)
+		return
 	if absf(gain) < 0.5:
 		return
 	var rounded := roundi(gain)
+	score = maxi(0, score + rounded)
 	var col: Color
 	var text: String
 	if kind == VNode.Res.VOID:
@@ -1570,8 +1620,7 @@ func _pop_gain(kind: int, gain: float, at: Vector2) -> void:
 		text = "+%d" % rounded
 	var pop: Node2D = FloatTextScene.new()
 	vein_layer.add_child(pop)
-	var jitter := Vector2(rng.randf_range(-8.0, 8.0), -6.0)
-	pop.spawn(text, at + jitter, col)
+	pop.spawn(text, at + jitter, col, 16, out_dir)
 
 
 # --- Input: one thumb, one verb ---------------------------------------------

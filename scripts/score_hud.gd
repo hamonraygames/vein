@@ -1,5 +1,6 @@
 extends Node2D
-## The live score: how many times your heart has beaten.
+## The live score: reactive to every popped delivery (game.gd's _pop_gain), not
+## just survival time — a "+3" pop is a +3 here, immediately.
 ##
 ## The doc's diegetic pillar bans HUD numbers, and this is a deliberate exception
 ## — without a visible score there is nothing to beat, and beating your own last
@@ -34,10 +35,10 @@ func _draw() -> void:
 
 	var col := Palette.HEART
 	col.a = 0.30 + _swell * 0.34
-	_centred(str(game.beats), origin, 26, col)
+	_centred(str(game.score), origin, 26, col)
 
 	# The number to beat, shown only while it is still ahead of you.
-	if game.best > 0 and game.beats < game.best:
+	if game.best > 0 and game.score < game.best:
 		var ghost := Palette.HEART
 		ghost.a = 0.16
 		_centred(str(game.best), origin + Vector2(0.0, 22.0), 14, ghost)
