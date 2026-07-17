@@ -33,7 +33,19 @@ window/size/viewport_height=1170
 window/size/window_width_override=450
 window/size/window_height_override=975
 window/stretch/mode="canvas_items"
-window/stretch/aspect="expand"
+; "expand" reveals MORE of the game world at an unchanged pixel scale rather
+; than scaling the board to fit the window — harmless on a phone (the design
+; aspect already matches real phone screens almost exactly) or the desktop
+; editor window above (already sized to the same 540:1170 aspect, so there
+; is no mismatch to resolve either way). But a browser tab can be ANY size,
+; and at a typical 1280x800 laptop viewport "expand" rendered the board at
+; native 1:1 scale in the top-left corner with the bottom of the board
+; (budget strokes, score) clipped off-screen entirely below y=800 — not
+; "small", actually not there. "keep" scales the whole 540x1170 board
+; uniformly to fit whatever window it's given, pillarboxed if the aspect
+; doesn't match, which is what actually guarantees every element is both
+; visible and legibly sized regardless of window shape.
+window/stretch/aspect="keep"
 window/handheld/orientation=1
 
 [input_devices]
