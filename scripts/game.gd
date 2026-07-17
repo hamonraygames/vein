@@ -418,6 +418,7 @@ func _end_dilation() -> void:
 
 
 func _ready() -> void:
+	_fit_desktop_window()
 	drag_layer.draw.connect(_draw_drag)
 	death_ui.hide()
 	Beat.beat.connect(_on_beat)
@@ -425,6 +426,22 @@ func _ready() -> void:
 	_load_save()
 	start_run(0)
 	_maybe_attach_harness()
+
+
+## Desktop windows launch at project.godot's fixed window_width/height_override,
+## which is only ever right for the one screen it happened to be tuned against
+## — "hit play" on a bigger laptop still opened the same small fixed window.
+## Maximizing hands the window manager the job of finding "as big as this
+## screen allows" (it already knows about menu bars, docks, and multi-monitor
+## setups, which a hand-computed size does not); stretch/aspect="keep" then
+## letterboxes VEIN's phone aspect (design_size()) inside that, same as it
+## already does for an arbitrarily-sized browser tab.
+func _fit_desktop_window() -> void:
+	if OS.has_feature("web") or OS.has_feature("mobile"):
+		return
+	if DisplayServer.get_name() == "headless":
+		return
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
 
 
 func _load_save() -> void:
