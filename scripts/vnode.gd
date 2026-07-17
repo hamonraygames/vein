@@ -4,11 +4,19 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-enum Kind { HEART, WELL, FORGE, LOOM, BOOST, MUTATION }
-enum Res { RAW, REFINED, CLOTH, VOID }
+## BOOST is an instant, single-use grab (SURGE/CLEANSE). RELIC is its
+## persistent counterpart — spawns in a contradictory pair like MUTATION, but
+## the chosen effect is temporary (see game.gd's _active_relic), not
+## permanent, and only one can be active at a time.
+enum Kind { HEART, WELL, FORGE, LOOM, KILN, BOOST, RELIC, MUTATION }
+enum Res { RAW, REFINED, CLOTH, PRISM, VOID }
 
 ## Tools condense two inputs into one stronger output. A Forge eats RAW and makes
-## REFINED; a Loom eats REFINED and makes CLOTH.
+## REFINED; a Loom eats REFINED and makes CLOTH; a Kiln eats CLOTH and makes
+## PRISM — the fourth tier, per feedback wanting more than three shapes in
+## play ("triangle, square, 5-edge... like wood/gold/metal/water/stone in a
+## resource-management game") so a fully-escalated run has a real network to
+## keep alive, not just one final pipe.
 const TOOL_RATIO := 2
 
 ## Items a Well holds before it runs dry. Depletion is by USE, not by clock:
@@ -16,7 +24,14 @@ const TOOL_RATIO := 2
 ## something downstream will take the item. So the trunk you lean on hardest is
 ## the one that dies first, and an unconnected Well keeps its reserve forever.
 ## That is the whole enemy design — every strength eats itself.
-const WELL_YIELD := 72.0
+##
+## Was 72 (WELL_PERIOD=1.45s -> ~104s of continuous output). Playtest:
+## "circles are long-living, that's not ideal" — against a run that's mostly
+## over well before that, a connected Well read as a permanent, safe income
+## rather than something that also costs you upkeep. Cut by more than half so
+## even your first, best-placed Wells force a rewire mid-run, not just the
+## ones you neglect.
+const WELL_YIELD := 32.0
 
 ## A spent Well does not politely stop. It goes necrotic and starts pumping VOID
 ## down the vein you built to it, faster than it ever gave you RAW. You must cut
@@ -58,6 +73,14 @@ const WITHER_TIME := 35.0
 ## always something you saw coming, never a surprise deletion.
 const WITHER_WARN_AT := 0.6
 
+## A Boost left unclaimed also withers — same USE-IT-OR-LOSE-IT rule as a Well,
+## reusing the exact same age/fade/removal pipeline (see wither_ratio()), just
+## against a much shorter clock: it's a bonus pickup, not a supply line, so
+## ignoring one should read as a small, prompt "that one's gone" rather than
+## sitting around as permanent decoration on the board. Roughly one BOOST_GAP
+## (game.gd), so a Boost you skip is usually gone before the next one arrives.
+const BOOST_LIFE := 13.0
+
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
 const BOOST_RADIUS := 16.0
@@ -66,6 +89,10 @@ const BOOST_RADIUS := 16.0
 ## pressure with no chance to learn it by feel like a Forge/Loom recipe, so
 ## it has to read clearly on the first glance, not the tenth.
 const MUTATION_RADIUS := 24.0
+## Between Boost and Mutation: a bigger decision than an instant grab (it's a
+## fork, and it costs the other half), but a smaller one than a Mutation
+## (temporary, not run-long).
+const RELIC_RADIUS := 20.0
 const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
@@ -109,6 +136,14 @@ var orphan_age := 0.0
 ## the roll comes from the seeded run RNG and stays deterministic.
 var boost_effect: int = 0
 
+## Relic only: which temporary effect this half of the fork grants (game.gd's
+## Relic enum, plain int to avoid a circular preload).
+var relic_id: int = 0
+## Relic only: the other half of this choice. Taking either one removes both
+## — same fork rule as Mutation, just for a temporary effect instead of a
+## permanent one.
+var relic_pair: VNode = null
+
 ## Mutation only: which permanent perk this choice grants (game.gd's Mutation
 ## enum, referenced here only as a plain int to avoid a circular preload).
 var mutation_id: int = 0
@@ -126,9 +161,9 @@ var mutation_pair: VNode = null
 ## upgrade instead of parking them in a sidebar.
 var mutation_marks: Array[int] = []
 
-## Forge/Loom only: true for the first Forge and the first Loom the player
-## ever sees (persisted across runs in game.gd's save, see seen_forge/
-## seen_loom) — plays a short looping demonstration of its own recipe before
+## Forge/Loom/Kiln only: true for the first of each kind the player ever sees
+## (persisted across runs in game.gd's save, see seen_forge/seen_loom/
+## seen_kiln) — plays a short looping demonstration of its own recipe before
 ## settling into the normal idle rendering. Playtest: the static recipe pips
 ## alone ("what is the red triangle, I don't know what it's about") were not
 ## enough — this shows the exact motion the player will later cause
@@ -164,6 +199,8 @@ func radius() -> float:
 		return HEART_RADIUS
 	if kind == Kind.BOOST:
 		return BOOST_RADIUS
+	if kind == Kind.RELIC:
+		return RELIC_RADIUS
 	if kind == Kind.MUTATION:
 		return MUTATION_RADIUS
 	return RADIUS
@@ -190,12 +227,15 @@ func _process(delta: float) -> void:
 		if _emit_accum >= period:
 			_emit_accum -= period
 			_emit()
-	elif kind == Kind.FORGE or kind == Kind.LOOM:
+	elif kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN:
 		_smelt()
 
 	if corrupted:
 		corrupt_age += delta
-	if kind == Kind.WELL and not corrupted:
+	if (kind == Kind.WELL or kind == Kind.BOOST) and not corrupted:
+		# A Boost never joins the flow graph even while sitting on the board
+		# (see game.gd's _add_vein) — depth stays -1 for its whole life until
+		# taken, so this is exactly "seconds since it appeared, unclaimed".
 		if depth < 0:
 			orphan_age += delta
 		else:
@@ -213,7 +253,7 @@ func _process(delta: float) -> void:
 		fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
 	modulate.a = clampf(fade, 0.0, 1.0)
 
-	if kind == Kind.BOOST or kind == Kind.MUTATION:
+	if kind == Kind.BOOST or kind == Kind.RELIC or kind == Kind.MUTATION:
 		_boost_pulse += delta
 		pulse = maxf(pulse, 0.35 + 0.35 * sin(_boost_pulse * 3.4))
 
@@ -227,9 +267,13 @@ func collapse_ratio() -> float:
 
 ## 0..1 toward withering away from neglect.
 func wither_ratio() -> float:
-	if kind != Kind.WELL or corrupted or depth >= 0:
+	if corrupted or depth >= 0:
 		return 0.0
-	return clampf(orphan_age / WITHER_TIME, 0.0, 1.0)
+	if kind == Kind.WELL:
+		return clampf(orphan_age / WITHER_TIME, 0.0, 1.0)
+	if kind == Kind.BOOST:
+		return clampf(orphan_age / BOOST_LIFE, 0.0, 1.0)
+	return 0.0
 
 
 func _emit() -> void:
@@ -291,7 +335,7 @@ func take(kind_in: int) -> bool:
 	# reaches the Heart still mislabeled, which read as "I built the chain and
 	# died anyway." VOID is the one deliberate exception: tools cannot launder
 	# rot into food, so poison still passes straight through to the Heart.
-	if (kind == Kind.FORGE or kind == Kind.LOOM) and kind_in != Res.VOID:
+	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN) and kind_in != Res.VOID:
 		return false
 	if buffer.size() >= BUFFER_CAP:
 		return false
@@ -304,6 +348,7 @@ func _accepts_tool_input(kind_in: int) -> bool:
 	return not corrupted and (
 		(kind == Kind.FORGE and kind_in == Res.RAW)
 		or (kind == Kind.LOOM and kind_in == Res.REFINED)
+		or (kind == Kind.KILN and kind_in == Res.CLOTH)
 	)
 
 
@@ -339,7 +384,9 @@ func _draw() -> void:
 		Kind.HEART: _draw_hex(r, col)
 		Kind.FORGE: _draw_tri(r, col)
 		Kind.LOOM: _draw_square(r, col)
+		Kind.KILN: _draw_pentagon(r, col)
 		Kind.BOOST: _draw_boost(r)
+		Kind.RELIC: _draw_relic(r)
 		Kind.MUTATION: _draw_mutation(r)
 		_: _draw_ring(r, col)
 
@@ -414,6 +461,13 @@ func _draw_demand(r: float) -> void:
 			draw_polyline(tri, c, 2.4, true)
 		Res.CLOTH:
 			draw_rect(Rect2(-s * 0.8, -s * 0.8, s * 1.6, s * 1.6), c, false, 2.4)
+		Res.PRISM:
+			var pent := PackedVector2Array()
+			for i in 5:
+				var a := TAU * (float(i) / 5.0) - PI * 0.5
+				pent.append(Vector2(cos(a), sin(a)) * s * 1.15)
+			pent.append(pent[0])
+			draw_polyline(pent, c, 2.4, true)
 		_:
 			draw_arc(Vector2.ZERO, s * 0.85, 0.0, TAU, 22, c, 2.4, true)
 
@@ -466,6 +520,62 @@ func _draw_boost(r: float) -> void:
 	var halo := Palette.BOOST
 	halo.a = 0.10 + 0.06 * sin(spin * 2.3)
 	draw_arc(Vector2.ZERO, r * 2.0, 0.0, TAU, 28, halo, 1.4, true)
+
+
+## A Relic: a six-point hexagram, always spawned in a contradictory pair.
+## Deliberately a different silhouette from both Boost's four-point star (an
+## instant grab) and Mutation's diamond (a permanent choice) — a Relic is a
+## fork like Mutation, but the effect is temporary, and it needs to read as
+## its own category at a glance, not a reskin of either. Palette.RELIC (burnt
+## orange) is the colour half of that; the extra points are the shape half.
+func _draw_relic(r: float) -> void:
+	var s := r * 1.2
+	var spin := float(Time.get_ticks_msec()) * 0.0008
+	var star := PackedVector2Array()
+	for i in 12:
+		var a := TAU * (float(i) / 12.0) + spin
+		var rr := s if i % 2 == 0 else s * 0.5
+		star.append(Vector2(cos(a), sin(a)) * rr)
+	star.append(star[0])
+
+	var fill := Palette.RELIC
+	fill.a = 0.13 + pulse * 0.24
+	draw_colored_polygon(star, fill)
+	var edge := Palette.RELIC
+	edge.a = 0.68 + pulse * 0.3
+	draw_polyline(star, edge, 2.3 + pulse * 1.3, true)
+
+	var halo := Palette.RELIC
+	halo.a = 0.09 + 0.05 * sin(spin * 2.4)
+	draw_arc(Vector2.ZERO, r * 1.85, 0.0, TAU, 24, halo, 1.2, true)
+
+	draw_relic_mark(self, relic_id, Vector2.ZERO, r * 0.6, Palette.RELIC)
+
+
+## Shape-only marks for the four Relic effects, same "static, shared vocabulary"
+## reasoning as draw_mark — the Heart's active-relic indicator (game.gd) draws
+## the same glyph so a returning player recognises it without re-reading.
+static func draw_relic_mark(ci: CanvasItem, relic_id_: int, center: Vector2, s: float, col: Color) -> void:
+	match relic_id_:
+		0: # rush — a forward-leaning double chevron, speed
+			for off in [-s * 0.35, s * 0.35]:
+				ci.draw_line(center + Vector2(-s * 0.5, off - s * 0.4),
+					center + Vector2(s * 0.3, off), col, 2.6)
+				ci.draw_line(center + Vector2(-s * 0.5, off + s * 0.4),
+					center + Vector2(s * 0.3, off), col, 2.6)
+		1: # calm — concentric still rings
+			ci.draw_arc(center, s * 0.35, 0.0, TAU, 16, col, 2.2, true)
+			ci.draw_arc(center, s * 0.75, 0.0, TAU, 20, col, 2.0, true)
+		2: # overflow — an upward-brimming cup
+			var cup := PackedVector2Array([
+				center + Vector2(-s * 0.55, -s * 0.1), center + Vector2(-s * 0.4, s * 0.6),
+				center + Vector2(s * 0.4, s * 0.6), center + Vector2(s * 0.55, -s * 0.1),
+			])
+			ci.draw_polyline(cup, col, 2.4, false)
+			ci.draw_line(center + Vector2(-s * 0.62, -s * 0.35), center + Vector2(s * 0.62, -s * 0.35), col, 2.4)
+		_: # vault — a closed, banded box
+			ci.draw_rect(Rect2(center - Vector2(s * 0.55, s * 0.4), Vector2(s * 1.1, s * 0.8)), col, false, 2.2)
+			ci.draw_line(center + Vector2(0.0, -s * 0.4), center + Vector2(0.0, s * 0.4), col, 2.0)
 
 
 ## A Mutation: a slow diamond, always spawned in a pair. Taking either one
@@ -607,6 +717,43 @@ func _draw_square(r: float, col: Color) -> void:
 			2.0 + smelt_flash * 2.0)
 
 
+## A Kiln. The fourth tool, one silhouette further from a circle than a Loom's
+## square — a pentagon reads as "further along the same ladder" at a glance,
+## the same way triangle->square already does, without needing a new visual
+## grammar for it.
+func _draw_pentagon(r: float, col: Color) -> void:
+	var s := r * (1.35 + smelt_flash * 0.12)
+	var pent := PackedVector2Array()
+	for i in 5:
+		var a := TAU * (float(i) / 5.0) - PI * 0.5
+		pent.append(Vector2(cos(a), sin(a)) * s)
+
+	var fill := col
+	fill.a = 0.07 + pulse * 0.20 + smelt_flash * 0.42
+	draw_colored_polygon(pent, fill)
+
+	var edge := col
+	edge.a = 0.44 + pulse * 0.3 + smelt_flash * 0.54
+	var outline := pent.duplicate()
+	outline.append(pent[0])
+	draw_polyline(outline, edge, 2.5 + smelt_flash * 2.0, true)
+
+	_draw_kiln_recipe(r)
+	if teach:
+		_draw_teach_demo(r, Res.CLOTH)
+
+	if smelt_flash > 0.0:
+		var halo := Palette.PRISM
+		halo.a = smelt_flash * 0.68
+		var pts := PackedVector2Array()
+		var hs := s * (1.25 + (1.0 - smelt_flash) * 0.9)
+		for i in 5:
+			var a := TAU * (float(i) / 5.0) - PI * 0.5
+			pts.append(Vector2(cos(a), sin(a)) * hs)
+		pts.append(pts[0])
+		draw_polyline(pts, halo, 2.0 + smelt_flash * 2.0, true)
+
+
 ## Loops a few times on this tool's first-ever appearance: two ghost dots of
 ## `input_res` fall in from outside, the node flashes, one ghost dot of
 ## `produces` (the output) leaves. This is the exact motion a real feed will
@@ -663,6 +810,17 @@ func _draw_loom_recipe(r: float) -> void:
 	_draw_mini_square(Vector2(0.0, -r * 0.16), r * 0.16, cloth, 1.7)
 
 
+func _draw_kiln_recipe(r: float) -> void:
+	var cloth := Palette.CLOTH
+	cloth.a = 0.42 + smelt_flash * 0.35
+	_draw_mini_square(Vector2(-r * 0.25, r * 0.15), r * 0.13, cloth, 1.4)
+	_draw_mini_square(Vector2(r * 0.25, r * 0.15), r * 0.13, cloth, 1.4)
+
+	var prism := Palette.PRISM
+	prism.a = 0.58 + smelt_flash * 0.32
+	_draw_mini_pentagon(Vector2(0.0, -r * 0.16), r * 0.16, prism, 1.7)
+
+
 func _draw_mini_tri(center: Vector2, size: float, col: Color, width: float) -> void:
 	var tri := PackedVector2Array()
 	for i in 3:
@@ -677,10 +835,19 @@ func _draw_mini_square(center: Vector2, half: float, col: Color, width: float) -
 		col, false, width)
 
 
+func _draw_mini_pentagon(center: Vector2, size: float, col: Color, width: float) -> void:
+	var pent := PackedVector2Array()
+	for i in 5:
+		var a := TAU * (float(i) / 5.0) - PI * 0.5
+		pent.append(center + Vector2(cos(a), sin(a)) * size)
+	pent.append(pent[0])
+	draw_polyline(pent, col, width, true)
+
+
 ## Input waiting to be smelted, drawn INSIDE the tool so a starved tool (one pip,
 ## waiting forever for its pair) is distinguishable from a busy one.
 func _draw_intake(r: float) -> void:
-	if (kind != Kind.FORGE and kind != Kind.LOOM) or intake.is_empty():
+	if (kind != Kind.FORGE and kind != Kind.LOOM and kind != Kind.KILN) or intake.is_empty():
 		return
 	for i in mini(intake.size(), BUFFER_CAP):
 		var p := Vector2(-6.0 + 6.0 * float(i % 3), 4.0 + 6.0 * float(i / 3))

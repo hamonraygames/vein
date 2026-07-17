@@ -54,9 +54,9 @@ script = ExtResource("4")
 
 [node name="Score" type="Label" parent="Ui/Death"]
 anchor_left = 0.0
-anchor_top = 0.42
+anchor_top = 0.7
 anchor_right = 1.0
-anchor_bottom = 0.5
+anchor_bottom = 0.78
 theme_override_colors/font_color = Color(0.961, 0.949, 0.918, 0.85)
 theme_override_font_sizes/font_size = 26
 text = "Your heart beat 0 times."
@@ -66,9 +66,9 @@ mouse_filter = 2
 
 [node name="Best" type="Label" parent="Ui/Death"]
 anchor_left = 0.0
-anchor_top = 0.5
+anchor_top = 0.78
 anchor_right = 1.0
-anchor_bottom = 0.545
+anchor_bottom = 0.825
 theme_override_colors/font_color = Color(0.961, 0.949, 0.918, 0.4)
 theme_override_font_sizes/font_size = 15
 text = "Best  0"

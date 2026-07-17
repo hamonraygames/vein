@@ -208,7 +208,10 @@ var _notes_this_beat := 0
 ## dull, detuned note instead: you hear it land and give you nothing.
 func swallow(res_kind: int, fullness: float, wanted: bool = true) -> void:
 	if res_kind == VNode.Res.VOID:
-		play("hurt", -5.0, 1.0)
+		# Was "hurt", a key that was never in SFX — poison landed dead silent
+		# instead of alarming anyone. "corrupt" is the same cue rot already
+		# uses everywhere else, so it reads as the same threat.
+		play("corrupt", -5.0, 1.0)
 		return
 
 	if _notes_this_beat >= _notes_budget:
@@ -221,9 +224,12 @@ func swallow(res_kind: int, fullness: float, wanted: bool = true) -> void:
 
 	# Near natural pitch — bells, not thuds. Fuller shapes ring lower and
 	# richer; a fuller Heart rings slightly brighter. The range is deliberately
-	# narrow (0.9-1.25) because dragging a bell far off its recorded pitch is
-	# what made these sound like drums in the first place.
-	if res_kind == VNode.Res.CLOTH:
+	# narrow because dragging a bell far off its recorded pitch is what made
+	# these sound like drums in the first place. PRISM extends the ladder
+	# below CLOTH, continuing "fuller shape, lower/richer tone".
+	if res_kind == VNode.Res.PRISM:
+		play("refined", -18.0, lerpf(0.78, 0.90, fullness))
+	elif res_kind == VNode.Res.CLOTH:
 		play("refined", -20.0, lerpf(0.90, 1.02, fullness))
 	elif res_kind == VNode.Res.REFINED:
 		play("refined", -22.0, lerpf(1.02, 1.14, fullness))

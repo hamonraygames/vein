@@ -21,7 +21,7 @@ const SAVE_PATH := "user://vein.cfg"
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 4
+const TUNING_VERSION := 6
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 const START_BUDGET := 4
@@ -39,6 +39,7 @@ const FUEL_BY_RES := {
 	VNode.Res.RAW: 1.0,
 	VNode.Res.REFINED: 3.0,
 	VNode.Res.CLOTH: 7.0,
+	VNode.Res.PRISM: 15.0,
 	VNode.Res.VOID: -2.5,
 }
 
@@ -62,6 +63,12 @@ const FIRST_FORGE_TIME := 4.0
 const FORGE_GAP := 21.0
 const FIRST_LOOM_TIME := 19.0
 const LOOM_GAP := 36.0
+## A Kiln needs a full Well->Forge->Loom chain already functioning before it's
+## worth anything, so it gets the longest lead time of any tool — arriving
+## comfortably after the CLOTH flip has had time to settle, not while the
+## player is still mid-scramble re-plumbing for it.
+const FIRST_KILN_TIME := 40.0
+const KILN_GAP := 50.0
 
 ## What the Heart DEMANDS, by run-second. This is the game.
 ##
@@ -79,11 +86,29 @@ const LOOM_GAP := 36.0
 ##
 ## It also makes the Forge self-teaching — the Heart is visibly asking for a
 ## triangle, and only the triangle node makes triangles.
+##
+## This is the TEACHING schedule, walked once, in order — RAW, then REFINED,
+## then CLOTH, then PRISM. What happens after the last entry is a different
+## system entirely; see ROTATE_GAP_START below. Playtest: "we get to square
+## and it never changes at all" — holding at the final tier forever made the
+## whole second half of a long run static. A PRISM tier here, and the
+## rotation phase that follows it, are both direct answers to that.
 const DEMAND_TIERS := [
 	{"at": 0.0, "res": VNode.Res.RAW},
 	{"at": 14.0, "res": VNode.Res.REFINED},
 	{"at": 37.0, "res": VNode.Res.CLOTH},
+	{"at": 100.0, "res": VNode.Res.PRISM},
 ]
+
+## Once every tier above has been introduced, demand stops marching forward
+## and starts jumping randomly among everything unlocked so far — the Heart
+## can suddenly want RAW again even after you've built all the way to PRISM,
+## so nothing you built early is ever safe to walk away from for good.
+## "Start simple, slowly go crazy": the gap between rotations shrinks (and
+## gets less predictable, via _jitter) as intensity climbs, so the opening of
+## this phase still gives time to react and the tail end genuinely doesn't.
+const ROTATE_GAP_START := 26.0
+const ROTATE_GAP_MIN := 8.0
 
 ## Feeding the Heart something it did not ask for: WASTED, never poison.
 ##
@@ -182,18 +207,65 @@ const BUDGET_GAP_GROWTH := 3.5  # ...while veins arrive slower and slower
 ## have contained none. A mechanic the player never sees may as well not be
 ## implemented. Frequent enough that a Boost is a recurring decision ("detour
 ## for it, or hold the line?") rather than a once-a-run curiosity.
-const FIRST_BOOST_TIME := 7.0
-const BOOST_GAP := 14.0
+##
+## REVISED TWICE: 7s -> 22s wasn't enough either ("still comes very soon,
+## give it a time — I know that was a wrong decision"). The opening now
+## belongs entirely to Wells, the Heart, and the Forge/Loom/Kiln chain — no
+## Boost competes for attention until that whole teaching arc (RAW through
+## the CLOTH flip) is well behind the player, not just barely finished.
+## Widened the recurring gap too, so a Boost stays a rare event for the
+## whole run, not just a slow open.
+const FIRST_BOOST_TIME := 50.0
+const BOOST_GAP := 22.0
 
-enum BoostFx { SURGE, EASE, CLEANSE }
+## SURGE and CLEANSE are instant, single-use grabs — no ongoing state, gone
+## the moment they're taken. EASE moved to the Relic system below (CALM) once
+## Boosts split into instant-vs-persistent: "one increases score earning
+## rate, one slows down heart dying speed... only one persistent at a time."
+enum BoostFx { SURGE, CLEANSE }
 ## Weighted so CLEANSE never wastes itself as a no-op reroll when nothing is
 ## corrupted — see _roll_boost.
-const BOOST_WEIGHTS := [0.4, 0.35, 0.25]
+const BOOST_WEIGHTS := [0.55, 0.45]
 
 const BOOST_SURGE_BUDGET := 1
-## Halved with everything else on the escalation clock — a 9s freeze against a
-## 150s span would be twice the reprieve it used to be.
-const BOOST_EASE_TIME := 4.5
+
+## Relics: a Boost's persistent counterpart. Spawn as a contradictory PAIR
+## (same fork mechanic as Mutation — see _spawn_mutation_pair) rather than a
+## flat pool, because the trade-off IS the mechanic: taking Rush is also
+## explicitly refusing Calm. Only one Relic effect may be active at a time —
+## a fresh pair never spawns while one is either active or still waiting to
+## be chosen — so the board never has to juggle several ongoing effects at
+## once, and picking one is always a clean, legible decision.
+enum Relic { RUSH, CALM, OVERFLOW, VAULT }
+const RELIC_PAIRS := [
+	[Relic.RUSH, Relic.CALM],
+	[Relic.OVERFLOW, Relic.VAULT],
+]
+## Same "give it real time before competing for attention" lesson as Boost's
+## own history just above — Relics are a deeper system, so they open even later.
+const FIRST_RELIC_TIME := 65.0
+## Gap counted from when the PREVIOUS effect ends (or is skipped), not from
+## calendar time — see _tick_escalation. A run only ever juggles one Relic
+## question at a time.
+const RELIC_GAP := 20.0
+const RELIC_DURATION := 16.0
+
+## Rush: score-rate up, but the Heart also gets hungrier faster while it's
+## active — an aggression option that only pays off if you can keep feeding it.
+const RELIC_RUSH_FUEL_MULT := 1.6
+const RELIC_RUSH_APPETITE_MULT := 1.35
+## Calm: the Heart's hunger eases (slows dying), but you earn less while it's
+## active — a safety option that costs you ground even as it buys you time.
+const RELIC_CALM_APPETITE_MULT := 0.55
+const RELIC_CALM_FUEL_MULT := 0.7
+## Overflow: budget grows now and KEEPS the growth after the timer ends, but
+## fuel capacity shrinks for the duration — more veins, thinner margin.
+const RELIC_OVERFLOW_BUDGET := 2
+const RELIC_OVERFLOW_FUEL_CAP_MULT := 0.72
+## Vault: fuel capacity grows for the duration (a bigger buffer to survive a
+## bad stretch), but scheduled budget growth pauses while it's active — more
+## margin, but the network stops expanding.
+const RELIC_VAULT_FUEL_CAP_BONUS := 3.0
 
 ## The Heart mutates. At each of three fixed moments a run offers TWO of these,
 ## presented as a pair — see _spawn_mutation_pair — and taking either one
@@ -232,8 +304,13 @@ const MUT_LONG_REACH_APPETITE := 1.25
 ## used to before WRONG_SHAPE_FUEL existed, not like a further-softened miss.
 const MUT_RESERVOIR_FUEL_CAP := 3.0
 
-## RAPID_PULSE raises score-rate (beats accumulate faster) at the cost of
-## surviving a bad stretch — one fewer missed feeding before the beat stops.
+## RAPID_PULSE raises the Heart's tempo AND, matching that same ×1.22 headline,
+## everything it's fed is worth 1.22x more — at the cost of surviving a bad
+## stretch (one fewer missed feeding before the beat stops). Used to only
+## touch BPM, back when score was literally the beat count and a faster heart
+## meant a faster-climbing score for free; now that score is what the Heart
+## actually receives (see game.gd's score var), a BPM-only change left the
+## ×1.22 headline promising something the "+N" pops never delivered.
 const MUT_RAPID_PULSE_BPM := 1.22
 const MUT_RAPID_PULSE_MISSES := 1
 ## Floor so stacking this perk twice can never make the Heart fatally fragile
@@ -303,16 +380,16 @@ var budget := START_BUDGET
 var fuel := START_FUEL
 var misses := 0
 var alive := false
-## Mirrors Beat.index. Survival time in heartbeats — what the harnesses read
-## and what the death screen's "your heart beat N times" reports. Not the
-## score; see `score` below.
+## Mirrors Beat.index. Survival time in heartbeats — what the harnesses read.
+## Not the score: "the heartbeat is not important, it's the blood it
+## receives that's important" — see `score` below, which is what's actually
+## shown to the player.
 var beats := 0
 
-## The live score, shown in the HUD and compared against `best`. Reactive to
-## every popped number (see _pop_gain) rather than to survival alone — a
-## delivery that pops "+3" adds exactly 3 here, so the number on screen means
-## what it visibly did. Clamped at 0: a bad stretch can cost you ground, but a
-## displayed score dropping below zero would read as broken.
+## The live score, shown in the HUD and on the death screen, compared
+## against `best`. Reactive to every popped delivery (see _pop_gain) — a
+## "+3" pop is a +3 here — so it reads 0 when nothing was ever connected,
+## not some unrelated survival-time number.
 var score := 0
 
 ## The number to beat. There is no winning in VEIN — every run ends — so the
@@ -321,10 +398,11 @@ var best := 0
 var lifetime_beats := 0
 var beat_best_this_run := false
 ## Persisted across runs (see _load_save/_store_save) — drives VNode.teach so
-## the recipe demonstration plays on the first Forge/Loom the player EVER
+## the recipe demonstration plays on the first Forge/Loom/Kiln the player EVER
 ## sees, not every run once they already understand it.
 var seen_forge := false
 var seen_loom := false
+var seen_kiln := false
 ## Ruptures this run. If this stays at zero, trunk capacity never binds and
 ## layout still does not matter — the probe watches it for exactly that reason.
 var ruptures := 0
@@ -342,6 +420,8 @@ var corruptions := 0
 ## instead.
 var withered := 0
 var collapsed := 0
+## Boosts nobody claimed before VNode.BOOST_LIFE ran out.
+var boosts_expired := 0
 ## Every node ever created, by kind — `nodes.size()` alone undercounts once
 ## withering/collapse can remove them mid-run.
 var spawned_wells := 0
@@ -354,12 +434,17 @@ var combo := 0
 
 ## The shape the Heart wants right now. Drawn inside it — see VNode._draw_hex.
 var demand: int = VNode.Res.RAW
+## Every resource DEMAND_TIERS has introduced so far this run — the pool the
+## post-teaching rotation phase draws from (see _tick_escalation).
+var _unlocked_res: Array[int] = [VNode.Res.RAW]
+var _next_rotate_time := INF
 
 ## Seconds this run has been alive. The escalation clock — see APPETITE_RATE.
 var run_time := 0.0
 var _next_well_time := FIRST_WELL_TIME
 var _next_forge_time := FIRST_FORGE_TIME
 var _next_loom_time := FIRST_LOOM_TIME
+var _next_kiln_time := FIRST_KILN_TIME
 var _next_boost_time := FIRST_BOOST_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
@@ -378,6 +463,8 @@ var _mut_wrong_shape_fuel := WRONG_SHAPE_FUEL
 var _mut_misses_fatal_delta := 0
 var _mut_good_window_mult := 1.0
 var _mut_sync_fuel_mult := 1.0
+## RAPID_PULSE's half of its ×1.22 headline — see MUT_RAPID_PULSE_BPM.
+var _mut_fuel_mult := 1.0
 ## Taken this run, for the probe to confirm the fork is actually being reached.
 var mutations_taken := 0
 ## Which perks, in pick order — MutationHint reads this to draw a persistent
@@ -388,15 +475,26 @@ var mutations_taken := 0
 ## what turns it into something learnable by feel, same as a Forge's triangle.
 var active_mutations: Array[int] = []
 
-## Seconds left of an EASE boost. While positive, run_time keeps advancing (the
-## clock, spawns, tempo, and mix all keep escalating) but the separate
-## `_appetite_clock` does not — so EASE is a fuel-economy reprieve, not a pause,
-## and does not trivialise a boosted run.
-var _ease_remaining := 0.0
 var _appetite_clock := 0.0
 ## Boosts collected this run, and which effect fired — useful for the probe to
 ## confirm they are actually being reached rather than sitting decorative.
 var boosts_taken := 0
+
+## Which Relic effect is active right now, or -1 for none. Drives the
+## multipliers below and the Heart's active-relic indicator (see game.gd's
+## _draw() and VNode.draw_relic_mark).
+var _active_relic := -1
+var _active_relic_remaining := 0.0
+var _next_relic_time := FIRST_RELIC_TIME
+var relics_taken := 0
+## Modifiers applied by whichever Relic is active — every one is a no-op
+## default, reset here AND the instant the active Relic's timer runs out
+## (see _tick_escalation), so an effect never outlives its duration.
+var _relic_fuel_mult := 1.0
+var _relic_appetite_mult := 1.0
+var _relic_fuel_cap_mult := 1.0
+var _relic_fuel_cap_bonus := 0.0
+var _relic_budget_frozen := false
 
 var _drag_from: VNode = null
 var _drag_pos := Vector2.ZERO
@@ -463,6 +561,7 @@ func _load_save() -> void:
 		best = int(cfg.get_value("run", "best", 0))
 	seen_forge = bool(cfg.get_value("run", "seen_forge", false))
 	seen_loom = bool(cfg.get_value("run", "seen_loom", false))
+	seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
 
 
 func _store_save() -> void:
@@ -472,6 +571,7 @@ func _store_save() -> void:
 	cfg.set_value("run", "tuning", TUNING_VERSION)
 	cfg.set_value("run", "seen_forge", seen_forge)
 	cfg.set_value("run", "seen_loom", seen_loom)
+	cfg.set_value("run", "seen_kiln", seen_kiln)
 	cfg.save(SAVE_PATH)
 
 
@@ -555,23 +655,35 @@ func start_run(run_seed: int) -> void:
 	dropped = 0
 	withered = 0
 	collapsed = 0
+	boosts_expired = 0
 	spawned_wells = 0
 	poisoned = 0
 	corruptions = 0
 	wasted = 0
 	combo = 0
 	demand = VNode.Res.RAW
+	_unlocked_res = [VNode.Res.RAW]
+	_next_rotate_time = INF
 	_rescue = 0.0
 	_drain_amt = 0.0
 	_sync_flash = 0.0
 	_bad_tempo_flash = 0.0
-	_ease_remaining = 0.0
 	_appetite_clock = 0.0
 	boosts_taken = 0
+	_active_relic = -1
+	_active_relic_remaining = 0.0
+	_next_relic_time = FIRST_RELIC_TIME
+	relics_taken = 0
+	_relic_fuel_mult = 1.0
+	_relic_appetite_mult = 1.0
+	_relic_fuel_cap_mult = 1.0
+	_relic_fuel_cap_bonus = 0.0
+	_relic_budget_frozen = false
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
 	_next_loom_time = FIRST_LOOM_TIME
+	_next_kiln_time = FIRST_KILN_TIME
 	_next_boost_time = FIRST_BOOST_TIME
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
@@ -586,6 +698,7 @@ func start_run(run_seed: int) -> void:
 	_mut_misses_fatal_delta = 0
 	_mut_good_window_mult = 1.0
 	_mut_sync_fuel_mult = 1.0
+	_mut_fuel_mult = 1.0
 	mutations_taken = 0
 	active_mutations.clear()
 
@@ -635,6 +748,8 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 			n.produces = VNode.Res.REFINED
 		VNode.Kind.LOOM:
 			n.produces = VNode.Res.CLOTH
+		VNode.Kind.KILN:
+			n.produces = VNode.Res.PRISM
 		_:
 			n.produces = VNode.Res.RAW
 	node_layer.add_child(n)
@@ -651,15 +766,15 @@ func _on_stopped(total: int) -> void:
 	_end_dilation()
 
 	lifetime_beats += total
-	# Best is tracked against `score`, not survival time — the two used to be the
-	# same number (beats), which is exactly what made a "+3" pop feel disconnected
-	# from anything: it never moved the number a player was actually chasing.
+	# Best/the death screen both track `score` — what the Heart actually
+	# received — not survival time. `total` (beats) still feeds
+	# lifetime_beats, a separate lifetime stat the harnesses read.
 	beat_best_this_run = score > best
 	if beat_best_this_run:
 		best = score
 	_store_save()
 
-	score_label.text = "Your heart beat %s times." % _commas(total)
+	score_label.text = "Score  %s" % _commas(score)
 	# The target. Without something to beat, "one more run" has no hook — and
 	# VEIN has no win state to offer instead.
 	if beat_best_this_run:
@@ -715,32 +830,81 @@ func intensity() -> float:
 	return clampf(run_time / EXERTION_SPAN, 0.0, 1.0)
 
 
-## Fuel the Heart burns per beat, rising linearly on the run clock — except
-## while an EASE boost is active, when it rises on `_appetite_clock` instead,
-## which simply stops advancing for BOOST_EASE_TIME seconds.
+## Fuel the Heart burns per beat, rising on the run clock — scaled by
+## `_relic_appetite_mult` while a Relic is active (RUSH raises it, CALM
+## eases it; see _apply_relic).
+##
+## The climb used to be a flat ramp: predictable the moment you'd seen a
+## minute of it. A sine wave riding on top makes the hunger itself feel
+## alive rather than a metronome — amplitude starts at zero (the opening
+## stays exactly as learnable as before) and grows with intensity, so late
+## in a run the Heart is genuinely surging and easing, not just climbing.
+## Averages out to the same long-run curve; only the moment-to-moment texture
+## changes, not the tuned difficulty.
+const APPETITE_WAVE_AMP := 0.09
+const APPETITE_WAVE_PERIOD := 17.0
+
 func appetite() -> float:
-	return APPETITE_BASE + APPETITE_RATE * _mut_appetite_rate_mult * _appetite_clock
+	var base := APPETITE_BASE + APPETITE_RATE * _mut_appetite_rate_mult * _appetite_clock
+	var wave := sin(_appetite_clock * TAU / APPETITE_WAVE_PERIOD) * APPETITE_WAVE_AMP * intensity()
+	return maxf(0.02, (base + wave) * _relic_appetite_mult)
 
 
-## FUEL_CAP plus whatever RESERVOIR mutations this run has banked.
+## FUEL_CAP plus whatever RESERVOIR mutations this run has banked, scaled by
+## whichever Relic is active (OVERFLOW shrinks it, VAULT grows it).
 func fuel_cap() -> float:
-	return FUEL_CAP + _mut_fuel_cap_bonus
+	return (FUEL_CAP + _mut_fuel_cap_bonus + _relic_fuel_cap_bonus) * _relic_fuel_cap_mult
+
+
+## Every spawn cadence used to be a flat interval — the exact same gap, every
+## time, seed after seed — which reads as a metronome once you've played a
+## few runs: "I know exactly when the next Boost lands." Wobbling each gap
+## by up to `spread` (still drawn from the seeded `rng`, so a given seed is
+## still fully reproducible) keeps the same average pace but breaks the
+## predictability that made the board feel inert between events.
+func _jitter(base: float, spread: float) -> float:
+	return base * rng.randf_range(1.0 - spread, 1.0 + spread)
 
 
 ## Drives the spawn and budget clocks. Kept out of _on_beat so a slowing Heart
 ## cannot slow its own escalation.
 func _tick_escalation(delta: float) -> void:
 	run_time += delta
+	_appetite_clock += delta
 
-	if _ease_remaining > 0.0:
-		_ease_remaining = maxf(0.0, _ease_remaining - delta)
-	else:
-		_appetite_clock += delta
+	if _active_relic >= 0:
+		_active_relic_remaining -= delta
+		if _active_relic_remaining <= 0.0:
+			_revert_relic()
+
+	# A Relic only ever offers ONE question at a time — a fresh pair waits
+	# for the current effect to fully end (see _revert_relic, which re-arms
+	# this) AND for nothing to already be sitting on the board unclaimed.
+	if run_time >= _next_relic_time and _active_relic < 0 and not _has_relic_pair():
+		_spawn_relic_pair()
 
 	var want: int = demand
 	for t in DEMAND_TIERS:
 		if run_time >= t.at:
 			want = t.res
+			if not _unlocked_res.has(t.res):
+				_unlocked_res.append(t.res)
+
+	# Teaching schedule is over once every DEMAND_TIERS entry has landed —
+	# from here, demand jumps randomly among everything unlocked instead of
+	# sitting at PRISM forever (see ROTATE_GAP_START/MIN above). _next_rotate_time
+	# starts at INF (see start_run) so the first crossing just arms the timer
+	# rather than firing an immediate switch the instant PRISM lands.
+	if run_time >= DEMAND_TIERS[-1].at and _next_rotate_time == INF:
+		_next_rotate_time = run_time + _jitter(ROTATE_GAP_START, 0.3)
+	elif run_time >= _next_rotate_time:
+		var pool := _unlocked_res.duplicate()
+		pool.erase(want)
+		if not pool.is_empty():
+			want = pool[rng.randi() % pool.size()]
+		var gap := lerpf(ROTATE_GAP_START, ROTATE_GAP_MIN, intensity())
+		_next_rotate_time = run_time + _jitter(gap, 0.35)
+
 	if want != demand:
 		demand = want
 		heart.demand = want
@@ -753,28 +917,36 @@ func _tick_escalation(delta: float) -> void:
 
 	if run_time >= _next_well_time:
 		_spawn_well()
-		_next_well_time += _well_gap
+		_next_well_time += _jitter(_well_gap, 0.3)
 		_well_gap = maxf(WELL_GAP_MIN, _well_gap - WELL_GAP_DECAY)
 
 	if run_time >= _next_forge_time:
 		_spawn_node(VNode.Kind.FORGE)
-		_next_forge_time += FORGE_GAP
+		_next_forge_time += _jitter(FORGE_GAP, 0.25)
 
 	if run_time >= _next_loom_time:
 		_spawn_node(VNode.Kind.LOOM)
-		_next_loom_time += LOOM_GAP
+		_next_loom_time += _jitter(LOOM_GAP, 0.2)
+
+	if run_time >= _next_kiln_time:
+		_spawn_node(VNode.Kind.KILN)
+		_next_kiln_time += _jitter(KILN_GAP, 0.2)
 
 	if run_time >= _next_boost_time:
-		_spawn_node(VNode.Kind.BOOST)
-		_next_boost_time += BOOST_GAP
+		_spawn_boost()
+		_next_boost_time += _jitter(BOOST_GAP, 0.4)
 
 	if _next_mutation_idx < MUTATION_TIMES.size() and run_time >= MUTATION_TIMES[_next_mutation_idx]:
 		_spawn_mutation_pair()
 		_next_mutation_idx += 1
 
-	if run_time >= _next_budget_time:
+	# VAULT (see _apply_relic) freezes this: the network stops expanding for
+	# the duration in exchange for a bigger fuel buffer. run_time keeps
+	# sailing past _next_budget_time while frozen, so the tick fires the
+	# instant VAULT ends rather than losing the progress entirely.
+	if not _relic_budget_frozen and run_time >= _next_budget_time:
 		budget += 1
-		_next_budget_time += _budget_gap
+		_next_budget_time += _jitter(_budget_gap, 0.15)
 		_budget_gap += BUDGET_GAP_GROWTH * _mut_budget_gap_mult
 		budget_hint.queue_redraw()
 
@@ -803,6 +975,32 @@ func _spawn_well() -> void:
 		_remove_node(oldest)
 
 	_spawn_node(VNode.Kind.WELL)
+
+
+## Boosts get the same treatment as Wells (see _spawn_well just above): a
+## fixed number of live slots, and a fresh one displaces the oldest
+## still-unclaimed one rather than piling up past that. Feedback: "you should
+## have X slots for boosters at all times, and sacrifice one when all the
+## slots are filled" — without this, a cluster of skipped Boosts (each still
+## individually timing out via VNode.BOOST_LIFE) could stack up on screen
+## for a while first, reading as accumulation rather than a hard limit.
+const MAX_LIVE_BOOSTS := 2
+
+
+func _spawn_boost() -> void:
+	var live: Array[VNode] = []
+	for n in nodes:
+		if n.kind == VNode.Kind.BOOST:
+			live.append(n)
+
+	if live.size() >= MAX_LIVE_BOOSTS:
+		var oldest: VNode = null
+		for n in live:
+			if oldest == null or n.orphan_age > oldest.orphan_age:
+				oldest = n
+		_remove_node(oldest)
+
+	_spawn_node(VNode.Kind.BOOST)
 
 
 ## New nodes spawn in awkward places, forcing rerouting. Bias to the lower two
@@ -844,22 +1042,62 @@ func _spawn_node(kind: int) -> void:
 	# could end up outside MAX_LEN of everything the live network still
 	# touches — a demand flip with no possible move to answer it, fair by
 	# construction at spawn time but not for the rest of the run. The Heart's
-	# position never changes and the Heart is never removed, so anchoring
-	# tools to it specifically keeps them within one direct vein of the Heart
-	# for the run's entire duration, not just the moment they appeared.
+	# position never changes and the Heart is never removed, so a Forge
+	# anchors to it specifically, keeping it within one direct vein of the
+	# Heart for the run's entire duration, not just the moment it appeared.
+	#
+	# A Loom is different: it doesn't just need to reach the Heart, it needs
+	# to RECEIVE from a Forge (2 REFINED in, 1 CLOTH out) — bug report: "heart
+	# wanted square, there was no square anywhere" plus "square wants two
+	# triangles, there should be triangles somehow in reach for it". Anchoring
+	# a Loom to the Heart the same way a Forge does guarantees Loom-to-Heart
+	# reach but NOT Forge-to-Loom reach — the two tools would land as
+	# independent siblings around the Heart with nothing ensuring they were
+	# ever close enough to hand off to each other, which makes the square
+	# exist but leaves it permanently unfeedable. A Loom instead anchors to
+	# the MIDPOINT between the Heart and an existing Forge: both are within
+	# MAX_LEN of a point roughly half as far away as either, so Forge->Loom
+	# and Loom->Heart are both always directly drawable — a complete,
+	# guaranteed-buildable Well->Forge->Loom->Heart chain, not just two
+	# separately-reachable dead ends. A Kiln repeats exactly the same trick
+	# one link further down the chain: it anchors to the midpoint between the
+	# Heart and an existing Loom, so Loom->Kiln->Heart is guaranteed the same
+	# way Forge->Loom->Heart is.
 	var connected: Array[VNode] = []
 	for n in nodes:
 		if n.depth >= 0:
 			connected.append(n)
 	if connected.is_empty():
 		connected = nodes
-	var anchors := [heart] if kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM else connected
+
+	var is_tool := kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM or kind == VNode.Kind.KILN
+	var anchor_point := heart.position
+	var min_dist := 112.0
+	var max_dist := Vein.MAX_LEN * 0.9
+	if kind == VNode.Kind.LOOM:
+		var forge := _random_node_of_kind(VNode.Kind.FORGE)
+		if forge != null:
+			anchor_point = (heart.position + forge.position) * 0.5
+			min_dist = 40.0
+			max_dist = 90.0
+	elif kind == VNode.Kind.KILN:
+		var loom := _random_node_of_kind(VNode.Kind.LOOM)
+		if loom != null:
+			anchor_point = (heart.position + loom.position) * 0.5
+			min_dist = 40.0
+			max_dist = 90.0
 
 	for _i in 64:
-		var anchor: VNode = anchors[rng.randi() % anchors.size()]
-		var bearing := rng.randf() * TAU
-		var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.9)
-		var p := anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
+		var p: Vector2
+		if is_tool:
+			var bearing := rng.randf() * TAU
+			var dist := rng.randf_range(min_dist, max_dist)
+			p = anchor_point + Vector2(cos(bearing), sin(bearing)) * dist
+		else:
+			var anchor: VNode = connected[rng.randi() % connected.size()]
+			var bearing := rng.randf() * TAU
+			var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.9)
+			p = anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
 		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
 			continue
 
@@ -871,7 +1109,7 @@ func _spawn_node(kind: int) -> void:
 
 		var to_heart := p.distance_to(heart.position)
 		var s := 0.0
-		if kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM:
+		if is_tool:
 			# Tools must stand between a cluster of supply and the Heart.
 			s = -to_heart
 		else:
@@ -884,7 +1122,14 @@ func _spawn_node(kind: int) -> void:
 			best = p
 
 	if best_score == -INF:
-		return
+		if not is_tool:
+			return
+		# A tool is NOT allowed to just silently fail to spawn because its
+		# usual ring is crowded — that IS the "no square anywhere" bug.
+		# Guaranteed placement: whichever fixed bearing around the anchor
+		# point is least crowded, elbow-room minimum ignored if it has to be.
+		# A little visual overlap costs far less than the tool not existing.
+		best = _least_crowded_spot(anchor_point, (min_dist + max_dist) * 0.5)
 	var n := _make_node(kind, best)
 	if kind == VNode.Kind.BOOST:
 		n.boost_effect = _roll_boost()
@@ -896,7 +1141,38 @@ func _spawn_node(kind: int) -> void:
 		seen_loom = true
 		n.teach = true
 		_store_save()
+	elif kind == VNode.Kind.KILN and not seen_kiln:
+		seen_kiln = true
+		n.teach = true
+		_store_save()
 	_rebuild_graph()
+
+
+func _random_node_of_kind(kind: int) -> VNode:
+	var matches: Array[VNode] = []
+	for n in nodes:
+		if n.kind == kind:
+			matches.append(n)
+	return matches[rng.randi() % matches.size()] if not matches.is_empty() else null
+
+
+## Guaranteed fallback placement for a tool when the normal rejection search
+## above found nowhere valid: whichever of a fixed ring of bearings around
+## `center` is farthest from every existing node, so a Forge/Loom always gets
+## SOMEWHERE on the board rather than silently not spawning at all.
+func _least_crowded_spot(center: Vector2, dist: float) -> Vector2:
+	var best := center + Vector2(dist, 0.0)
+	var best_near := -INF
+	for i in 24:
+		var a := TAU * float(i) / 24.0
+		var p := center + Vector2(cos(a), sin(a)) * dist
+		var near := INF
+		for n in nodes:
+			near = minf(near, p.distance_to(n.position))
+		if near > best_near:
+			best_near = near
+			best = p
+	return best
 
 
 ## Rolled from the seeded run RNG, not global randf() — the whole sim stays
@@ -974,6 +1250,7 @@ func _apply_mutation(id: int) -> void:
 			_mut_wrong_shape_fuel = 0.0
 		Mutation.RAPID_PULSE:
 			Beat.bpm_mult *= MUT_RAPID_PULSE_BPM
+			_mut_fuel_mult *= MUT_RAPID_PULSE_BPM
 			_mut_misses_fatal_delta = maxi(
 				_mut_misses_fatal_delta - MUT_RAPID_PULSE_MISSES,
 				MUT_MISSES_FATAL_FLOOR - MISSES_FATAL)
@@ -1032,6 +1309,125 @@ func _take_mutation(n: VNode) -> void:
 	_remove_node(n)
 	if sibling != null and is_instance_valid(sibling):
 		sibling.mutation_pair = null
+		_remove_node(sibling)
+
+
+func _has_relic_pair() -> bool:
+	for n in nodes:
+		if n.kind == VNode.Kind.RELIC:
+			return true
+	return false
+
+
+## Same structural trick as _spawn_mutation_pair (symmetric about the Heart,
+## rolled from the seeded rng) but drawing from RELIC_PAIRS — a deliberately
+## opposed pair, not two random picks from a flat pool, because the contrast
+## between the two IS the decision.
+func _spawn_relic_pair() -> void:
+	var pair: Array = RELIC_PAIRS[rng.randi() % RELIC_PAIRS.size()]
+	var id_a: int = pair[0]
+	var id_b: int = pair[1]
+
+	var vp := design_size()
+	var ang := rng.randf() * TAU
+	var a_pos: Vector2 = heart.position + Vector2(cos(ang), sin(ang)) * 96.0
+	var b_pos: Vector2 = heart.position + Vector2(cos(ang + PI), sin(ang + PI)) * 96.0
+	a_pos.x = clampf(a_pos.x, 40.0, vp.x - 40.0)
+	a_pos.y = clampf(a_pos.y, 60.0, vp.y - 60.0)
+	b_pos.x = clampf(b_pos.x, 40.0, vp.x - 40.0)
+	b_pos.y = clampf(b_pos.y, 60.0, vp.y - 60.0)
+
+	var na := _make_node(VNode.Kind.RELIC, a_pos)
+	var nb := _make_node(VNode.Kind.RELIC, b_pos)
+	na.relic_id = id_a
+	nb.relic_id = id_b
+	na.relic_pair = nb
+	nb.relic_pair = na
+	_rebuild_graph()
+
+
+## Starts the chosen effect's duration. Modifiers are absolute, not
+## compounding — unlike Mutations (permanent, so stacking makes sense),
+## only one Relic is ever active, so there is nothing to stack.
+func _apply_relic(id: int) -> void:
+	_relic_fuel_mult = 1.0
+	_relic_appetite_mult = 1.0
+	_relic_fuel_cap_mult = 1.0
+	_relic_fuel_cap_bonus = 0.0
+	_relic_budget_frozen = false
+	match id:
+		Relic.RUSH:
+			_relic_fuel_mult = RELIC_RUSH_FUEL_MULT
+			_relic_appetite_mult = RELIC_RUSH_APPETITE_MULT
+		Relic.CALM:
+			_relic_appetite_mult = RELIC_CALM_APPETITE_MULT
+			_relic_fuel_mult = RELIC_CALM_FUEL_MULT
+		Relic.OVERFLOW:
+			budget += RELIC_OVERFLOW_BUDGET
+			budget_hint.queue_redraw()
+			_relic_fuel_cap_mult = RELIC_OVERFLOW_FUEL_CAP_MULT
+		Relic.VAULT:
+			_relic_fuel_cap_bonus = RELIC_VAULT_FUEL_CAP_BONUS
+			_relic_budget_frozen = true
+	_active_relic = id
+	_active_relic_remaining = RELIC_DURATION
+	fuel = clampf(fuel, 0.0, fuel_cap())
+
+
+## Effect ends: every modifier snaps back to its no-op default and the next
+## Relic pair is free to appear (see _tick_escalation) after RELIC_GAP more.
+func _revert_relic() -> void:
+	_active_relic = -1
+	_active_relic_remaining = 0.0
+	_relic_fuel_mult = 1.0
+	_relic_appetite_mult = 1.0
+	_relic_fuel_cap_mult = 1.0
+	_relic_fuel_cap_bonus = 0.0
+	_relic_budget_frozen = false
+	_next_relic_time = run_time + _jitter(RELIC_GAP, 0.3)
+
+
+func _relic_headline(id: int) -> String:
+	match id:
+		Relic.RUSH:
+			return "×%.1f" % RELIC_RUSH_FUEL_MULT
+		Relic.CALM:
+			return "×%.2f" % RELIC_CALM_APPETITE_MULT
+		Relic.OVERFLOW:
+			return "+%d" % RELIC_OVERFLOW_BUDGET
+		_: # VAULT
+			return "+%d" % roundi(RELIC_VAULT_FUEL_CAP_BONUS)
+
+
+## Same fork resolution as _take_mutation — taking either half removes both
+## — but this one starts a timer instead of a permanent modifier.
+func _take_relic(n: VNode) -> void:
+	_apply_relic(n.relic_id)
+	relics_taken += 1
+
+	var burst: Node2D = BurstScene.new()
+	vein_layer.add_child(burst)
+	var ring: Array[Vector2] = []
+	var kinds: Array[int] = []
+	for i in 10:
+		var a := TAU * float(i) / 10.0
+		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
+		kinds.append(0)
+	burst.spawn(ring, kinds, rng.randi(), Palette.RELIC)
+
+	var pop: Node2D = FloatTextScene.new()
+	vein_layer.add_child(pop)
+	pop.spawn(_relic_headline(n.relic_id), n.position, Palette.RELIC, 20)
+
+	Audio.play("refined", -2.0, 1.3)
+	if OS.has_feature("mobile"):
+		Input.vibrate_handheld(200)
+
+	var sibling := n.relic_pair
+	n.relic_pair = null
+	_remove_node(n)
+	if sibling != null and is_instance_valid(sibling):
+		sibling.relic_pair = null
 		_remove_node(sibling)
 
 
@@ -1094,6 +1490,13 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	# tempo/crossing rules below, and it never becomes a real edge in the graph.
 	if a.kind == VNode.Kind.MUTATION or b.kind == VNode.Kind.MUTATION:
 		_take_mutation(a if a.kind == VNode.Kind.MUTATION else b)
+		return
+
+	# A Relic fork resolves exactly like a Mutation fork — instant, no tempo/
+	# crossing rules, never a real edge — the only difference is what taking
+	# it starts (see _take_relic).
+	if a.kind == VNode.Kind.RELIC or b.kind == VNode.Kind.RELIC:
+		_take_relic(a if a.kind == VNode.Kind.RELIC else b)
 		return
 
 	# Crossing BLOCKS the connection — it does not destroy the crossed vein.
@@ -1168,9 +1571,6 @@ func _take_boost(n: VNode) -> void:
 			budget += BOOST_SURGE_BUDGET
 			budget_hint.queue_redraw()
 			headline = "+%d" % BOOST_SURGE_BUDGET
-		BoostFx.EASE:
-			_ease_remaining += BOOST_EASE_TIME
-			headline = "+%ds" % roundi(BOOST_EASE_TIME)
 		BoostFx.CLEANSE:
 			var target: VNode = null
 			var best := INF
@@ -1384,10 +1784,35 @@ func _draw() -> void:
 	ring.a = (1.0 - phase) * (0.22 + exert * 0.22)
 	draw_arc(centre, beat_r, 0.0, TAU, 72, ring, 1.5 + exert * 2.0, true)
 
+	# An active Relic used to have zero on-screen presence beyond the pickup
+	# pop — nothing distinguished the active window from ordinary play, or
+	# told you WHICH of the two you'd chosen. A ring that counts down
+	# (shrinking as RELIC_DURATION runs out), in Relic's own colour, plus the
+	# same mark glyph the pick-time hexagram wore, makes both "still active"
+	# and "which one" visible for the whole duration, not just its start.
+	if _active_relic >= 0:
+		var relic_t := clampf(_active_relic_remaining / RELIC_DURATION, 0.0, 1.0)
+		var relic_col := Palette.RELIC
+		relic_col.a = 0.18 + relic_t * 0.22
+		draw_arc(centre, 96.0 + relic_t * 20.0, 0.0, TAU * relic_t, 40, relic_col, 2.5, true)
+		var mark_col := Palette.RELIC
+		mark_col.a = 0.55 + relic_t * 0.3
+		VNode.draw_relic_mark(self, _active_relic, centre + Vector2(0.0, -104.0), 8.0, mark_col)
+
+	# The rhythm target. Used to sit at a flat baseline brightness and only
+	# flash AFTER a hit — pure confirmation, nothing that could be learned by
+	# watching it before acting. It now breathes brighter as the live beat
+	# phase nears either edge of the hittable window (_tempo_quality is
+	# lowest right after a beat lands and right before the next one), the
+	# same "get brighter as the good moment approaches" language every rhythm
+	# game uses, so the target teaches its own timing just by being watched.
+	var live_q := minf(phase, 1.0 - phase)
+	var anticipate := 1.0 - clampf(live_q / GOOD_WINDOW, 0.0, 1.0)
 	var window := Palette.WARM
-	window.a = 0.25 + _sync_flash * 0.45
+	window.a = 0.12 + anticipate * 0.5 + _sync_flash * 0.45
 	draw_arc(centre, 58.0, -PI * 0.5 - PERFECT_WINDOW * TAU,
-		-PI * 0.5 + PERFECT_WINDOW * TAU, 18, window, 3.0 + _sync_flash * 3.0, true)
+		-PI * 0.5 + PERFECT_WINDOW * TAU, 18, window,
+		2.0 + anticipate * 2.5 + _sync_flash * 3.0, true)
 
 	if _bad_tempo_flash > 0.0:
 		var bad := Palette.VEIN_STRAINED
@@ -1404,16 +1829,6 @@ func _draw() -> void:
 			var c := Palette.WARM.lerp(Palette.CLOTH, float(i) / float(COMBO_CAP))
 			c.a = 0.65 + _sync_flash * 0.35
 			draw_line(p0, p1, c, 3.0, true)
-
-	if exert > 0.18:
-		var chaos := (exert - 0.18) / 0.82
-		var storm := Palette.VEIN_STRAINED
-		storm.a = 0.05 + chaos * 0.12
-		var spin := float(Time.get_ticks_msec()) * 0.001 * (0.8 + chaos * 2.6)
-		for i in 5:
-			var a0 := spin + float(i) * TAU / 5.0
-			draw_arc(centre, 108.0 + float(i) * 17.0 + chaos * 26.0,
-				a0, a0 + PI * (0.45 + chaos * 0.35), 20, storm, 1.2 + chaos * 2.2, true)
 
 
 ## Rot spreads down live veins. Leaving a necrotic Well wired in doesn't just
@@ -1469,14 +1884,21 @@ func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
 	return best
 
 
-## Wells nobody ever wired in wither away; rot nobody ever cut collapses
-## outright. Both remove the node itself (see _remove_node), which is what
-## keeps the board turning over instead of only ever accumulating — every
-## object that appears either gets used, gets cut, or eventually leaves.
+## Wells nobody ever wired in wither away; Boosts nobody ever claimed do too;
+## rot nobody ever cut collapses outright. All three remove the node itself
+## (see _remove_node), which is what keeps the board turning over instead of
+## only ever accumulating — every object that appears either gets used, gets
+## cut, or eventually leaves.
 func _tick_lifecycle(_delta: float) -> void:
 	for n in nodes.duplicate():
 		if n.wither_ratio() >= 1.0:
-			withered += 1
+			# Kept separate from `withered`, which the probe reads specifically
+			# to tune Well-neglect pacing (see VNode.WITHER_TIME) — folding
+			# Boost expiry into the same number would muddy that signal.
+			if n.kind == VNode.Kind.BOOST:
+				boosts_expired += 1
+			else:
+				withered += 1
 			_remove_node(n)
 		elif n.collapse_ratio() >= 1.0:
 			collapsed += 1
@@ -1557,7 +1979,7 @@ func _deliver(kind: int, v: Vein, to: VNode) -> void:
 			combo = 0
 			_bad_tempo_flash = 1.0
 		elif kind == demand and kind != VNode.Res.VOID:
-			gain *= 1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN
+			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN) * _relic_fuel_mult * _mut_fuel_mult
 		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		to.pulse = 1.0
 		Audio.swallow(kind, fuel / fuel_cap(), kind == demand)
@@ -1591,24 +2013,43 @@ func _vein_entry_point(v: Vein, to: VNode) -> Vector2:
 ## and fades, right where the value actually landed, instead of only ever
 ## showing up as a fuel line that rose too gradually to read as "that
 ## delivery was worth more than the last one." The score moves by exactly
-## what pops — a "+3" here is a +3 there, not a disconnected fuel readout.
+## what pops — a "+3" here is a +3 there — because the score IS the blood
+## the Heart has received, not survival time (see `beats`).
 ##
 ## Wrong-shape drops (off_demand) are worth ~0 fuel by design (see
 ## WRONG_SHAPE_FUEL) — a numeric "+0" would read as a bug, and charging the
 ## score for them would resurrect the exact failure the WRONG_SHAPE_FUEL
 ## rewrite fixed (a working network becoming worse than no network). They
-## still get a small, muted, non-numeric mark instead of total silence: proof
-## that the delivery landed and did nothing, so a stale network reads as
-## something to go re-plumb, not free clutter to leave connected forever.
+## still get a mark instead of total silence: proof that the delivery landed
+## and did nothing, so a stale network reads as something to go re-plumb, not
+## free clutter to leave connected forever. First pass at this made the mark
+## small, dim, and text-only (13px, no burst) — verified the code path fires
+## correctly every time, but playtest still reported "I don't see anything":
+## right next to the Heart's own busy ring of overlays, a tiny dim glyph
+## alone just doesn't win the eye. Sized and colored to match the numeric
+## pops now, plus the same little burst every other board event gets, so it
+## competes on equal visual footing instead of trying to be quiet about a
+## real (if fuel-free) event.
 func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand := false) -> void:
 	# Jitter across the direction of drift, not against it — a sideways nudge
 	# reads as "the same arrival, imprecisely placed"; a nudge along `out_dir`
 	# would just look like a longer or shorter drift.
 	var jitter := out_dir.rotated(PI * 0.5) * rng.randf_range(-6.0, 6.0)
 	if off_demand:
+		var warn := Palette.VEIN_STRAINED.lerp(Palette.WARM, 0.4)
+		var ring: Array[Vector2] = []
+		var kinds: Array[int] = []
+		for i in 8:
+			var a := TAU * float(i) / 8.0
+			ring.append(at + Vector2(cos(a), sin(a)) * 5.0)
+			kinds.append(0)
+		var burst: Node2D = BurstScene.new()
+		vein_layer.add_child(burst)
+		burst.spawn(ring, kinds, rng.randi(), warn)
+
 		var mark: Node2D = FloatTextScene.new()
 		vein_layer.add_child(mark)
-		mark.spawn("×", at + jitter, Palette.VEIN_STRAINED, 13, out_dir)
+		mark.spawn("×", at + jitter, warn, 20, out_dir)
 		return
 	if absf(gain) < 0.5:
 		return

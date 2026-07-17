@@ -1,6 +1,8 @@
 extends Node2D
-## The live score: reactive to every popped delivery (game.gd's _pop_gain), not
-## just survival time — a "+3" pop is a +3 here, immediately.
+## The live score: the blood the Heart has actually received, not survival
+## time — "it's the blood it receives that's important, the score should be
+## zero when you connect nothing." Reactive to every popped delivery (see
+## game.gd's _pop_gain), so it reads exactly what those pops add up to.
 ##
 ## The doc's diegetic pillar bans HUD numbers, and this is a deliberate exception
 ## — without a visible score there is nothing to beat, and beating your own last
