@@ -81,6 +81,32 @@ var _blocked := false
 ## thicken, so the choice is felt as "rebuild around this," not a free stat.
 var capacity_mult := 1.0
 
+## Playtest: "removing edges seems to be not clear for players." A cut vein
+## used to vanish the instant it was freed — no feedback beyond a burst that
+## only fired when it happened to be carrying something wanted, which is
+## exactly the uncommon case for the connection you'd actually choose to cut
+## (a stale or wrong-shape one carries nothing). Every cut now shrinks and
+## fades in place first, localized to the exact line the player tapped, so
+## the action always visibly registers regardless of what it was carrying.
+const DIE_TIME := 0.22
+var _dying := false
+var _die_t := 0.0
+
+
+## Defers the actual free() so _draw can animate the cut before it's gone —
+## game.gd removes it from `veins` (and the graph) immediately either way.
+func die() -> void:
+	_dying = true
+
+
+func _process(delta: float) -> void:
+	if not _dying:
+		return
+	_die_t += delta
+	queue_redraw()
+	if _die_t >= DIE_TIME:
+		queue_free()
+
 
 func setup(from: VNode, to: VNode, bend_sign: float) -> void:
 	a = from
@@ -248,6 +274,23 @@ func distance_to_point(p: Vector2) -> float:
 
 func _draw() -> void:
 	if pts.size() < 2:
+		return
+
+	if _dying:
+		# Shrink from both ends toward the middle rather than just fading in
+		# place — a line visibly retracting reads as "removed" at a glance,
+		# where a uniform fade could be mistaken for the same idle dimming an
+		# unused vein already does.
+		var t := clampf(_die_t / DIE_TIME, 0.0, 1.0)
+		var keep := int(round(float(pts.size() - 1) * (1.0 - t) * 0.5))
+		if keep > 0:
+			var trimmed := PackedVector2Array()
+			var mid := pts.size() / 2
+			for i in range(mid - keep, mid + keep + 1):
+				trimmed.append(pts[clampi(i, 0, pts.size() - 1)])
+			var col := Palette.VEIN_STRAINED.lerp(Palette.VEIN_IDLE, 0.4)
+			col.a = 1.0 - t
+			draw_polyline(trimmed, col, maxf(1.0, 3.0 * (1.0 - t)), true)
 		return
 
 	var col: Color

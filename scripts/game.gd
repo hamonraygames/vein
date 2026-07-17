@@ -1276,7 +1276,11 @@ func _remove_vein(v: Vein, surgical := false) -> void:
 		burst.spawn(pts, kinds, rng.randi(), Color(0, 0, 0, 0), intensity())
 		Audio.play("rupture", -8.0, 0.75)
 	veins.erase(v)
-	v.queue_free()
+	# die() lets the vein shrink-and-fade in place (see vein.gd) instead of
+	# blinking out — the removal itself needs to be visible even when there
+	# was nothing precious in flight to burst, which is the common case for a
+	# vein you'd actually choose to cut.
+	v.die()
 	_rebuild_graph()
 
 
