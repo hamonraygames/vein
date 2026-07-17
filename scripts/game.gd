@@ -822,15 +822,28 @@ func _spawn_node(kind: int) -> void:
 	# Anchoring to the connected component only guarantees every new node is
 	# reachable from something you can actually build to right now (the Heart
 	# itself always qualifies, so this pool is never empty).
+	#
+	# A Forge/Loom is a single point of failure for an entire demand tier —
+	# unlike a Well, there is no redundant backup a moment later. Anchoring it
+	# to any connected node (rather than the Heart specifically) meant its
+	# reach guarantee only held at the instant it spawned: if THAT anchor
+	# later withered or was cut loose, the tool's position never moved, and it
+	# could end up outside MAX_LEN of everything the live network still
+	# touches — a demand flip with no possible move to answer it, fair by
+	# construction at spawn time but not for the rest of the run. The Heart's
+	# position never changes and the Heart is never removed, so anchoring
+	# tools to it specifically keeps them within one direct vein of the Heart
+	# for the run's entire duration, not just the moment they appeared.
 	var connected: Array[VNode] = []
 	for n in nodes:
 		if n.depth >= 0:
 			connected.append(n)
 	if connected.is_empty():
 		connected = nodes
+	var anchors := [heart] if kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM else connected
 
 	for _i in 64:
-		var anchor: VNode = connected[rng.randi() % connected.size()]
+		var anchor: VNode = anchors[rng.randi() % anchors.size()]
 		var bearing := rng.randf() * TAU
 		var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.9)
 		var p := anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
