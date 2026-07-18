@@ -14,6 +14,10 @@ config/name="VEIN"
 run/main_scene="res://scenes/game.tscn"
 config/features=PackedStringArray("4.7", "Mobile")
 config/icon="res://icon.svg"
+boot_splash/bg_color=Color(0.788235, 0.207843, 0.160784, 1)
+boot_splash/image="res://assets/hamonraygames.png"
+boot_splash/fullsize=true
+boot_splash/use_filter=true
 
 [autoload]
 
