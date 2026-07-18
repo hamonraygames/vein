@@ -86,6 +86,16 @@ const WITHER_WARN_AT := 0.6
 ## one arrives.
 const BOOST_LIFE := 13.0
 
+## An unpicked RELIC/MUTATION fork withers too — on a longer clock than a
+## Boost (it's a real decision, it deserves deliberation time), but it must
+## NOT sit forever: an ignored pair used to permanently block every future
+## offer of its family (the spawn gates check _has_*_pair) AND accumulate as
+## board clutter, so skipping one fork silently switched that whole system
+## off for the rest of the run. When either half withers, game.gd removes
+## both (see _tick_lifecycle) — the fork expires as a unit, same as it
+## resolves as a unit.
+const PICKUP_LIFE := 24.0
+
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
 const BOOST_RADIUS := 16.0
@@ -245,8 +255,9 @@ func _process(delta: float) -> void:
 
 	if corrupted:
 		corrupt_age += delta
-	if (kind == Kind.WELL or kind == Kind.BOOST) and not corrupted:
-		# A Boost never joins the flow graph even while sitting on the board
+	if (kind == Kind.WELL or kind == Kind.BOOST or kind == Kind.RELIC
+			or kind == Kind.MUTATION) and not corrupted:
+		# A pickup never joins the flow graph even while sitting on the board
 		# (see game.gd's _add_vein) — depth stays -1 for its whole life until
 		# taken, so this is exactly "seconds since it appeared, unclaimed".
 		if depth < 0:
@@ -286,6 +297,8 @@ func wither_ratio() -> float:
 		return clampf(orphan_age / WITHER_TIME, 0.0, 1.0)
 	if kind == Kind.BOOST:
 		return clampf(orphan_age / BOOST_LIFE, 0.0, 1.0)
+	if kind == Kind.RELIC or kind == Kind.MUTATION:
+		return clampf(orphan_age / PICKUP_LIFE, 0.0, 1.0)
 	return 0.0
 
 

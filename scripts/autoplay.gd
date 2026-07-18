@@ -43,8 +43,12 @@ static func step(game) -> void:
 			game._remove_vein(v, true)
 			return
 
-	if not game.can_afford():
-		return
+	# Pickups cost no budget (see game.gd's _add_vein), so being tapped out
+	# only rules out REAL edges — a maxed-budget bot must still grab boosters,
+	# same as a human should. This also matters to the probe: late-run the bot
+	# is almost always at cap, which kept every late-spawning pickup counter
+	# pinned at zero.
+	var afford: bool = game.can_afford()
 
 	# Prefer the live production chain over extra raw supply, one priority
 	# band per tier of depth needed:
@@ -66,6 +70,10 @@ static func step(game) -> void:
 		# for free.
 		if n.kind == VNode.Kind.HEART or n.depth >= 0:
 			continue
+		var is_pickup: bool = n.kind == VNode.Kind.BOOST or n.kind == VNode.Kind.RELIC \
+			or n.kind == VNode.Kind.MUTATION
+		if not afford and not is_pickup:
+			continue
 		for m in game.nodes:
 			if m.depth < 0 or not game.in_reach(n, m):
 				continue
@@ -73,6 +81,12 @@ static func step(game) -> void:
 			# Getting the demanded tool chain connected, then fed, outranks
 			# everything. These are coarse priorities for a floor bot, not optimal
 			# play.
+			# Booster pickups are worth a detour but never outrank getting the
+			# demanded tool chain online — mirrors the intended human priority
+			# and, just as importantly, makes the probe actually exercise the
+			# booster systems instead of reporting them permanently at zero.
+			if is_pickup:
+				score -= 600000.0
 			if need_kiln:
 				if n.kind == VNode.Kind.KILN:
 					score -= 3000000.0
@@ -101,11 +115,6 @@ static func step(game) -> void:
 
 	if pick != null and target != null:
 		game._add_vein(pick, target)
-
-
-static func _connects(v: Vein, kind_a: int, kind_b: int) -> bool:
-	return (v.a.kind == kind_a and v.b.kind == kind_b) \
-		or (v.a.kind == kind_b and v.b.kind == kind_a)
 
 
 ## If `v` runs directly into the Heart, the node feeding it — null if this
