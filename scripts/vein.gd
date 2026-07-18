@@ -75,10 +75,11 @@ var peak_stress := 0.0
 var tempo_grade := 0
 var _blocked := false
 
-## Baked in at creation from the run's THICK_TRUNKS mutation state (see
-## game.gd's _mut_capacity_mult), same as tempo_grade — a vein you draw after
-## taking the perk carries more; one you already built does not retroactively
-## thicken, so the choice is felt as "rebuild around this," not a free stat.
+## Baked in at creation from the run's held CAPACITY perk state (see
+## game.gd's _boost_capacity_mult), same as tempo_grade — a vein you draw
+## after taking the perk carries more; one you already built does not
+## retroactively thicken, so the choice is felt as "rebuild around this,"
+## not a free stat.
 var capacity_mult := 1.0
 
 ## Playtest: "removing edges seems to be not clear for players." A cut vein

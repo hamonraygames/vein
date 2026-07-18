@@ -4,10 +4,14 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-## BOOST is an instant, single-use grab (SURGE/CLEANSE). RELIC is its
-## persistent counterpart — spawns in a contradictory pair like MUTATION, but
-## the chosen effect is temporary (see game.gd's _active_relic), not
-## permanent, and only one can be active at a time.
+## Three booster families, one shared pickup mechanic (see game.gd's
+## _add_vein): BOOST is a ONE_OFF, instant single-use grab. MUTATION is a
+## PERSISTENT perk — permanent for the rest of the run, one slot, taking a
+## new one replaces whichever you already hold. RELIC is a TIME_BASED perk —
+## same effect pool as MUTATION but stronger and temporary, also one slot.
+## Kind names are kept as-is from an earlier design pass; game.gd's
+## OneOff/BoosterEffect enums are the ones that actually define what each
+## pickup grants now.
 enum Kind { HEART, WELL, FORGE, LOOM, KILN, BOOST, RELIC, MUTATION }
 enum Res { RAW, REFINED, CLOTH, PRISM, VOID }
 
@@ -77,8 +81,9 @@ const WITHER_WARN_AT := 0.6
 ## reusing the exact same age/fade/removal pipeline (see wither_ratio()), just
 ## against a much shorter clock: it's a bonus pickup, not a supply line, so
 ## ignoring one should read as a small, prompt "that one's gone" rather than
-## sitting around as permanent decoration on the board. Roughly one BOOST_GAP
-## (game.gd), so a Boost you skip is usually gone before the next one arrives.
+## sitting around as permanent decoration on the board. Roughly one
+## ONE_OFF_GAP (game.gd), so a Boost you skip is usually gone before the next
+## one arrives.
 const BOOST_LIFE := 13.0
 
 const RADIUS := 22.0
@@ -132,27 +137,35 @@ var corrupt_age := 0.0
 ## 0 the instant it joins the network, even briefly — only NEGLECT withers.
 var orphan_age := 0.0
 
-## Boost only: which effect this pickup grants. Assigned by the game at spawn so
+## BOOST only: which OneOff effect this pickup grants (game.gd's OneOff enum,
+## plain int to avoid a circular preload). Assigned by the game at spawn so
 ## the roll comes from the seeded run RNG and stays deterministic.
 var boost_effect: int = 0
 
-## Relic only: which temporary effect this half of the fork grants (game.gd's
-## Relic enum, plain int to avoid a circular preload).
+## RELIC only: which BoosterEffect this half of the fork grants (game.gd's
+## BoosterEffect enum, plain int to avoid a circular preload).
 var relic_id: int = 0
-## Relic only: the other half of this choice. Taking either one removes both
-## — same fork rule as Mutation, just for a temporary effect instead of a
+## RELIC only: the other half of this choice. Taking either one removes both
+## — same fork rule as MUTATION, just for a temporary effect instead of a
 ## permanent one.
 var relic_pair: VNode = null
 
-## Mutation only: which permanent perk this choice grants (game.gd's Mutation
-## enum, referenced here only as a plain int to avoid a circular preload).
+## MUTATION only: which BoosterEffect this choice grants (game.gd's
+## BoosterEffect enum, referenced here only as a plain int to avoid a
+## circular preload).
 var mutation_id: int = 0
-## Mutation only: the other half of this choice. Taking either one removes
+## MUTATION only: the other half of this choice. Taking either one removes
 ## both — it is a fork, not two separate pickups.
 var mutation_pair: VNode = null
 
-## Heart only: every mutation perk taken this run, pushed in from game.gd's
-## active_mutations the moment a fork resolves (same pattern as demand/
+## BOOST/RELIC/MUTATION only: the readable icon text set by game.gd at spawn
+## time ("1.15×", "+25", "⇄", "+1 slot", ...) — see _draw_pickup_label. Kept
+## as a plain string set from outside rather than computed here so the
+## numbers live in exactly one place (game.gd's booster constants).
+var label: String = ""
+
+## Heart only: every PERSISTENT perk currently held, pushed in from game.gd's
+## _active_persistent the moment it changes (same pattern as demand/
 ## fuel_ratio below). Drawn orbiting the Heart itself — not a separate HUD
 ## tray — because the Heart is the one thing in VEIN that already carries
 ## every other piece of run state (fuel level, demand) on its own body, and
@@ -426,9 +439,9 @@ func _draw_hex(r: float, col: Color) -> void:
 	_draw_mutation_marks(r)
 
 
-## Every mutation taken this run, orbiting the Heart permanently — the Heart
-## wears every rule change on its own body, same spot every time, so which
-## marks are out there becomes as learnable as the demand glyph itself.
+## Every PERSISTENT perk currently held, orbiting the Heart permanently — the
+## Heart wears every rule change on its own body, same spot every time, so
+## which marks are out there becomes as learnable as the demand glyph itself.
 func _draw_mutation_marks(r: float) -> void:
 	if mutation_marks.is_empty():
 		return
@@ -436,10 +449,10 @@ func _draw_mutation_marks(r: float) -> void:
 	for i in n:
 		var a := TAU * (float(i) / float(maxi(n, 5))) - PI * 0.5
 		var p := Vector2(cos(a), sin(a)) * (r + 16.0)
-		var ring := Palette.WARM
+		var ring := Palette.PERSISTENT
 		ring.a = 0.16
 		draw_circle(p, 11.0, ring)
-		var col := Palette.WARM
+		var col := Palette.PERSISTENT
 		col.a = 0.6 + pulse * 0.2
 		draw_mark(self, mutation_marks[i], p, 6.5, col)
 
@@ -521,6 +534,8 @@ func _draw_boost(r: float) -> void:
 	halo.a = 0.10 + 0.06 * sin(spin * 2.3)
 	draw_arc(Vector2.ZERO, r * 2.0, 0.0, TAU, 28, halo, 1.4, true)
 
+	_draw_pickup_label(r, Palette.BOOST)
+
 
 ## A Relic: a six-point hexagram, always spawned in a contradictory pair.
 ## Deliberately a different silhouette from both Boost's four-point star (an
@@ -549,40 +564,21 @@ func _draw_relic(r: float) -> void:
 	halo.a = 0.09 + 0.05 * sin(spin * 2.4)
 	draw_arc(Vector2.ZERO, r * 1.85, 0.0, TAU, 24, halo, 1.2, true)
 
-	draw_relic_mark(self, relic_id, Vector2.ZERO, r * 0.6, Palette.RELIC)
-
-
-## Shape-only marks for the four Relic effects, same "static, shared vocabulary"
-## reasoning as draw_mark — the Heart's active-relic indicator (game.gd) draws
-## the same glyph so a returning player recognises it without re-reading.
-static func draw_relic_mark(ci: CanvasItem, relic_id_: int, center: Vector2, s: float, col: Color) -> void:
-	match relic_id_:
-		0: # rush — a forward-leaning double chevron, speed
-			for off in [-s * 0.35, s * 0.35]:
-				ci.draw_line(center + Vector2(-s * 0.5, off - s * 0.4),
-					center + Vector2(s * 0.3, off), col, 2.6)
-				ci.draw_line(center + Vector2(-s * 0.5, off + s * 0.4),
-					center + Vector2(s * 0.3, off), col, 2.6)
-		1: # calm — concentric still rings
-			ci.draw_arc(center, s * 0.35, 0.0, TAU, 16, col, 2.2, true)
-			ci.draw_arc(center, s * 0.75, 0.0, TAU, 20, col, 2.0, true)
-		2: # overflow — an upward-brimming cup
-			var cup := PackedVector2Array([
-				center + Vector2(-s * 0.55, -s * 0.1), center + Vector2(-s * 0.4, s * 0.6),
-				center + Vector2(s * 0.4, s * 0.6), center + Vector2(s * 0.55, -s * 0.1),
-			])
-			ci.draw_polyline(cup, col, 2.4, false)
-			ci.draw_line(center + Vector2(-s * 0.62, -s * 0.35), center + Vector2(s * 0.62, -s * 0.35), col, 2.4)
-		_: # vault — a closed, banded box
-			ci.draw_rect(Rect2(center - Vector2(s * 0.55, s * 0.4), Vector2(s * 1.1, s * 0.8)), col, false, 2.2)
-			ci.draw_line(center + Vector2(0.0, -s * 0.4), center + Vector2(0.0, s * 0.4), col, 2.0)
+	# TIME_BASED shares its glyph vocabulary with PERSISTENT (see draw_mark)
+	# — both draw from game.gd's same BoosterEffect enum now, so one shared
+	# static function is the whole vocabulary, not two parallel ones.
+	draw_mark(self, relic_id, Vector2.ZERO, r * 0.6, Palette.RELIC)
+	_draw_pickup_label(r, Palette.RELIC)
 
 
 ## A Mutation: a slow diamond, always spawned in a pair. Taking either one
 ## removes both — a fork, not a freebie, so its silhouette must read as
-## "deliberate choice" rather than "gift" even though it shares Boost's warm
-## hue and drag-to-trigger verb. The inner mark (see _draw_mutation_mark) is
-## the only thing distinguishing which perk this half of the fork grants.
+## "deliberate choice" rather than "gift". Coloured Palette.PERSISTENT, not
+## Palette.WARM or Palette.RELIC — a Mutation's perk outlives the run even
+## longer than a Relic's timer outlives its own pickup, so it gets its own
+## hue rather than sharing either the "instant grab" or "temporary" family's.
+## The inner mark (see draw_mark) is the only thing distinguishing which
+## perk this half grants.
 func _draw_mutation(r: float) -> void:
 	var s := r * 1.15
 	var spin := float(Time.get_ticks_msec()) * 0.0009
@@ -592,51 +588,61 @@ func _draw_mutation(r: float) -> void:
 		dia.append(Vector2(cos(a), sin(a)) * s)
 	dia.append(dia[0])
 
-	var fill := Palette.WARM
+	var fill := Palette.PERSISTENT
 	fill.a = 0.12 + pulse * 0.22
 	draw_colored_polygon(dia, fill)
-	var edge := Palette.WARM
+	var edge := Palette.PERSISTENT
 	edge.a = 0.65 + pulse * 0.3
 	draw_polyline(dia, edge, 2.2 + pulse * 1.3, true)
 
-	var halo := Palette.WARM
+	var halo := Palette.PERSISTENT
 	halo.a = 0.08 + 0.05 * sin(spin * 2.1)
 	draw_arc(Vector2.ZERO, r * 1.8, 0.0, TAU, 24, halo, 1.2, true)
 
-	draw_mark(self, mutation_id, Vector2.ZERO, r * 0.62, Palette.WARM)
+	draw_mark(self, mutation_id, Vector2.ZERO, r * 0.62, Palette.PERSISTENT)
+	_draw_pickup_label(r, Palette.PERSISTENT)
+
+
+## The readable icon text ("1.15×", "+25", "⇄", "14s", ...) every booster
+## pickup carries — see the `label` field. Same font/centring pattern as
+## score_hud.gd and float_text.gd (ThemeDB.fallback_font, no custom font
+## resource in the project), sitting just below the shape so it never
+## competes with the inner glyph or the Heart's own score readout.
+func _draw_pickup_label(r: float, col: Color) -> void:
+	if label == "":
+		return
+	var font := ThemeDB.fallback_font
+	var size := 13
+	var w := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var lc := col
+	lc.a = 0.75 + pulse * 0.25
+	draw_string(font, Vector2(-w * 0.5, r + 22.0), label,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, size, lc)
 
 
 ## Shape-only, per the palette rule ("colour is a redundant channel"). Static
-## so both the pick-time diamond AND the persistent tray (see game.gd's
-## MutationHint) can draw the exact same glyph — a mark that only ever
-## appears once, at pick time, on a shape the player is choosing between two
-## of under time pressure, cannot be learned by feel. The tray is what makes
-## repeat-play recognition possible at all: this is the shared vocabulary.
-static func draw_mark(ci: CanvasItem, mut_id: int, center: Vector2, s: float, col: Color) -> void:
-	match mut_id:
-		0: # thick trunks — two bold parallel bars, a fat pipe
+## so every rendering of a given BoosterEffect — the PERSISTENT diamond, the
+## TIME_BASED hexagram, and the Heart's own persistent tray/active-effect
+## ring (game.gd) — all draw the exact same glyph, the shared vocabulary a
+## returning player learns once and recognises everywhere.
+static func draw_mark(ci: CanvasItem, effect_id: int, center: Vector2, s: float, col: Color) -> void:
+	match effect_id:
+		0: # score — a rising chevron, climbing
+			var pts := PackedVector2Array([
+				center + Vector2(-s, s * 0.5), center + Vector2(0.0, -s * 0.6),
+				center + Vector2(s, s * 0.5),
+			])
+			ci.draw_polyline(pts, col, 2.8, true)
+		1: # appetite — concentric still rings, calm
+			ci.draw_arc(center, s * 0.35, 0.0, TAU, 16, col, 2.2, true)
+			ci.draw_arc(center, s * 0.75, 0.0, TAU, 20, col, 2.0, true)
+		2: # capacity — two bold parallel bars, a fat pipe
 			ci.draw_line(center + Vector2(-s, -s * 0.35), center + Vector2(s, -s * 0.35), col, 3.0)
 			ci.draw_line(center + Vector2(-s, s * 0.35), center + Vector2(s, s * 0.35), col, 3.0)
-		1: # long reach — a four-point burst, reaching outward
+		_: # reach — a four-point burst, reaching outward
 			for i in 4:
 				var a := TAU * float(i) / 4.0
 				ci.draw_line(center, center + Vector2(cos(a), sin(a)) * s * 1.3, col, 2.8)
-		2: # reservoir — a single full droplet
-			ci.draw_circle(center, s * 0.62, col)
-		3: # rapid pulse — a heartbeat blip
-			var pts := PackedVector2Array([
-				Vector2(-s, 0.0), Vector2(-s * 0.35, 0.0), Vector2(-s * 0.1, -s),
-				Vector2(s * 0.1, s), Vector2(s * 0.35, 0.0), Vector2(s, 0.0),
-			])
-			for i in pts.size():
-				pts[i] += center
-			ci.draw_polyline(pts, col, 2.6, true)
-		_: # steady hands — a calm, wide wave
-			var pts := PackedVector2Array()
-			for i in 9:
-				var t := float(i) / 8.0
-				pts.append(center + Vector2(lerpf(-s, s, t), sin(t * TAU) * s * 0.4))
-			ci.draw_polyline(pts, col, 2.6, true)
 
 
 ## A spent Well, gone necrotic: cold, jagged, and beating out of time with you.

@@ -196,132 +196,91 @@ const FIRST_BUDGET_TIME := 8.0
 const BUDGET_GAP_START := 12.0
 const BUDGET_GAP_GROWTH := 3.5  # ...while veins arrive slower and slower
 
-## Boosts — the "build your own strategy" lever. A rare, self-consuming pickup:
-## connecting ANY vein to one triggers it immediately, no new verb, no waiting
-## for a dot to arrive. It grants one random effect and both the node and the
-## vein that reached it vanish (refunded — a Boost never costs a permanent slot).
-## This is a real branch, not a freebie: every second spent detouring toward one
-## is a second not spent re-plumbing for the next demand flip.
-## Playtest: "no boosts, combos, crazy features" — they existed, but at 24s/46s
-## a run barely contained one, and after halving the escalation clock it would
-## have contained none. A mechanic the player never sees may as well not be
-## implemented. Frequent enough that a Boost is a recurring decision ("detour
-## for it, or hold the line?") rather than a once-a-run curiosity.
+## BOOSTERS. Three families, one shared pickup mechanic (reach it with a vein
+## from an already-live node — see _add_vein): ONE_OFF is a rare, self-
+## consuming pickup, gone the instant it's taken; PERSISTENT is a permanent,
+## run-long perk that replaces whichever persistent perk you already hold;
+## TIME_BASED is a stronger, temporary version of the same perk pool that
+## expires on its own clock. Every PERSISTENT/TIME_BASED effect pairs a real
+## benefit with a real, felt cost — no free multipliers, per the
+## WRONG_SHAPE_FUEL lesson (an invisible or costless bonus explains nothing
+## and gets ignored). A ONE_OFF grab stays pure: the detour to reach it, and
+## the vein budget spent doing so, is already the cost.
 ##
-## REVISED TWICE: 7s -> 22s wasn't enough either ("still comes very soon,
-## give it a time — I know that was a wrong decision"). The opening now
-## belongs entirely to Wells, the Heart, and the Forge/Loom/Kiln chain — no
-## Boost competes for attention until that whole teaching arc (RAW through
-## the CLOTH flip) is well behind the player, not just barely finished.
-## Widened the recurring gap too, so a Boost stays a rare event for the
-## whole run, not just a slow open.
-const FIRST_BOOST_TIME := 50.0
-const BOOST_GAP := 22.0
+## Playtest: "no boosts, combos, crazy features" — they existed, but at
+## 24s/46s a run barely contained one. A mechanic the player never sees may as
+## well not be implemented; both families stay rare enough to be a recurring
+## decision ("detour for it, or hold the line?"), never a once-a-run curiosity.
+const FIRST_ONE_OFF_TIME := 50.0
+const ONE_OFF_GAP := 22.0
 
-## SURGE and CLEANSE are instant, single-use grabs — no ongoing state, gone
-## the moment they're taken. EASE moved to the Relic system below (CALM) once
-## Boosts split into instant-vs-persistent: "one increases score earning
-## rate, one slows down heart dying speed... only one persistent at a time."
-enum BoostFx { SURGE, CLEANSE }
+## A pure grab, no paired cost — see the family comment above. CLEANSE only
+## makes sense with something to cleanse; SWAP_SYMBOLS banks a charge spent on
+## the next drag between two live producing nodes (see _add_vein) instead of
+## drawing a vein. EXTRA_SLOT raises whichever category (persistent or
+## time-based) you next take a pickup from, from 1 slot to 2, for the rest of
+## the run — chosen implicitly by whatever you take next, not at pickup time.
+enum OneOff { SCORE_BURST, SWAP_SYMBOLS, EXTRA_SLOT, EXTRA_VEIN, CLEANSE }
+const ONE_OFF_SCORE_BURST := 25
+const EXTRA_VEIN_BUDGET := 1
 ## Weighted so CLEANSE never wastes itself as a no-op reroll when nothing is
-## corrupted — see _roll_boost.
-const BOOST_WEIGHTS := [0.55, 0.45]
+## corrupted — see _roll_one_off.
+const ONE_OFF_WEIGHTS := [0.24, 0.19, 0.14, 0.24, 0.19]
 
-const BOOST_SURGE_BUDGET := 1
+## Shared by both PERSISTENT and TIME_BASED — the same four effect types,
+## offered in two flavours: a weaker permanent version and a stronger
+## temporary one. SCORE's cost lands on APPETITE and APPETITE's cost lands on
+## SCORE — the two sit on each other's benefit axis, so you cannot cheaply
+## stack both directions at once.
+enum BoosterEffect { SCORE, APPETITE, CAPACITY, REACH }
 
-## Relics: a Boost's persistent counterpart. Spawn as a contradictory PAIR
-## (same fork mechanic as Mutation — see _spawn_mutation_pair) rather than a
-## flat pool, because the trade-off IS the mechanic: taking Rush is also
-## explicitly refusing Calm. Only one Relic effect may be active at a time —
-## a fresh pair never spawns while one is either active or still waiting to
-## be chosen — so the board never has to juggle several ongoing effects at
-## once, and picking one is always a clean, legible decision.
-enum Relic { RUSH, CALM, OVERFLOW, VAULT }
-const RELIC_PAIRS := [
-	[Relic.RUSH, Relic.CALM],
-	[Relic.OVERFLOW, Relic.VAULT],
-]
-## Same "give it real time before competing for attention" lesson as Boost's
-## own history just above — Relics are a deeper system, so they open even later.
-const FIRST_RELIC_TIME := 65.0
-## Gap counted from when the PREVIOUS effect ends (or is skipped), not from
-## calendar time — see _tick_escalation. A run only ever juggles one Relic
-## question at a time.
-const RELIC_GAP := 20.0
-const RELIC_DURATION := 16.0
+const FIRST_PERSISTENT_TIME := 12.0
+## Gap counted from calendar time, not from when the current perk is replaced
+## — a persistent offer is a genuine ongoing choice (keep what you hold, or
+## trade it for the new offer), so unlike time-based it keeps arriving even
+## while a slot is already full.
+const PERSISTENT_GAP := 34.0
 
-## Rush: score-rate up, but the Heart also gets hungrier faster while it's
-## active — an aggression option that only pays off if you can keep feeding it.
-const RELIC_RUSH_FUEL_MULT := 1.6
-const RELIC_RUSH_APPETITE_MULT := 1.35
-## Calm: the Heart's hunger eases (slows dying), but you earn less while it's
-## active — a safety option that costs you ground even as it buys you time.
-const RELIC_CALM_APPETITE_MULT := 0.55
-const RELIC_CALM_FUEL_MULT := 0.7
-## Overflow: budget grows now and KEEPS the growth after the timer ends, but
-## fuel capacity shrinks for the duration — more veins, thinner margin.
-const RELIC_OVERFLOW_BUDGET := 2
-const RELIC_OVERFLOW_FUEL_CAP_MULT := 0.72
-## Vault: fuel capacity grows for the duration (a bigger buffer to survive a
-## bad stretch), but scheduled budget growth pauses while it's active — more
-## margin, but the network stops expanding.
-const RELIC_VAULT_FUEL_CAP_BONUS := 3.0
+const FIRST_TIME_BASED_TIME := 65.0
+## Gap counted from calendar time; the spawn gate itself (see _tick_escalation)
+## only opens once a slot is actually free.
+const TIME_BASED_GAP := 20.0
+const TIME_BASED_DURATION := 14.0
 
-## The Heart mutates. At each of three fixed moments a run offers TWO of these,
-## presented as a pair — see _spawn_mutation_pair — and taking either one
-## removes both, permanently reshaping every system for the rest of the run.
-##
-## This is the answer to "use your talent to plan ahead": DEMAND_TIERS and
-## corruption are things you REACT to, but a mutation is a build decision you
-## make BEFORE you know exactly how the rest of the run will punish it. Every
-## perk pairs a real benefit with a real, felt cost — no free multipliers, per
-## the WRONG_SHAPE_FUEL lesson (an invisible or costless bonus explains
-## nothing and gets ignored). A returning player learns to read the inner mark
-## on sight, the same way a Forge's triangle or a Loom's square are learned,
-## and picks based on which fork suits the network they are mid-building.
-enum Mutation { THICK_TRUNKS, LONG_REACH, RESERVOIR, RAPID_PULSE, STEADY_HANDS }
+## [benefit, cost] per BoosterEffect. Persistent is the weaker, permanent
+## half; time-based is the stronger, temporary half of the same idea.
+const PERSISTENT_SCORE_MULT := 1.15
+const PERSISTENT_SCORE_COST_APPETITE := 1.15
+const PERSISTENT_APPETITE_MULT := 0.85
+const PERSISTENT_APPETITE_COST_SCORE := 0.9
+const PERSISTENT_CAPACITY_MULT := 1.3
+const PERSISTENT_CAPACITY_COST_BUDGET_GAP := 1.25
+const PERSISTENT_REACH_MULT := 1.2
+const PERSISTENT_REACH_COST_APPETITE := 1.15
 
-## Spaced across the run rather than tied 1:1 to DEMAND_TIERS: one early
-## (before the first flip even lands, a foundational bet), one right before
-## REFINED, one with real lead before CLOTH. Three real forks in one run is
-## enough to matter without turning every flip into a shopping trip.
-const MUTATION_TIMES := [3.0, 12.0, 30.0]
+const TIME_SCORE_MULT := 1.4
+const TIME_SCORE_COST_APPETITE := 1.3
+const TIME_APPETITE_MULT := 0.6
+const TIME_APPETITE_COST_SCORE := 0.75
+## Capacity's time-based cost is stronger than persistent's: the whole budget
+## freezes for the duration (mirrors the old VAULT trade), not just a slower
+## grow-rate.
+const TIME_CAPACITY_MULT := 1.6
+const TIME_REACH_MULT := 1.5
+const TIME_REACH_COST_APPETITE := 1.35
 
-## THICK_TRUNKS' cost lands on budget, not appetite, because its benefit
-## (per-vein throughput) is exactly what makes a slower-growing budget bearable
-## — you are trading vein COUNT for vein QUALITY, a direct, legible swap.
-const MUT_THICK_TRUNKS_CAPACITY := 1.6
-const MUT_THICK_TRUNKS_BUDGET_GAP := 1.35
-
-## LONG_REACH's cost lands on appetite because reach is a spatial cheat code
-## (skip a hop, thin the board) — the clock has to bite harder to keep it from
-## trivialising the routing puzzle MAX_LEN exists to create.
-const MUT_LONG_REACH_RANGE := 1.35
-const MUT_LONG_REACH_APPETITE := 1.25
-
-## RESERVOIR trades the wrong-shape safety net away entirely: with more room to
-## bank fuel ahead of a flip, getting caught unprepared should hurt like it
-## used to before WRONG_SHAPE_FUEL existed, not like a further-softened miss.
-const MUT_RESERVOIR_FUEL_CAP := 3.0
-
-## RAPID_PULSE raises the Heart's tempo AND, matching that same ×1.22 headline,
-## everything it's fed is worth 1.22x more — at the cost of surviving a bad
-## stretch (one fewer missed feeding before the beat stops). Used to only
-## touch BPM, back when score was literally the beat count and a faster heart
-## meant a faster-climbing score for free; now that score is what the Heart
-## actually receives (see game.gd's score var), a BPM-only change left the
-## ×1.22 headline promising something the "+N" pops never delivered.
-const MUT_RAPID_PULSE_BPM := 1.22
-const MUT_RAPID_PULSE_MISSES := 1
-## Floor so stacking this perk twice can never make the Heart fatally fragile
-## on a single miss — MISSES_DYING (3) plus one is the least forgiving allowed.
-const MUT_MISSES_FATAL_FLOOR := 4
-
-## STEADY_HANDS widens the window that pays out SYNC_FUEL at all, at the cost
-## of how much a perfect hit is worth — a forgiveness-for-ceiling trade for
-## players who want the rhythm layer to stop punishing imprecise thumbs.
-const MUT_STEADY_HANDS_WINDOW := 1.6
-const MUT_STEADY_HANDS_SYNC_FUEL := 0.55
+const PERSISTENT_BENEFIT := {
+	BoosterEffect.SCORE: PERSISTENT_SCORE_MULT,
+	BoosterEffect.APPETITE: PERSISTENT_APPETITE_MULT,
+	BoosterEffect.CAPACITY: PERSISTENT_CAPACITY_MULT,
+	BoosterEffect.REACH: PERSISTENT_REACH_MULT,
+}
+const TIME_BENEFIT := {
+	BoosterEffect.SCORE: TIME_SCORE_MULT,
+	BoosterEffect.APPETITE: TIME_APPETITE_MULT,
+	BoosterEffect.CAPACITY: TIME_CAPACITY_MULT,
+	BoosterEffect.REACH: TIME_REACH_MULT,
+}
 
 ## Rot that is never cut does not get to sit there forever as free clutter,
 ## poisoning at your leisure — it collapses outright, taking the asset with it.
@@ -368,6 +327,7 @@ const DRAG_SLOP := 12.0
 @onready var best_label: Label = $Ui/Death/Best
 @onready var budget_hint: Node2D = $BudgetHint
 @onready var score_hud: Node2D = $ScoreHud
+@onready var restart_hint: Node2D = $RestartHint
 
 var rng := RandomNumberGenerator.new()
 var seed_used := 0
@@ -420,8 +380,8 @@ var corruptions := 0
 ## instead.
 var withered := 0
 var collapsed := 0
-## Boosts nobody claimed before VNode.BOOST_LIFE ran out.
-var boosts_expired := 0
+## One-offs nobody claimed before VNode.BOOST_LIFE ran out.
+var one_offs_expired := 0
 ## Every node ever created, by kind — `nodes.size()` alone undercounts once
 ## withering/collapse can remove them mid-run.
 var spawned_wells := 0
@@ -445,56 +405,58 @@ var _next_well_time := FIRST_WELL_TIME
 var _next_forge_time := FIRST_FORGE_TIME
 var _next_loom_time := FIRST_LOOM_TIME
 var _next_kiln_time := FIRST_KILN_TIME
-var _next_boost_time := FIRST_BOOST_TIME
+var _next_one_off_time := FIRST_ONE_OFF_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
-var _next_mutation_idx := 0
-
-## Mutation-driven modifiers, all defaulting to a no-op and reset every run in
-## start_run(). Multiplicative, so stacking the same perk twice (two different
-## MUTATION_TIMES can offer the same one) compounds rather than overwrites.
-var _mut_capacity_mult := 1.0
-var _mut_reach_mult := 1.0
-var _mut_budget_gap_mult := 1.0
-var _mut_appetite_rate_mult := 1.0
-var _mut_fuel_cap_bonus := 0.0
-var _mut_wrong_shape_fuel := WRONG_SHAPE_FUEL
-var _mut_misses_fatal_delta := 0
-var _mut_good_window_mult := 1.0
-var _mut_sync_fuel_mult := 1.0
-## RAPID_PULSE's half of its ×1.22 headline — see MUT_RAPID_PULSE_BPM.
-var _mut_fuel_mult := 1.0
-## Taken this run, for the probe to confirm the fork is actually being reached.
-var mutations_taken := 0
-## Which perks, in pick order — MutationHint reads this to draw a persistent
-## tray of the same marks shown at pick time. The pick itself is a one-shot,
-## time-pressured choice between two abstract glyphs on a shape that then
-## vanishes — with nothing left on screen afterward, there was no way to ever
-## learn what a mark meant, no matter how many runs you played. The tray is
-## what turns it into something learnable by feel, same as a Forge's triangle.
-var active_mutations: Array[int] = []
+var _next_persistent_time := FIRST_PERSISTENT_TIME
+var _next_time_based_time := FIRST_TIME_BASED_TIME
 
 var _appetite_clock := 0.0
-## Boosts collected this run, and which effect fired — useful for the probe to
-## confirm they are actually being reached rather than sitting decorative.
-var boosts_taken := 0
+## One-offs collected this run — useful for the probe to confirm they are
+## actually being reached rather than sitting decorative.
+var one_offs_taken := 0
+var persistents_taken := 0
+var time_baseds_taken := 0
 
-## Which Relic effect is active right now, or -1 for none. Drives the
-## multipliers below and the Heart's active-relic indicator (see game.gd's
-## _draw() and VNode.draw_relic_mark).
-var _active_relic := -1
-var _active_relic_remaining := 0.0
-var _next_relic_time := FIRST_RELIC_TIME
-var relics_taken := 0
-## Modifiers applied by whichever Relic is active — every one is a no-op
-## default, reset here AND the instant the active Relic's timer runs out
-## (see _tick_escalation), so an effect never outlives its duration.
-var _relic_fuel_mult := 1.0
-var _relic_appetite_mult := 1.0
-var _relic_fuel_cap_mult := 1.0
-var _relic_fuel_cap_bonus := 0.0
-var _relic_budget_frozen := false
+## PERSISTENT perks currently held, in pick order — BoosterEffect ids. Never
+## expires on its own; taking a new one evicts the oldest once at cap (see
+## _apply_persistent). Pushed into heart.mutation_marks the instant it
+## changes so the Heart wears every held perk on its own body, same spot
+## every time, the same way a Forge's triangle or a Loom's square are learned
+## by sight — see VNode._draw_mutation_marks.
+var _active_persistent: Array[int] = []
+## TIME_BASED perks currently held: {effect: BoosterEffect, remaining: float}.
+## Each entry counts down independently (see _tick_time_based) so a second
+## slot from EXTRA_SLOT can expire on its own schedule.
+var _active_time_based: Array[Dictionary] = []
+## How many concurrent slots each category allows — both start at 1; a
+## ONE_OFF EXTRA_SLOT pickup raises whichever category you next take a
+## pickup from to 2, for the rest of the run (see _pending_extra_slot).
+var _persistent_cap := 1
+var _time_based_cap := 1
+## Set by an EXTRA_SLOT one-off; consumed by the very next PERSISTENT or
+## TIME_BASED pickup taken, whichever comes first — that pickup's category is
+## the one that gets the extra slot.
+var _pending_extra_slot := false
+## Set by a SWAP_SYMBOLS one-off; consumed by the next drag between two live
+## producing nodes, which swaps what they each produce instead of drawing a
+## vein between them (see _add_vein).
+var _swap_charge := false
+
+## Folded from _active_persistent + _active_time_based every time either
+## changes (see _recompute_boosters) — the single set of modifiers every
+## other system actually reads, so appetite()/fuel math/vein creation never
+## need to know which category or how many stacked perks produced a number.
+var _boost_score_mult := 1.0
+var _boost_appetite_mult := 1.0
+var _boost_capacity_mult := 1.0
+var _boost_reach_mult := 1.0
+## CAPACITY's persistent cost (budget grows slower) and time-based cost
+## (budget growth pauses entirely) — kept separate because they are
+## different mechanisms, not different strengths of the same one.
+var _boost_budget_gap_mult := 1.0
+var _boost_budget_frozen := false
 
 var _drag_from: VNode = null
 var _drag_pos := Vector2.ZERO
@@ -655,7 +617,7 @@ func start_run(run_seed: int) -> void:
 	dropped = 0
 	withered = 0
 	collapsed = 0
-	boosts_expired = 0
+	one_offs_expired = 0
 	spawned_wells = 0
 	poisoned = 0
 	corruptions = 0
@@ -669,38 +631,32 @@ func start_run(run_seed: int) -> void:
 	_sync_flash = 0.0
 	_bad_tempo_flash = 0.0
 	_appetite_clock = 0.0
-	boosts_taken = 0
-	_active_relic = -1
-	_active_relic_remaining = 0.0
-	_next_relic_time = FIRST_RELIC_TIME
-	relics_taken = 0
-	_relic_fuel_mult = 1.0
-	_relic_appetite_mult = 1.0
-	_relic_fuel_cap_mult = 1.0
-	_relic_fuel_cap_bonus = 0.0
-	_relic_budget_frozen = false
+	one_offs_taken = 0
+	persistents_taken = 0
+	time_baseds_taken = 0
+	_active_persistent.clear()
+	_active_time_based.clear()
+	_persistent_cap = 1
+	_time_based_cap = 1
+	_pending_extra_slot = false
+	_swap_charge = false
+	_boost_score_mult = 1.0
+	_boost_appetite_mult = 1.0
+	_boost_capacity_mult = 1.0
+	_boost_reach_mult = 1.0
+	_boost_budget_gap_mult = 1.0
+	_boost_budget_frozen = false
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
 	_next_loom_time = FIRST_LOOM_TIME
 	_next_kiln_time = FIRST_KILN_TIME
-	_next_boost_time = FIRST_BOOST_TIME
+	_next_one_off_time = FIRST_ONE_OFF_TIME
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
-	_next_mutation_idx = 0
-	_mut_capacity_mult = 1.0
-	_mut_reach_mult = 1.0
-	_mut_budget_gap_mult = 1.0
-	_mut_appetite_rate_mult = 1.0
-	_mut_fuel_cap_bonus = 0.0
-	_mut_wrong_shape_fuel = WRONG_SHAPE_FUEL
-	_mut_misses_fatal_delta = 0
-	_mut_good_window_mult = 1.0
-	_mut_sync_fuel_mult = 1.0
-	_mut_fuel_mult = 1.0
-	mutations_taken = 0
-	active_mutations.clear()
+	_next_persistent_time = FIRST_PERSISTENT_TIME
+	_next_time_based_time = FIRST_TIME_BASED_TIME
 
 	var vp := design_size()
 	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
@@ -810,7 +766,7 @@ func _on_beat(index: int) -> void:
 	elif misses > 0:
 		misses -= 1
 
-	if misses >= MISSES_FATAL + _mut_misses_fatal_delta:
+	if misses >= MISSES_FATAL:
 		Beat.stop()
 		return
 	elif misses >= MISSES_DYING:
@@ -831,8 +787,9 @@ func intensity() -> float:
 
 
 ## Fuel the Heart burns per beat, rising on the run clock — scaled by
-## `_relic_appetite_mult` while a Relic is active (RUSH raises it, CALM
-## eases it; see _apply_relic).
+## `_boost_appetite_mult`, folded from every active PERSISTENT/TIME_BASED
+## APPETITE perk plus the appetite cost of every SCORE/REACH perk (see
+## _recompute_boosters).
 ##
 ## The climb used to be a flat ramp: predictable the moment you'd seen a
 ## minute of it. A sine wave riding on top makes the hunger itself feel
@@ -845,15 +802,13 @@ const APPETITE_WAVE_AMP := 0.09
 const APPETITE_WAVE_PERIOD := 17.0
 
 func appetite() -> float:
-	var base := APPETITE_BASE + APPETITE_RATE * _mut_appetite_rate_mult * _appetite_clock
+	var base := APPETITE_BASE + APPETITE_RATE * _appetite_clock
 	var wave := sin(_appetite_clock * TAU / APPETITE_WAVE_PERIOD) * APPETITE_WAVE_AMP * intensity()
-	return maxf(0.02, (base + wave) * _relic_appetite_mult)
+	return maxf(0.02, (base + wave) * _boost_appetite_mult)
 
 
-## FUEL_CAP plus whatever RESERVOIR mutations this run has banked, scaled by
-## whichever Relic is active (OVERFLOW shrinks it, VAULT grows it).
 func fuel_cap() -> float:
-	return (FUEL_CAP + _mut_fuel_cap_bonus + _relic_fuel_cap_bonus) * _relic_fuel_cap_mult
+	return FUEL_CAP
 
 
 ## Every spawn cadence used to be a flat interval — the exact same gap, every
@@ -872,16 +827,20 @@ func _tick_escalation(delta: float) -> void:
 	run_time += delta
 	_appetite_clock += delta
 
-	if _active_relic >= 0:
-		_active_relic_remaining -= delta
-		if _active_relic_remaining <= 0.0:
-			_revert_relic()
+	_tick_time_based(delta)
 
-	# A Relic only ever offers ONE question at a time — a fresh pair waits
-	# for the current effect to fully end (see _revert_relic, which re-arms
-	# this) AND for nothing to already be sitting on the board unclaimed.
-	if run_time >= _next_relic_time and _active_relic < 0 and not _has_relic_pair():
-		_spawn_relic_pair()
+	# A fresh PERSISTENT offer keeps arriving on a flat calendar cadence even
+	# while a slot is already full — taking one is always a real trade (give
+	# up what you hold), not something you have to wait to become eligible
+	# for. A TIME_BASED offer only appears once an actual slot is free.
+	if run_time >= _next_persistent_time and not _has_persistent_pair():
+		_spawn_persistent_pair()
+		_next_persistent_time += _jitter(PERSISTENT_GAP, 0.3)
+
+	if run_time >= _next_time_based_time and _active_time_based.size() < _time_based_cap \
+			and not _has_time_based_pair():
+		_spawn_time_based_pair()
+		_next_time_based_time += _jitter(TIME_BASED_GAP, 0.3)
 
 	var want: int = demand
 	for t in DEMAND_TIERS:
@@ -932,22 +891,19 @@ func _tick_escalation(delta: float) -> void:
 		_spawn_node(VNode.Kind.KILN)
 		_next_kiln_time += _jitter(KILN_GAP, 0.2)
 
-	if run_time >= _next_boost_time:
-		_spawn_boost()
-		_next_boost_time += _jitter(BOOST_GAP, 0.4)
+	if run_time >= _next_one_off_time:
+		_spawn_one_off()
+		_next_one_off_time += _jitter(ONE_OFF_GAP, 0.4)
 
-	if _next_mutation_idx < MUTATION_TIMES.size() and run_time >= MUTATION_TIMES[_next_mutation_idx]:
-		_spawn_mutation_pair()
-		_next_mutation_idx += 1
-
-	# VAULT (see _apply_relic) freezes this: the network stops expanding for
-	# the duration in exchange for a bigger fuel buffer. run_time keeps
-	# sailing past _next_budget_time while frozen, so the tick fires the
-	# instant VAULT ends rather than losing the progress entirely.
-	if not _relic_budget_frozen and run_time >= _next_budget_time:
+	# A time-based CAPACITY perk (see _recompute_boosters) freezes this: the
+	# network stops expanding for the duration in exchange for a much bigger
+	# vein throughput. run_time keeps sailing past _next_budget_time while
+	# frozen, so the tick fires the instant the freeze ends rather than
+	# losing the progress entirely.
+	if not _boost_budget_frozen and run_time >= _next_budget_time:
 		budget += 1
 		_next_budget_time += _jitter(_budget_gap, 0.15)
-		_budget_gap += BUDGET_GAP_GROWTH * _mut_budget_gap_mult
+		_budget_gap += BUDGET_GAP_GROWTH * _boost_budget_gap_mult
 		budget_hint.queue_redraw()
 
 
@@ -977,23 +933,21 @@ func _spawn_well() -> void:
 	_spawn_node(VNode.Kind.WELL)
 
 
-## Boosts get the same treatment as Wells (see _spawn_well just above): a
-## fixed number of live slots, and a fresh one displaces the oldest
-## still-unclaimed one rather than piling up past that. Feedback: "you should
-## have X slots for boosters at all times, and sacrifice one when all the
-## slots are filled" — without this, a cluster of skipped Boosts (each still
-## individually timing out via VNode.BOOST_LIFE) could stack up on screen
-## for a while first, reading as accumulation rather than a hard limit.
-const MAX_LIVE_BOOSTS := 2
+## Only one instant one-off ever sits on the board. Feedback: "you can't have
+## multiple boosters at the same time... let's say you can have one active
+## booster at the time." A fresh one-off still displaces whichever one is
+## already there rather than being skipped, so the cadence stays exactly as
+## regular as before — there is just never more than one to choose from.
+const MAX_LIVE_ONE_OFFS := 1
 
 
-func _spawn_boost() -> void:
+func _spawn_one_off() -> void:
 	var live: Array[VNode] = []
 	for n in nodes:
 		if n.kind == VNode.Kind.BOOST:
 			live.append(n)
 
-	if live.size() >= MAX_LIVE_BOOSTS:
+	if live.size() >= MAX_LIVE_ONE_OFFS:
 		var oldest: VNode = null
 		for n in live:
 			if oldest == null or n.orphan_age > oldest.orphan_age:
@@ -1132,7 +1086,8 @@ func _spawn_node(kind: int) -> void:
 		best = _least_crowded_spot(anchor_point, (min_dist + max_dist) * 0.5)
 	var n := _make_node(kind, best)
 	if kind == VNode.Kind.BOOST:
-		n.boost_effect = _roll_boost()
+		n.boost_effect = _roll_one_off()
+		n.label = _one_off_headline(n.boost_effect)
 	elif kind == VNode.Kind.FORGE and not seen_forge:
 		seen_forge = true
 		n.teach = true
@@ -1175,20 +1130,64 @@ func _least_crowded_spot(center: Vector2, dist: float) -> Vector2:
 	return best
 
 
+## Where the next Relic/Mutation fork centers. Reuses the exact same
+## anchor-off-a-connected-node search Wells and Boosts already use to spread
+## across the whole board, rather than the fixed 96px ring around the Heart
+## both forks used to spawn on unconditionally. Feedback: "boosters should
+## spawn anywhere in the screen not just near the heart."
+##
+## The two halves of a fork sit ANCHOR_HALF_SPREAD apart from this point, so
+## the search keeps its own distance from a connected node short enough
+## (well under Vein.MAX_LEN) that both halves stay in reach of it no matter
+## which way the pair happens to be split.
+const PICKUP_ANCHOR_MIN := 90.0
+const PICKUP_ANCHOR_MAX := 140.0
+const PICKUP_HALF_SPREAD := 40.0
+
+func _random_pickup_anchor() -> Vector2:
+	var vp := design_size()
+	var connected: Array[VNode] = []
+	for n in nodes:
+		if n.depth >= 0:
+			connected.append(n)
+	if connected.is_empty():
+		connected = nodes
+
+	var best := heart.position
+	var best_near := -INF
+	for _i in 48:
+		var anchor: VNode = connected[rng.randi() % connected.size()]
+		var bearing := rng.randf() * TAU
+		var dist := rng.randf_range(PICKUP_ANCHOR_MIN, PICKUP_ANCHOR_MAX)
+		var p: Vector2 = anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
+		if p.x < 70.0 or p.x > vp.x - 70.0 or p.y < 90.0 or p.y > vp.y - 90.0:
+			continue
+		var near := INF
+		for n in nodes:
+			near = minf(near, p.distance_to(n.position))
+		if near > best_near:
+			best_near = near
+			best = p
+	return best
+
+
 ## Rolled from the seeded run RNG, not global randf() — the whole sim stays
 ## deterministic given a seed, which is what the Daily and the probe both rely
 ## on. CLEANSE only makes sense with something to cleanse; falling back to
-## SURGE when nothing is corrupted means a boost is never a wasted no-op.
-func _roll_boost() -> int:
+## Rolled from the seeded run RNG, not global randf() — the whole sim stays
+## deterministic given a seed. CLEANSE only makes sense with something to
+## cleanse; weighted down to zero (see ONE_OFF_WEIGHTS) when nothing is
+## corrupted so a one-off is never a wasted no-op.
+func _roll_one_off() -> int:
 	var has_target := false
 	for n in nodes:
 		if n.corrupted:
 			has_target = true
 			break
 
-	var weights := BOOST_WEIGHTS.duplicate()
+	var weights := ONE_OFF_WEIGHTS.duplicate()
 	if not has_target:
-		weights[BoostFx.CLEANSE] = 0.0
+		weights[OneOff.CLEANSE] = 0.0
 
 	var total := 0.0
 	for w in weights:
@@ -1199,17 +1198,32 @@ func _roll_boost() -> int:
 		acc += weights[i]
 		if roll <= acc:
 			return i
-	return BoostFx.SURGE
+	return OneOff.EXTRA_VEIN
 
 
-## Spawns the two halves of one fork, symmetric about the Heart so both are
-## always in easy one-thumb reach — this is a decision the run hands you, not
-## a detour you have to earn like a Boost. Rolled from the seeded rng, same as
-## everything else, so a given seed always offers the same choice.
-func _spawn_mutation_pair() -> void:
+## The readable icon label for a one-off — see the label field on VNode.
+func _one_off_headline(id: int) -> String:
+	match id:
+		OneOff.SCORE_BURST:
+			return "+%d" % ONE_OFF_SCORE_BURST
+		OneOff.SWAP_SYMBOLS:
+			return "⇄"
+		OneOff.EXTRA_SLOT:
+			return "+1 slot"
+		OneOff.EXTRA_VEIN:
+			return "+%d" % EXTRA_VEIN_BUDGET
+		_: # CLEANSE — the cured node's own un-rotting is the confirmation.
+			return ""
+
+
+## Spawns the two halves of one PERSISTENT fork, symmetric about a random
+## board anchor (see _random_pickup_anchor) so both are always in easy
+## one-thumb reach. Rolled from the seeded rng, so a given seed always offers
+## the same choice.
+func _spawn_persistent_pair() -> void:
 	var pool: Array = [
-		Mutation.THICK_TRUNKS, Mutation.LONG_REACH, Mutation.RESERVOIR,
-		Mutation.RAPID_PULSE, Mutation.STEADY_HANDS,
+		BoosterEffect.SCORE, BoosterEffect.APPETITE,
+		BoosterEffect.CAPACITY, BoosterEffect.REACH,
 	]
 	var i := rng.randi() % pool.size()
 	var id_a: int = pool[i]
@@ -1217,9 +1231,10 @@ func _spawn_mutation_pair() -> void:
 	var id_b: int = pool[rng.randi() % pool.size()]
 
 	var vp := design_size()
+	var center := _random_pickup_anchor()
 	var ang := rng.randf() * TAU
-	var a_pos: Vector2 = heart.position + Vector2(cos(ang), sin(ang)) * 96.0
-	var b_pos: Vector2 = heart.position + Vector2(cos(ang + PI), sin(ang + PI)) * 96.0
+	var a_pos: Vector2 = center + Vector2(cos(ang), sin(ang)) * PICKUP_HALF_SPREAD
+	var b_pos: Vector2 = center + Vector2(cos(ang + PI), sin(ang + PI)) * PICKUP_HALF_SPREAD
 	a_pos.x = clampf(a_pos.x, 40.0, vp.x - 40.0)
 	a_pos.y = clampf(a_pos.y, 60.0, vp.y - 60.0)
 	b_pos.x = clampf(b_pos.x, 40.0, vp.x - 40.0)
@@ -1231,107 +1246,36 @@ func _spawn_mutation_pair() -> void:
 	nb.mutation_id = id_b
 	na.mutation_pair = nb
 	nb.mutation_pair = na
+	na.label = _booster_headline(true, id_a)
+	nb.label = _booster_headline(true, id_b)
 	_rebuild_graph()
 
 
-## Applies a chosen perk's permanent, run-long modifiers. Multiplicative and
-## additive on top of whatever earlier mutations already did, so a seed that
-## offers the same perk twice compounds it rather than re-rolling a no-op.
-func _apply_mutation(id: int) -> void:
-	match id:
-		Mutation.THICK_TRUNKS:
-			_mut_capacity_mult *= MUT_THICK_TRUNKS_CAPACITY
-			_mut_budget_gap_mult *= MUT_THICK_TRUNKS_BUDGET_GAP
-		Mutation.LONG_REACH:
-			_mut_reach_mult *= MUT_LONG_REACH_RANGE
-			_mut_appetite_rate_mult *= MUT_LONG_REACH_APPETITE
-		Mutation.RESERVOIR:
-			_mut_fuel_cap_bonus += MUT_RESERVOIR_FUEL_CAP
-			_mut_wrong_shape_fuel = 0.0
-		Mutation.RAPID_PULSE:
-			Beat.bpm_mult *= MUT_RAPID_PULSE_BPM
-			_mut_fuel_mult *= MUT_RAPID_PULSE_BPM
-			_mut_misses_fatal_delta = maxi(
-				_mut_misses_fatal_delta - MUT_RAPID_PULSE_MISSES,
-				MUT_MISSES_FATAL_FLOOR - MISSES_FATAL)
-		Mutation.STEADY_HANDS:
-			_mut_good_window_mult *= MUT_STEADY_HANDS_WINDOW
-			_mut_sync_fuel_mult *= MUT_STEADY_HANDS_SYNC_FUEL
-	active_mutations.append(id)
-	if heart != null:
-		heart.mutation_marks = active_mutations
-
-
-## The headline number for a perk's primary effect — same "eat it, see the
-## multiplier" confirmation Notcoin/Hamster Kombat give a booster, so the
-## payoff is legible the instant it's taken, not just inferred later from
-## how the run happens to feel.
-func _mutation_headline(id: int) -> String:
-	match id:
-		Mutation.THICK_TRUNKS:
-			return "×%.1f" % MUT_THICK_TRUNKS_CAPACITY
-		Mutation.LONG_REACH:
-			return "×%.1f" % MUT_LONG_REACH_RANGE
-		Mutation.RESERVOIR:
-			return "+%d" % roundi(MUT_RESERVOIR_FUEL_CAP)
-		Mutation.RAPID_PULSE:
-			return "×%.2f" % MUT_RAPID_PULSE_BPM
-		_: # STEADY_HANDS
-			return "×%.1f" % MUT_STEADY_HANDS_WINDOW
-
-
-## A vein reaching either half of a fork resolves the WHOLE fork — the road
-## not taken has to visibly vanish, or the choice never reads as a choice.
-func _take_mutation(n: VNode) -> void:
-	_apply_mutation(n.mutation_id)
-	mutations_taken += 1
-
-	var burst: Node2D = BurstScene.new()
-	vein_layer.add_child(burst)
-	var ring: Array[Vector2] = []
-	var kinds: Array[int] = []
-	for i in 10:
-		var a := TAU * float(i) / 10.0
-		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
-		kinds.append(0)
-	burst.spawn(ring, kinds, rng.randi(), Palette.WARM)
-
-	var pop: Node2D = FloatTextScene.new()
-	vein_layer.add_child(pop)
-	pop.spawn(_mutation_headline(n.mutation_id), n.position, Palette.WARM, 20)
-
-	Audio.play("refined", -2.0, 1.5)
-	if OS.has_feature("mobile"):
-		Input.vibrate_handheld(200)
-
-	var sibling := n.mutation_pair
-	n.mutation_pair = null
-	_remove_node(n)
-	if sibling != null and is_instance_valid(sibling):
-		sibling.mutation_pair = null
-		_remove_node(sibling)
-
-
-func _has_relic_pair() -> bool:
+func _has_persistent_pair() -> bool:
 	for n in nodes:
-		if n.kind == VNode.Kind.RELIC:
+		if n.kind == VNode.Kind.MUTATION:
 			return true
 	return false
 
 
-## Same structural trick as _spawn_mutation_pair (symmetric about the Heart,
-## rolled from the seeded rng) but drawing from RELIC_PAIRS — a deliberately
-## opposed pair, not two random picks from a flat pool, because the contrast
-## between the two IS the decision.
-func _spawn_relic_pair() -> void:
-	var pair: Array = RELIC_PAIRS[rng.randi() % RELIC_PAIRS.size()]
-	var id_a: int = pair[0]
-	var id_b: int = pair[1]
+## Same structural trick as _spawn_persistent_pair, drawing from the same
+## four-effect pool — a TIME_BASED pair offers any two of the four, not a
+## fixed opposed pair, same as PERSISTENT.
+func _spawn_time_based_pair() -> void:
+	var pool: Array = [
+		BoosterEffect.SCORE, BoosterEffect.APPETITE,
+		BoosterEffect.CAPACITY, BoosterEffect.REACH,
+	]
+	var i := rng.randi() % pool.size()
+	var id_a: int = pool[i]
+	pool.remove_at(i)
+	var id_b: int = pool[rng.randi() % pool.size()]
 
 	var vp := design_size()
+	var center := _random_pickup_anchor()
 	var ang := rng.randf() * TAU
-	var a_pos: Vector2 = heart.position + Vector2(cos(ang), sin(ang)) * 96.0
-	var b_pos: Vector2 = heart.position + Vector2(cos(ang + PI), sin(ang + PI)) * 96.0
+	var a_pos: Vector2 = center + Vector2(cos(ang), sin(ang)) * PICKUP_HALF_SPREAD
+	var b_pos: Vector2 = center + Vector2(cos(ang + PI), sin(ang + PI)) * PICKUP_HALF_SPREAD
 	a_pos.x = clampf(a_pos.x, 40.0, vp.x - 40.0)
 	a_pos.y = clampf(a_pos.y, 60.0, vp.y - 60.0)
 	b_pos.x = clampf(b_pos.x, 40.0, vp.x - 40.0)
@@ -1343,68 +1287,134 @@ func _spawn_relic_pair() -> void:
 	nb.relic_id = id_b
 	na.relic_pair = nb
 	nb.relic_pair = na
+	na.label = _booster_headline(false, id_a)
+	nb.label = _booster_headline(false, id_b)
 	_rebuild_graph()
 
 
-## Starts the chosen effect's duration. Modifiers are absolute, not
-## compounding — unlike Mutations (permanent, so stacking makes sense),
-## only one Relic is ever active, so there is nothing to stack.
-func _apply_relic(id: int) -> void:
-	_relic_fuel_mult = 1.0
-	_relic_appetite_mult = 1.0
-	_relic_fuel_cap_mult = 1.0
-	_relic_fuel_cap_bonus = 0.0
-	_relic_budget_frozen = false
-	match id:
-		Relic.RUSH:
-			_relic_fuel_mult = RELIC_RUSH_FUEL_MULT
-			_relic_appetite_mult = RELIC_RUSH_APPETITE_MULT
-		Relic.CALM:
-			_relic_appetite_mult = RELIC_CALM_APPETITE_MULT
-			_relic_fuel_mult = RELIC_CALM_FUEL_MULT
-		Relic.OVERFLOW:
-			budget += RELIC_OVERFLOW_BUDGET
-			budget_hint.queue_redraw()
-			_relic_fuel_cap_mult = RELIC_OVERFLOW_FUEL_CAP_MULT
-		Relic.VAULT:
-			_relic_fuel_cap_bonus = RELIC_VAULT_FUEL_CAP_BONUS
-			_relic_budget_frozen = true
-	_active_relic = id
-	_active_relic_remaining = RELIC_DURATION
-	fuel = clampf(fuel, 0.0, fuel_cap())
+func _has_time_based_pair() -> bool:
+	for n in nodes:
+		if n.kind == VNode.Kind.RELIC:
+			return true
+	return false
 
 
-## Effect ends: every modifier snaps back to its no-op default and the next
-## Relic pair is free to appear (see _tick_escalation) after RELIC_GAP more.
-func _revert_relic() -> void:
-	_active_relic = -1
-	_active_relic_remaining = 0.0
-	_relic_fuel_mult = 1.0
-	_relic_appetite_mult = 1.0
-	_relic_fuel_cap_mult = 1.0
-	_relic_fuel_cap_bonus = 0.0
-	_relic_budget_frozen = false
-	_next_relic_time = run_time + _jitter(RELIC_GAP, 0.3)
+## A bare "×1.2" reads the same whether it multiplies score, appetite,
+## capacity, or reach — real confusion in practice, not a hypothetical:
+## reported as "I got a ×1.2 booster and my score didn't go up 1.2x" when
+## the perk taken was actually REACH (×1.2), not SCORE (×1.15/×1.4). The
+## small inner glyph alone (see draw_mark) wasn't legible enough on its own
+## to prevent that read. This prefix ties the number to its own axis inline,
+## so the two numbers most likely to be confused for each other — REACH's
+## ×1.2 and SCORE's ×1.15 — are never shown without also saying which is
+## which.
+const EFFECT_GLYPH := {
+	BoosterEffect.SCORE: "★",
+	BoosterEffect.APPETITE: "♥",
+	BoosterEffect.CAPACITY: "═",
+	BoosterEffect.REACH: "↔",
+}
+
+## The headline number for a perk's primary effect — same "eat it, see the
+## multiplier" confirmation Notcoin/Hamster Kombat give a booster, so the
+## payoff is legible the instant it's taken, not just inferred later from
+## how the run happens to feel.
+func _booster_headline(persistent: bool, effect: int) -> String:
+	var mult: float = (PERSISTENT_BENEFIT if persistent else TIME_BENEFIT)[effect]
+	var glyph: String = EFFECT_GLYPH[effect]
+	if effect == BoosterEffect.CAPACITY and not persistent:
+		return "%s×%.1f" % [glyph, mult]
+	return "%s×%.2f" % [glyph, mult]
 
 
-func _relic_headline(id: int) -> String:
-	match id:
-		Relic.RUSH:
-			return "×%.1f" % RELIC_RUSH_FUEL_MULT
-		Relic.CALM:
-			return "×%.2f" % RELIC_CALM_APPETITE_MULT
-		Relic.OVERFLOW:
-			return "+%d" % RELIC_OVERFLOW_BUDGET
-		_: # VAULT
-			return "+%d" % roundi(RELIC_VAULT_FUEL_CAP_BONUS)
+## Folds every currently-held perk (both families) into the single set of
+## modifiers appetite()/fuel_cap()/in_reach()/_add_vein/_tick_escalation
+## actually read — see the field comments above. Called any time either
+## active array changes, so a stale scalar can never linger after a perk is
+## replaced or expires.
+func _recompute_boosters() -> void:
+	_boost_score_mult = 1.0
+	_boost_appetite_mult = 1.0
+	_boost_capacity_mult = 1.0
+	_boost_reach_mult = 1.0
+	_boost_budget_gap_mult = 1.0
+	_boost_budget_frozen = false
+
+	for effect in _active_persistent:
+		match effect:
+			BoosterEffect.SCORE:
+				_boost_score_mult *= PERSISTENT_SCORE_MULT
+				_boost_appetite_mult *= PERSISTENT_SCORE_COST_APPETITE
+			BoosterEffect.APPETITE:
+				_boost_appetite_mult *= PERSISTENT_APPETITE_MULT
+				_boost_score_mult *= PERSISTENT_APPETITE_COST_SCORE
+			BoosterEffect.CAPACITY:
+				_boost_capacity_mult *= PERSISTENT_CAPACITY_MULT
+				_boost_budget_gap_mult *= PERSISTENT_CAPACITY_COST_BUDGET_GAP
+			BoosterEffect.REACH:
+				_boost_reach_mult *= PERSISTENT_REACH_MULT
+				_boost_appetite_mult *= PERSISTENT_REACH_COST_APPETITE
+
+	for inst in _active_time_based:
+		match int(inst.effect):
+			BoosterEffect.SCORE:
+				_boost_score_mult *= TIME_SCORE_MULT
+				_boost_appetite_mult *= TIME_SCORE_COST_APPETITE
+			BoosterEffect.APPETITE:
+				_boost_appetite_mult *= TIME_APPETITE_MULT
+				_boost_score_mult *= TIME_APPETITE_COST_SCORE
+			BoosterEffect.CAPACITY:
+				_boost_capacity_mult *= TIME_CAPACITY_MULT
+				_boost_budget_frozen = true
+			BoosterEffect.REACH:
+				_boost_reach_mult *= TIME_REACH_MULT
+				_boost_appetite_mult *= TIME_REACH_COST_APPETITE
 
 
-## Same fork resolution as _take_mutation — taking either half removes both
-## — but this one starts a timer instead of a permanent modifier.
-func _take_relic(n: VNode) -> void:
-	_apply_relic(n.relic_id)
-	relics_taken += 1
+## Counts down every held TIME_BASED perk independently (a second slot from
+## EXTRA_SLOT expires on its own schedule) and folds the survivors back in
+## the instant anything changes.
+func _tick_time_based(delta: float) -> void:
+	var changed := false
+	for i in range(_active_time_based.size() - 1, -1, -1):
+		_active_time_based[i].remaining -= delta
+		if _active_time_based[i].remaining <= 0.0:
+			_active_time_based.remove_at(i)
+			changed = true
+	if changed:
+		_recompute_boosters()
 
+
+## Adds a PERSISTENT perk. Evicts the oldest held perk first once at cap —
+## this IS the trade-off: a persistent slot is never a free stack, it is
+## always "keep what I have, or take the new offer instead."
+func _apply_persistent(effect: int) -> void:
+	if _active_persistent.size() >= _persistent_cap:
+		_active_persistent.remove_at(0)
+	_active_persistent.append(effect)
+	_recompute_boosters()
+	if heart != null:
+		heart.mutation_marks = _active_persistent.duplicate()
+
+
+## Adds a TIME_BASED perk with its own countdown. Evicts the oldest-held
+## (soonest-to-expire, since they were added in order) once at cap.
+func _apply_time_based(effect: int) -> void:
+	if _active_time_based.size() >= _time_based_cap:
+		_active_time_based.remove_at(0)
+	_active_time_based.append({"effect": effect, "remaining": TIME_BASED_DURATION})
+	_recompute_boosters()
+
+
+func _swappable(n: VNode) -> bool:
+	return n.kind == VNode.Kind.WELL or n.kind == VNode.Kind.FORGE \
+		or n.kind == VNode.Kind.LOOM or n.kind == VNode.Kind.KILN
+
+
+## Shared payoff FX for every booster pickup — burst + a floating headline (if
+## it has one) + audio + haptic. Same visual weight for a rare grab as for a
+## rupture, just warm instead of violent.
+func _booster_fx(n: VNode, col: Color, headline: String) -> void:
 	var burst: Node2D = BurstScene.new()
 	vein_layer.add_child(burst)
 	var ring: Array[Vector2] = []
@@ -1413,15 +1423,82 @@ func _take_relic(n: VNode) -> void:
 		var a := TAU * float(i) / 10.0
 		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
 		kinds.append(0)
-	burst.spawn(ring, kinds, rng.randi(), Palette.RELIC)
+	burst.spawn(ring, kinds, rng.randi(), col)
 
-	var pop: Node2D = FloatTextScene.new()
-	vein_layer.add_child(pop)
-	pop.spawn(_relic_headline(n.relic_id), n.position, Palette.RELIC, 20)
+	if headline != "":
+		var pop: Node2D = FloatTextScene.new()
+		vein_layer.add_child(pop)
+		pop.spawn(headline, n.position, col, 20)
 
-	Audio.play("refined", -2.0, 1.3)
+	Audio.play("refined", -2.0, 1.5)
 	if OS.has_feature("mobile"):
-		Input.vibrate_handheld(200)
+		Input.vibrate_handheld(180)
+
+
+## Apply a one-off's effect and remove the node — this is the payoff for the
+## detour to reach it.
+func _take_one_off(n: VNode) -> void:
+	one_offs_taken += 1
+	var headline := n.label
+	match n.boost_effect:
+		OneOff.SCORE_BURST:
+			score += ONE_OFF_SCORE_BURST
+		OneOff.SWAP_SYMBOLS:
+			_swap_charge = true
+		OneOff.EXTRA_SLOT:
+			_pending_extra_slot = true
+		OneOff.EXTRA_VEIN:
+			budget += EXTRA_VEIN_BUDGET
+			budget_hint.queue_redraw()
+		OneOff.CLEANSE:
+			var target: VNode = null
+			var best := INF
+			for c in nodes:
+				if not c.corrupted:
+					continue
+				var d := c.position.distance_to(n.position)
+				if d < best:
+					best = d
+					target = c
+			if target != null:
+				target.uncorrupt()
+				# No clean number for "cured" — the target's own visible
+				# un-rotting is the confirmation, not a popup here.
+			else:
+				budget += EXTRA_VEIN_BUDGET
+				budget_hint.queue_redraw()
+				headline = "+%d" % EXTRA_VEIN_BUDGET
+	_booster_fx(n, Palette.BOOST, headline)
+	_remove_node(n)
+
+
+## A vein reaching either half of a fork resolves the WHOLE fork — the road
+## not taken has to visibly vanish, or the choice never reads as a choice.
+func _take_persistent(n: VNode) -> void:
+	persistents_taken += 1
+	if _pending_extra_slot:
+		_persistent_cap += 1
+		_pending_extra_slot = false
+	_apply_persistent(n.mutation_id)
+	_booster_fx(n, Palette.PERSISTENT, n.label)
+
+	var sibling := n.mutation_pair
+	n.mutation_pair = null
+	_remove_node(n)
+	if sibling != null and is_instance_valid(sibling):
+		sibling.mutation_pair = null
+		_remove_node(sibling)
+
+
+## Same fork resolution as _take_persistent — taking either half removes both
+## — but this one starts a timer instead of a permanent modifier.
+func _take_time_based(n: VNode) -> void:
+	time_baseds_taken += 1
+	if _pending_extra_slot:
+		_time_based_cap += 1
+		_pending_extra_slot = false
+	_apply_time_based(n.relic_id)
+	_booster_fx(n, Palette.RELIC, n.label)
 
 	var sibling := n.relic_pair
 	n.relic_pair = null
@@ -1468,35 +1545,55 @@ func _find_vein(a: VNode, b: VNode) -> Vein:
 
 
 ## Can these two ever be joined directly? Reach is the constraint the whole
-## puzzle rests on — see Vein.MAX_LEN. A LONG_REACH mutation raises the
-## multiplier for the rest of the run.
+## puzzle rests on — see Vein.MAX_LEN. A REACH perk raises the multiplier for
+## as long as it's held.
 func in_reach(a: VNode, b: VNode) -> bool:
-	return a.position.distance_to(b.position) <= Vein.MAX_LEN * _mut_reach_mult
+	return a.position.distance_to(b.position) <= Vein.MAX_LEN * _boost_reach_mult
 
 
 func _add_vein(a: VNode, b: VNode) -> void:
 	if a == b or not can_afford() or _find_vein(a, b) != null or not in_reach(a, b):
 		return
 
-	# A Boost is not part of the flow graph — reaching for one is a detour, not
-	# a route. It triggers the instant a vein touches it, at full value: no
-	# crossing-vein penalty, no tempo requirement, because punishing a reward
-	# pickup for incidental geometry would just feel arbitrary.
-	if a.kind == VNode.Kind.BOOST or b.kind == VNode.Kind.BOOST:
-		_take_boost(a if a.kind == VNode.Kind.BOOST else b)
+	# A booster pickup is not part of the flow graph — reaching for one is a
+	# detour, not a route. It triggers the instant a vein touches it, at full
+	# value: no crossing-vein penalty, no tempo requirement, because punishing
+	# a reward pickup for incidental geometry would just feel arbitrary.
+	#
+	# But the OTHER end of that drag must already be live (depth >= 0, i.e.
+	# reachable from the Heart right now) — feedback: dragging from any stray,
+	# unclaimed node let you snag a pickup for free without ever touching your
+	# actual network, which made a pickup read as "just tap anywhere near it"
+	# instead of "your network reached this". A pickup still never joins the
+	# graph itself once taken, this only gates who may reach it.
+	if a.kind == VNode.Kind.BOOST or b.kind == VNode.Kind.BOOST \
+			or a.kind == VNode.Kind.MUTATION or b.kind == VNode.Kind.MUTATION \
+			or a.kind == VNode.Kind.RELIC or b.kind == VNode.Kind.RELIC:
+		var pickup_is_a := a.kind == VNode.Kind.BOOST or a.kind == VNode.Kind.MUTATION \
+			or a.kind == VNode.Kind.RELIC
+		var pickup: VNode = a if pickup_is_a else b
+		var anchor: VNode = b if pickup_is_a else a
+		if anchor.depth < 0:
+			return
+		match pickup.kind:
+			VNode.Kind.BOOST:
+				_take_one_off(pickup)
+			VNode.Kind.MUTATION:
+				_take_persistent(pickup)
+			_: # RELIC
+				_take_time_based(pickup)
 		return
 
-	# A Mutation fork resolves the same way a Boost does: instant, free of the
-	# tempo/crossing rules below, and it never becomes a real edge in the graph.
-	if a.kind == VNode.Kind.MUTATION or b.kind == VNode.Kind.MUTATION:
-		_take_mutation(a if a.kind == VNode.Kind.MUTATION else b)
-		return
-
-	# A Relic fork resolves exactly like a Mutation fork — instant, no tempo/
-	# crossing rules, never a real edge — the only difference is what taking
-	# it starts (see _take_relic).
-	if a.kind == VNode.Kind.RELIC or b.kind == VNode.Kind.RELIC:
-		_take_relic(a if a.kind == VNode.Kind.RELIC else b)
+	# A banked SWAP_SYMBOLS charge (see OneOff.SWAP_SYMBOLS) reuses this same
+	# drag-connect verb — "one thumb, one verb" — rather than adding a second
+	# gesture: while a charge is banked, dragging between two live producing
+	# nodes swaps what they each make instead of drawing a vein between them.
+	if _swap_charge and _swappable(a) and _swappable(b):
+		var tmp := a.produces
+		a.produces = b.produces
+		b.produces = tmp
+		_swap_charge = false
+		_booster_fx(a, Palette.BOOST, "⇄")
 		return
 
 	# Crossing BLOCKS the connection — it does not destroy the crossed vein.
@@ -1521,7 +1618,7 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	v.setup(a, b, 1.0 if veins.size() % 2 == 0 else -1.0)
 	v.tempo_grade = combo if synced else -1
 	# Baked in at creation, same as tempo_grade — see Vein.capacity_mult.
-	v.capacity_mult = _mut_capacity_mult
+	v.capacity_mult = _boost_capacity_mult
 	v.ruptured.connect(_on_ruptured)
 	vein_layer.add_child(v)
 	veins.append(v)
@@ -1530,10 +1627,10 @@ func _add_vein(a: VNode, b: VNode) -> void:
 
 func _tempo_action() -> bool:
 	var q := _tempo_quality()
-	if q <= GOOD_WINDOW * _mut_good_window_mult:
+	if q <= GOOD_WINDOW:
 		combo = mini(combo + (2 if q <= PERFECT_WINDOW else 1), COMBO_CAP)
 		_sync_flash = 1.0
-		var gain := SYNC_FUEL * _mut_sync_fuel_mult * (1.0 + float(combo) * 0.08)
+		var gain := SYNC_FUEL * (1.0 + float(combo) * 0.08)
 		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		Audio.sync_hit(combo, q <= PERFECT_WINDOW)
 		if OS.has_feature("mobile"):
@@ -1560,61 +1657,11 @@ func _tempo_quality() -> float:
 	return minf(Beat.phase, 1.0 - Beat.phase)
 
 
-## Apply a Boost's effect and remove the node. This is the payoff for the
-## detour — it has to be as visible and audible as a rupture, just warm instead
-## of violent.
-func _take_boost(n: VNode) -> void:
-	boosts_taken += 1
-	var headline := ""
-	match n.boost_effect:
-		BoostFx.SURGE:
-			budget += BOOST_SURGE_BUDGET
-			budget_hint.queue_redraw()
-			headline = "+%d" % BOOST_SURGE_BUDGET
-		BoostFx.CLEANSE:
-			var target: VNode = null
-			var best := INF
-			for c in nodes:
-				if not c.corrupted:
-					continue
-				var d := c.position.distance_to(n.position)
-				if d < best:
-					best = d
-					target = c
-			if target != null:
-				target.uncorrupt()
-				# No clean number for "cured" — the target's own visible
-				# un-rotting is the confirmation, not a popup here.
-			else:
-				budget += BOOST_SURGE_BUDGET
-				headline = "+%d" % BOOST_SURGE_BUDGET
-
-	var burst: Node2D = BurstScene.new()
-	vein_layer.add_child(burst)
-	var ring: Array[Vector2] = []
-	var kinds: Array[int] = []
-	for i in 10:
-		var a := TAU * float(i) / 10.0
-		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
-		kinds.append(0)
-	burst.spawn(ring, kinds, rng.randi(), Palette.BOOST)
-
-	if headline != "":
-		var pop: Node2D = FloatTextScene.new()
-		vein_layer.add_child(pop)
-		pop.spawn(headline, n.position, Palette.BOOST, 20)
-
-	Audio.play("refined", -2.0, 1.8)
-	if OS.has_feature("mobile"):
-		Input.vibrate_handheld(160)
-
-	_remove_node(n)
-
-
 ## Shared teardown for a node leaving the board outside of the normal
-## rupture/cut paths — Boost pickups, withered Wells, collapsed rot. Always
-## drops any vein still attached (there should be at most one for a Boost;
-## a withered/collapsed node is by definition orphaned or about to be cut).
+## rupture/cut paths — booster pickups, withered Wells, collapsed rot. Always
+## drops any vein still attached (there should be at most one for a one-off
+## pickup; a withered/collapsed node is by definition orphaned or about to be
+## cut).
 func _remove_node(n: VNode) -> void:
 	for v in veins.duplicate():
 		if v.a == n or v.b == n:
@@ -1784,20 +1831,31 @@ func _draw() -> void:
 	ring.a = (1.0 - phase) * (0.22 + exert * 0.22)
 	draw_arc(centre, beat_r, 0.0, TAU, 72, ring, 1.5 + exert * 2.0, true)
 
-	# An active Relic used to have zero on-screen presence beyond the pickup
-	# pop — nothing distinguished the active window from ordinary play, or
-	# told you WHICH of the two you'd chosen. A ring that counts down
-	# (shrinking as RELIC_DURATION runs out), in Relic's own colour, plus the
-	# same mark glyph the pick-time hexagram wore, makes both "still active"
-	# and "which one" visible for the whole duration, not just its start.
-	if _active_relic >= 0:
-		var relic_t := clampf(_active_relic_remaining / RELIC_DURATION, 0.0, 1.0)
-		var relic_col := Palette.RELIC
-		relic_col.a = 0.18 + relic_t * 0.22
-		draw_arc(centre, 96.0 + relic_t * 20.0, 0.0, TAU * relic_t, 40, relic_col, 2.5, true)
+	# An active TIME_BASED perk used to have zero on-screen presence beyond
+	# the pickup pop — nothing distinguished the active window from ordinary
+	# play, or told you WHICH perk you'd chosen. A ring that counts down
+	# (shrinking as TIME_BASED_DURATION runs out), in the family's own
+	# colour, plus the same mark glyph the pick-time hexagram wore and a
+	# ticking "Ns" label, makes "still active", "which one", and "how long
+	# left" all visible for the whole duration, not just its start. Offset
+	# side by side when a second slot (see _time_based_cap) is also active.
+	var n_active := _active_time_based.size()
+	for i in n_active:
+		var inst: Dictionary = _active_time_based[i]
+		var t: float = clampf(float(inst.remaining) / TIME_BASED_DURATION, 0.0, 1.0)
+		var off := Vector2((float(i) - float(n_active - 1) * 0.5) * 42.0, -104.0)
+		var col := Palette.RELIC
+		col.a = 0.18 + t * 0.22
+		draw_arc(centre + off, 20.0 + t * 6.0, 0.0, TAU * t, 32, col, 2.5, true)
 		var mark_col := Palette.RELIC
-		mark_col.a = 0.55 + relic_t * 0.3
-		VNode.draw_relic_mark(self, _active_relic, centre + Vector2(0.0, -104.0), 8.0, mark_col)
+		mark_col.a = 0.55 + t * 0.3
+		VNode.draw_mark(self, int(inst.effect), centre + off, 8.0, mark_col)
+		var label_col := Palette.RELIC
+		label_col.a = 0.5 + t * 0.35
+		var label := "%ds" % maxi(1, roundi(float(inst.remaining)))
+		var w := ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+		draw_string(ThemeDB.fallback_font, centre + off - Vector2(w * 0.5, -20.0), label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_col)
 
 	# The rhythm target. Used to sit at a flat baseline brightness and only
 	# flash AFTER a hit — pure confirmation, nothing that could be learned by
@@ -1894,9 +1952,9 @@ func _tick_lifecycle(_delta: float) -> void:
 		if n.wither_ratio() >= 1.0:
 			# Kept separate from `withered`, which the probe reads specifically
 			# to tune Well-neglect pacing (see VNode.WITHER_TIME) — folding
-			# Boost expiry into the same number would muddy that signal.
+			# one-off expiry into the same number would muddy that signal.
 			if n.kind == VNode.Kind.BOOST:
-				boosts_expired += 1
+				one_offs_expired += 1
 			else:
 				withered += 1
 			_remove_node(n)
@@ -1969,17 +2027,16 @@ func _deliver(kind: int, v: Vein, to: VNode) -> void:
 		if off_demand:
 			# Wrong shape is wasted, not damaging — so no hurt cue and no fuel
 			# penalty. It gets a flat, dull "wrong note" via swallow() instead:
-			# you hear that it landed and gave you nothing. A RESERVOIR mutation
-			# drops this to zero — more banked fuel, but no safety net at all if
-			# you are caught unprepared. It still gets a visible (not numeric,
-			# not score-costing) alarm below — see _pop_gain — so a stale
-			# network reads as something to go fix, not free clutter to ignore.
-			gain = _mut_wrong_shape_fuel
+			# you hear that it landed and gave you nothing. It still gets a
+			# visible (not numeric, not score-costing) alarm below — see
+			# _pop_gain — so a stale network reads as something to go fix, not
+			# free clutter to ignore.
+			gain = WRONG_SHAPE_FUEL
 			wasted += 1
 			combo = 0
 			_bad_tempo_flash = 1.0
 		elif kind == demand and kind != VNode.Res.VOID:
-			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN) * _relic_fuel_mult * _mut_fuel_mult
+			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN)
 		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		to.pulse = 1.0
 		Audio.swallow(kind, fuel / fuel_cap(), kind == demand)
@@ -2053,7 +2110,11 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 		return
 	if absf(gain) < 0.5:
 		return
-	var rounded := roundi(gain)
+	# A SCORE perk (see _recompute_boosters) multiplies score earning only —
+	# never the poison hit below, and never the raw fuel gain already applied
+	# in _deliver. The pop shows exactly what scored, per the comment above.
+	var score_gain := gain if kind == VNode.Res.VOID else gain * _boost_score_mult
+	var rounded := roundi(score_gain)
 	score = maxi(0, score + rounded)
 	var col: Color
 	var text: String
@@ -2103,6 +2164,12 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _on_press(p: Vector2) -> void:
+	# The corner icon works whether the run is alive or already over — the
+	# death screen's tap-anywhere only ever fires post-death; this lets a
+	# bad run be abandoned early instead of waiting it out.
+	if restart_hint != null and restart_hint.hit(p):
+		start_run(0)
+		return
 	if not alive:
 		start_run(0)
 		return

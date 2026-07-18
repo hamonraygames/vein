@@ -31,13 +31,21 @@ const VEIN_INERT := Color("221e24")
 const VEIN_STRAINED := Color("6b2230")
 
 const WARM := Color("ffb765")     # the rescue flash
-const BOOST := WARM               # instant one-shot pickups (SURGE/CLEANSE)
-## A Relic is a persistent, ongoing trade-off — a genuinely different kind of
-## "good thing happening" than an instant Boost grab, so it earns its own hue
-## rather than sharing WARM: burnt orange, still warm, still clearly distinct
-## at a glance (colour-blind-safe pairing relies on RELIC's hexagram
-## silhouette too, not the colour alone).
+## Three booster families, three colours — feedback: "color code the
+## different types of boosters, one time and persistent." BOOST (gold) is a
+## ONE_OFF instant grab. RELIC (burnt orange) is a TIME_BASED perk — strong,
+## temporary. PERSISTENT (jade) is a run-long perk — permanent, one slot,
+## replaced rather than stacked. PERSISTENT and RELIC used to share this same
+## burnt-orange hue (reasoned at the time as "both outlive a single grab"),
+## which meant the one visual cue meant to separate "temporary" from
+## "permanent" didn't actually cover the two families that most need telling
+## apart, since both spawn as forks and both use the same effect pool.
+## Shape still carries the real distinction (star vs hexagram vs diamond, and
+## which inner glyph) — colour is the redundant, at-a-glance channel, per the
+## rule above.
+const BOOST := WARM
 const RELIC := Color("d97b3d")
+const PERSISTENT := Color("5aab6e")
 
 
 static func of_res(kind: int) -> Color:
