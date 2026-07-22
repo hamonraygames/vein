@@ -75,13 +75,6 @@ var peak_stress := 0.0
 var tempo_grade := 0
 var _blocked := false
 
-## Baked in at creation from the run's held CAPACITY perk state (see
-## game.gd's _boost_capacity_mult), same as tempo_grade — a vein you draw
-## after taking the perk carries more; one you already built does not
-## retroactively thicken, so the choice is felt as "rebuild around this,"
-## not a free stat.
-var capacity_mult := 1.0
-
 ## Playtest: "removing edges seems to be not clear for players." A cut vein
 ## used to vanish the instant it was freed — no feedback beyond a burst that
 ## only fired when it happened to be carrying something wanted, which is
@@ -146,13 +139,21 @@ func other(n: VNode) -> VNode:
 
 
 ## Flow is decided by the graph, not by the direction the player happened to drag.
+##
+## Two regimes. When both ends reach the Heart, flow runs DOWNHILL toward it
+## (higher depth is the source). When neither does, the vein still flows —
+## OUTWARD from the component's Well (lower feed_depth is the source), so
+## resources pre-stage and pool at the dead-end instead of freezing. A vein
+## straddling the two (one end connected, one not) can't happen: BFS from the
+## Heart would have claimed the far end too.
 func update_dir() -> void:
-	if a.depth < 0 or b.depth < 0 or a.depth == b.depth:
-		dir = Dir.INERT
-	elif a.depth > b.depth:
-		dir = Dir.A_TO_B
+	if a.depth >= 0 and b.depth >= 0 and a.depth != b.depth:
+		dir = Dir.A_TO_B if a.depth > b.depth else Dir.B_TO_A
+	elif a.depth < 0 and b.depth < 0 and a.feed_depth >= 0 and b.feed_depth >= 0 \
+			and a.feed_depth != b.feed_depth:
+		dir = Dir.A_TO_B if a.feed_depth < b.feed_depth else Dir.B_TO_A
 	else:
-		dir = Dir.B_TO_A
+		dir = Dir.INERT
 
 
 func source() -> VNode:
@@ -172,17 +173,19 @@ func sink() -> VNode:
 func has_room() -> bool:
 	if dir == Dir.INERT or length <= 0.0:
 		return false
-	var spacing := DOT_SPACING / maxf(capacity_mult, 0.01)
 	for d in dots:
-		if d.t * length < spacing:
+		if d.t * length < DOT_SPACING:
 			return false
 	return true
 
 
-func inject(kind: int) -> bool:
+## `pot` is the poison potency the dot carries — 1.0 for anything but VOID, and
+## the source node's poison_pot for a corrupted node's output, so a spent Kiln's
+## rot hits the Heart harder than a spent circle's (see game._deliver).
+func inject(kind: int, pot := 1.0) -> bool:
 	if not has_room():
 		return false
-	dots.append({"kind": kind, "t": 0.0})
+	dots.append({"kind": kind, "t": 0.0, "pot": pot})
 	return true
 
 
@@ -212,9 +215,10 @@ func sample(t: float) -> Vector2:
 	return pts[pts.size() - 1]
 
 
-## Returns items that reached the far end this frame, for the game to hand over.
-func advance(delta: float) -> Array[int]:
-	var arrived: Array[int] = []
+## Returns items that reached the far end this frame — each as {kind, pot} — for
+## the game to hand over.
+func advance(delta: float) -> Array[Dictionary]:
+	var arrived: Array[Dictionary] = []
 	if dir == Dir.INERT or length <= 0.0:
 		_flow = _smooth(_flow, 0.0, 4.0, delta)
 		queue_redraw()
@@ -228,13 +232,13 @@ func advance(delta: float) -> Array[int]:
 	for d in dots:
 		d.t += step
 		if d.t >= 1.0:
-			arrived.append(d.kind)
+			arrived.append({"kind": d.kind, "pot": d.get("pot", 1.0)})
 		else:
 			keep.append(d)
 	dots = keep
 
 	var occupancy := clampf(
-		float(dots.size()) * (DOT_SPACING / maxf(capacity_mult, 0.01)) / maxf(length, 1.0), 0.0, 1.0)
+		float(dots.size()) * DOT_SPACING / maxf(length, 1.0), 0.0, 1.0)
 	peak_occupancy = maxf(peak_occupancy, occupancy)
 	_flow = _smooth(_flow, occupancy, 3.0, delta)
 

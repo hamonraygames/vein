@@ -4,24 +4,18 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-## Three booster families, one shared pickup mechanic (see game.gd's
-## _add_vein): BOOST is a ONE_OFF, instant single-use grab. MUTATION is a
-## PERSISTENT perk — permanent for the rest of the run, one slot, taking a
-## new one replaces whichever you already hold. RELIC is a TIME_BASED perk —
-## same effect pool as MUTATION but stronger and temporary, also one slot.
-## Kind names are kept as-is from an earlier design pass; game.gd's
-## OneOff/BoosterEffect enums are the ones that actually define what each
-## pickup grants now.
-enum Kind { HEART, WELL, FORGE, LOOM, KILN, BOOST, RELIC, MUTATION }
+enum Kind { HEART, WELL, FORGE, LOOM, KILN }
 enum Res { RAW, REFINED, CLOTH, PRISM, VOID }
 
-## Tools condense two inputs into one stronger output. A Forge eats RAW and makes
-## REFINED; a Loom eats REFINED and makes CLOTH; a Kiln eats CLOTH and makes
-## PRISM — the fourth tier, per feedback wanting more than three shapes in
-## play ("triangle, square, 5-edge... like wood/gold/metal/water/stone in a
-## resource-management game") so a fully-escalated run has a real network to
-## keep alive, not just one final pipe.
-const TOOL_RATIO := 2
+## Tools condense inputs into one stronger output — but WHICH inputs is now
+## per-instance: every tool spawns with its own `recipe` (see below), rolled
+## by game.gd. A Forge still makes REFINED, a Loom CLOTH, a Kiln PRISM; what
+## each one EATS varies — the plain ones want two of the tier below, the
+## exotic ones demand mixed shapes ("1 square and 1 circle", "2 x 1 y", up
+## to three inputs). The tool's body wears a colour hashed from its recipe
+## (stable within a run, rerolled between runs) and its interior shows ONLY
+## the requirement glyphs — the silhouette already says what it is; inside
+## it says what it needs.
 
 ## Items a Well holds before it runs dry. Depletion is by USE, not by clock:
 ## a Well only spends reserve when it actually emits, and it only emits when
@@ -36,6 +30,30 @@ const TOOL_RATIO := 2
 ## even your first, best-placed Wells force a rewire mid-run, not just the
 ## ones you neglect.
 const WELL_YIELD := 32.0
+
+## Tools deplete too — by SMELT, not by clock. Each conversion spends one charge;
+## when a tool runs out it goes necrotic exactly like a spent Well, but its
+## poison is stronger (see POISON_POT_BY_KIND). "The more you milk them, the
+## sooner they die" — a Forge you lean on hard corrupts faster than one you use
+## lightly. Deliberately LONGER-lived than a circle: a tool is a bottleneck you
+## build a whole chain around, so losing one hurts, and it shouldn't happen as
+## casually as a Well running dry. Higher tiers get fewer charges (each smelt is
+## worth much more), but all outlast a single Well in practice because smelts are
+## gated by input arrival.
+const FORGE_YIELD := 26.0
+const LOOM_YIELD := 20.0
+const KILN_YIELD := 16.0
+
+## How much more a corrupted node's poison hurts the Heart, per delivered VOID
+## dot, relative to a circle's (see game.FUEL_BY_RES[VOID] and _deliver). A
+## spent tool is a nastier corpse than a spent Well — it gave you more alive, it
+## costs you more dead.
+const POISON_POT_BY_KIND := {
+	Kind.WELL: 1.0,
+	Kind.FORGE: 1.35,
+	Kind.LOOM: 1.7,
+	Kind.KILN: 2.1,
+}
 
 ## A spent Well does not politely stop. It goes necrotic and starts pumping VOID
 ## down the vein you built to it, faster than it ever gave you RAW. You must cut
@@ -77,37 +95,8 @@ const WITHER_TIME := 35.0
 ## always something you saw coming, never a surprise deletion.
 const WITHER_WARN_AT := 0.6
 
-## A Boost left unclaimed also withers — same USE-IT-OR-LOSE-IT rule as a Well,
-## reusing the exact same age/fade/removal pipeline (see wither_ratio()), just
-## against a much shorter clock: it's a bonus pickup, not a supply line, so
-## ignoring one should read as a small, prompt "that one's gone" rather than
-## sitting around as permanent decoration on the board. Roughly one
-## ONE_OFF_GAP (game.gd), so a Boost you skip is usually gone before the next
-## one arrives.
-const BOOST_LIFE := 13.0
-
-## An unpicked RELIC/MUTATION fork withers too — on a longer clock than a
-## Boost (it's a real decision, it deserves deliberation time), but it must
-## NOT sit forever: an ignored pair used to permanently block every future
-## offer of its family (the spawn gates check _has_*_pair) AND accumulate as
-## board clutter, so skipping one fork silently switched that whole system
-## off for the rest of the run. When either half withers, game.gd removes
-## both (see _tick_lifecycle) — the fork expires as a unit, same as it
-## resolves as a unit.
-const PICKUP_LIFE := 24.0
-
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
-const BOOST_RADIUS := 16.0
-## Bigger than Boost (16) despite the same "one-shot pickup" verb — a
-## Mutation is a permanent, run-defining choice picked once under time
-## pressure with no chance to learn it by feel like a Forge/Loom recipe, so
-## it has to read clearly on the first glance, not the tenth.
-const MUTATION_RADIUS := 24.0
-## Between Boost and Mutation: a bigger decision than an instant grab (it's a
-## fork, and it costs the other half), but a smaller one than a Mutation
-## (temporary, not run-long).
-const RELIC_RADIUS := 20.0
 const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
@@ -121,13 +110,33 @@ var produces: int = Res.RAW
 ## node makes can reach anything that wants it.
 var depth := -1
 
+## Distance to the nearest Well WITHIN a heart-disconnected component, -1 when
+## unset. This is the SECONDARY orientation: a subgraph with no path to the
+## Heart still flows — outward from its Wells — so resources pool at the far
+## dead-end (a Forge banks its REFINED, a chain's tail node fills up) instead
+## of sitting frozen. Lets you pre-stage supply before you've wired it to the
+## Heart, "saving resources for when you need them." Only meaningful while
+## depth < 0; a heart-connected node uses `depth` and ignores this.
+var feed_depth := -1
+
 ## Items waiting here for an outgoing vein with room. When this fills, a Well
 ## stops producing and the pips stack up visibly.
 var buffer: Array[int] = []
 
-## Forge only: RAW waiting to be smelted. Separate from `buffer` so a Forge's
-## backlog of input doesn't block the REFINED it has already made.
+## Tools only: input waiting to be smelted. Separate from `buffer` so a
+## tool's backlog of input doesn't block the output it has already made.
 var intake: Array[int] = []
+
+## Tools only: the multiset of input resources this instance eats (2-3
+## entries, e.g. [RAW, RAW] or [RAW, CLOTH, RAW]). Rolled by game.gd at
+## spawn from the seeded rng — see _roll_recipe there. take() only accepts
+## what the recipe still needs; _smelt fires when every slot is filled. What
+## a tool NEEDS varies per instance; what it makes (and therefore its body
+## colour, via Palette.of_res(produces)) does not — a Forge is always the
+## REFINED hue no matter what it eats, so a resource keeps ONE colour
+## everywhere. The per-instance appetite reads from the requirement glyphs
+## inside, not from the body colour.
+var recipe: Array[int] = []
 
 ## 0..1, decays. Drives the swell when the node emits or consumes.
 var pulse := 0.0
@@ -137,6 +146,18 @@ var pulse := 0.0
 ## without a number, and plan the reroute before it kills you.
 var reserve := WELL_YIELD
 var corrupted := false
+## How hard this node's poison hits once corrupted, relative to a circle's — set
+## from POISON_POT_BY_KIND the moment it turns. 1.0 until then.
+var poison_pot := 1.0
+## Tools only: reserve spent per smelt. Externally driven by game.gd from run
+## intensity (see game._process/TOOL_DEPLETION_EARLY), NOT a flat 1.0. "Start
+## gentle, get hardcore" — same shape every other escalating threat in this
+## game already uses (corruption spread, airborne blight, demand rotation),
+## just applied to tool death too: early in a run this is small, so a first
+## Forge/Loom/Kiln feels like a reliable new toy while the player is still
+## learning the recipe, not a ticking time bomb. By late-run it reaches 1.0,
+## the rate FORGE_YIELD/LOOM_YIELD/KILN_YIELD were actually tuned against.
+var depletion_rate := 1.0
 ## 0..1, decays. The visible "two went in, one came out" moment.
 var smelt_flash := 0.0
 ## Seconds this node has been rotting its neighbours.
@@ -146,43 +167,6 @@ var corrupt_age := 0.0
 ## Seconds this Well has sat orphaned (depth < 0). Drives WITHER_TIME. Reset to
 ## 0 the instant it joins the network, even briefly — only NEGLECT withers.
 var orphan_age := 0.0
-
-## BOOST only: which OneOff effect this pickup grants (game.gd's OneOff enum,
-## plain int to avoid a circular preload). Assigned by the game at spawn so
-## the roll comes from the seeded run RNG and stays deterministic.
-var boost_effect: int = 0
-
-## RELIC only: which BoosterEffect this half of the fork grants (game.gd's
-## BoosterEffect enum, plain int to avoid a circular preload).
-var relic_id: int = 0
-## RELIC only: the other half of this choice. Taking either one removes both
-## — same fork rule as MUTATION, just for a temporary effect instead of a
-## permanent one.
-var relic_pair: VNode = null
-
-## MUTATION only: which BoosterEffect this choice grants (game.gd's
-## BoosterEffect enum, referenced here only as a plain int to avoid a
-## circular preload).
-var mutation_id: int = 0
-## MUTATION only: the other half of this choice. Taking either one removes
-## both — it is a fork, not two separate pickups.
-var mutation_pair: VNode = null
-
-## BOOST/RELIC/MUTATION only: the readable icon text set by game.gd at spawn
-## time ("1.15×", "+25", "⇄", "+1 slot", ...) — see _draw_pickup_label. Kept
-## as a plain string set from outside rather than computed here so the
-## numbers live in exactly one place (game.gd's booster constants).
-var label: String = ""
-
-## Heart only: every PERSISTENT perk currently held, pushed in from game.gd's
-## _active_persistent the moment it changes (same pattern as demand/
-## fuel_ratio below). Drawn orbiting the Heart itself — not a separate HUD
-## tray — because the Heart is the one thing in VEIN that already carries
-## every other piece of run state (fuel level, demand) on its own body, and
-## a permanent rule change belongs on the thing whose rules it changed, the
-## same way Notcoin's coin or Hamster Kombat's hamster visibly wears every
-## upgrade instead of parking them in a sidebar.
-var mutation_marks: Array[int] = []
 
 ## Forge/Loom/Kiln only: true for the first of each kind the player ever sees
 ## (persisted across runs in game.gd's save, see seen_forge/seen_loom/
@@ -209,23 +193,22 @@ var demand: int = Res.RAW
 
 var _emit_accum := 0.0
 var _round_robin := 0
-var _boost_pulse := 0.0
 
 
 func _ready() -> void:
 	z_index = 10
+	# Tools carry their own charge pool (spent per smelt); a Well keeps the
+	# default WELL_YIELD set on the field.
+	match kind:
+		Kind.FORGE: reserve = FORGE_YIELD
+		Kind.LOOM: reserve = LOOM_YIELD
+		Kind.KILN: reserve = KILN_YIELD
 	Beat.beat.connect(_on_beat)
 
 
 func radius() -> float:
 	if kind == Kind.HEART:
 		return HEART_RADIUS
-	if kind == Kind.BOOST:
-		return BOOST_RADIUS
-	if kind == Kind.RELIC:
-		return RELIC_RADIUS
-	if kind == Kind.MUTATION:
-		return MUTATION_RADIUS
 	return RADIUS
 
 
@@ -255,11 +238,7 @@ func _process(delta: float) -> void:
 
 	if corrupted:
 		corrupt_age += delta
-	if (kind == Kind.WELL or kind == Kind.BOOST or kind == Kind.RELIC
-			or kind == Kind.MUTATION) and not corrupted:
-		# A pickup never joins the flow graph even while sitting on the board
-		# (see game.gd's _add_vein) — depth stays -1 for its whole life until
-		# taken, so this is exactly "seconds since it appeared, unclaimed".
+	if kind == Kind.WELL and not corrupted:
 		if depth < 0:
 			orphan_age += delta
 		else:
@@ -277,10 +256,6 @@ func _process(delta: float) -> void:
 		fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
 	modulate.a = clampf(fade, 0.0, 1.0)
 
-	if kind == Kind.BOOST or kind == Kind.RELIC or kind == Kind.MUTATION:
-		_boost_pulse += delta
-		pulse = maxf(pulse, 0.35 + 0.35 * sin(_boost_pulse * 3.4))
-
 	queue_redraw()
 
 
@@ -295,10 +270,6 @@ func wither_ratio() -> float:
 		return 0.0
 	if kind == Kind.WELL:
 		return clampf(orphan_age / WITHER_TIME, 0.0, 1.0)
-	if kind == Kind.BOOST:
-		return clampf(orphan_age / BOOST_LIFE, 0.0, 1.0)
-	if kind == Kind.RELIC or kind == Kind.MUTATION:
-		return clampf(orphan_age / PICKUP_LIFE, 0.0, 1.0)
 	return 0.0
 
 
@@ -324,29 +295,45 @@ func corrupt() -> void:
 	corrupted = true
 	reserve = 0.0
 	produces = Res.VOID
+	# A tool's corpse is nastier than a circle's — its poison hits the Heart
+	# harder per dot (see game._deliver). Set at the moment of turning so it
+	# reflects what kind of node just died.
+	poison_pot = float(POISON_POT_BY_KIND.get(kind, 1.0))
 	# Whatever it was still holding turns with it.
 	buffer.clear()
 	intake.clear()
 	pulse = 1.0
 
 
-## Reverses corrupt(). Only ever called by a CLEANSE boost — the sole way rot
-## is ever undone rather than merely amputated or outrun.
-func uncorrupt() -> void:
-	if not corrupted:
-		return
-	corrupted = false
-	reserve = WELL_YIELD
-	produces = Res.RAW
-	corrupt_age = 0.0
-	spread_accum = 0.0
-	pulse = 1.0
-
-
 func reserve_ratio() -> float:
-	if kind != Kind.WELL or corrupted:
+	if corrupted:
 		return 0.0
-	return clampf(reserve / WELL_YIELD, 0.0, 1.0)
+	var cap := 0.0
+	match kind:
+		Kind.WELL: cap = WELL_YIELD
+		Kind.FORGE: cap = FORGE_YIELD
+		Kind.LOOM: cap = LOOM_YIELD
+		Kind.KILN: cap = KILN_YIELD
+		_: return 0.0
+	return clampf(reserve / cap, 0.0, 1.0)
+
+
+## Non-mutating mirror of take(): would it currently succeed? Used by the push
+## logic (game._push_from_nodes) to decide whether to even SEND an item down a
+## vein at all. Without this, a source kept shoving items at a sink it already
+## knew would refuse them — they'd travel the whole vein only to be discarded
+## on arrival (`dropped`), which quietly burned the SOURCE's reserve for
+## nothing every time. This is what lets a pooled, not-yet-connected-to-the-
+## Heart chain (see feed_depth) actually STOP and hold once its dead end fills,
+## instead of grinding its own Wells to death feeding a sink with no room left.
+func can_accept(kind_in: int) -> bool:
+	if kind == Kind.HEART:
+		return true
+	if _accepts_tool_input(kind_in):
+		return true
+	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN) and kind_in != Res.VOID:
+		return false
+	return buffer.size() < BUFFER_CAP
 
 
 func take(kind_in: int) -> bool:
@@ -370,29 +357,45 @@ func take(kind_in: int) -> bool:
 	return true
 
 
+## Accepts `kind_in` only while the recipe still has an unfilled slot of that
+## kind — a tool never hoards inputs it cannot use, so a mis-routed shape is
+## refused at the door instead of silently clogging the intake.
 func _accepts_tool_input(kind_in: int) -> bool:
-	return not corrupted and (
-		(kind == Kind.FORGE and kind_in == Res.RAW)
-		or (kind == Kind.LOOM and kind_in == Res.REFINED)
-		or (kind == Kind.KILN and kind_in == Res.CLOTH)
-	)
+	if corrupted or recipe.is_empty():
+		return false
+	var need := 0
+	for r in recipe:
+		if r == kind_in:
+			need += 1
+	if need == 0:
+		return false
+	var have := 0
+	for i in intake:
+		if i == kind_in:
+			have += 1
+	return have < need
 
 
-## Two in, one stronger shape out. The conversion halves the item count carrying
-## the same run of fuel, which is why a tool is the answer to a bursting trunk
-## and not just a fuel multiplier.
+## Every recipe slot filled, one stronger shape out. The conversion shrinks
+## the item count carrying the same run of fuel, which is why a tool is the
+## answer to a bursting trunk and not just a fuel multiplier.
 func _smelt() -> void:
-	if intake.size() < TOOL_RATIO or buffer.size() >= BUFFER_CAP:
+	if recipe.is_empty() or intake.size() < recipe.size() or buffer.size() >= BUFFER_CAP:
 		return
-	for i in TOOL_RATIO:
-		intake.pop_front()
+	intake.clear()
 	buffer.append(produces)
 	pulse = 1.0
-	# The moment two become one, made loud. A tool that silently swaps pips
+	# The moment many become one, made loud. A tool that silently swaps pips
 	# teaches nothing — it just sits there as an unexplained red triangle, which
 	# is exactly how it read in playtest.
 	smelt_flash = 1.0
 	Audio.play("refined", -20.0, 1.35)
+	# A tool spends itself as it works: milk it and it dies sooner, then goes
+	# necrotic like a spent Well but with nastier poison (see corrupt()). The
+	# rate itself ramps with the run — see depletion_rate.
+	reserve -= depletion_rate
+	if reserve <= 0.0:
+		corrupt()
 
 
 ## Round-robin so a node with two downhill veins splits its output between them
@@ -406,18 +409,22 @@ func _draw() -> void:
 	var col := Palette.HEART if kind == Kind.HEART else Palette.of_res(produces)
 	var r := radius() * (1.0 + pulse * (0.16 if kind == Kind.HEART else 0.10))
 
+	# Corruption overrides shape identity — a necrotic tool is rot now, not a
+	# Forge/Loom/Kiln, and must wear the same broken glitch a spent Well does so
+	# it reads as "cut me" at a glance instead of a healthy tool.
+	if corrupted and kind != Kind.HEART:
+		_draw_necrotic(r)
+		_draw_buffer(r, col)
+		return
+
 	match kind:
 		Kind.HEART: _draw_hex(r, col)
 		Kind.FORGE: _draw_tri(r, col)
 		Kind.LOOM: _draw_square(r, col)
 		Kind.KILN: _draw_pentagon(r, col)
-		Kind.BOOST: _draw_boost(r)
-		Kind.RELIC: _draw_relic(r)
-		Kind.MUTATION: _draw_mutation(r)
 		_: _draw_ring(r, col)
 
 	_draw_buffer(r, col)
-	_draw_intake(r)
 
 
 func _draw_hex(r: float, col: Color) -> void:
@@ -449,25 +456,42 @@ func _draw_hex(r: float, col: Color) -> void:
 	draw_polyline(outline, col, 3.0, true)
 
 	_draw_demand(r)
-	_draw_mutation_marks(r)
 
 
-## Every PERSISTENT perk currently held, orbiting the Heart permanently — the
-## Heart wears every rule change on its own body, same spot every time, so
-## which marks are out there becomes as learnable as the demand glyph itself.
-func _draw_mutation_marks(r: float) -> void:
-	if mutation_marks.is_empty():
+## Traces `pts` (an open, ordered polygon outline) from its first vertex
+## around the perimeter for `ratio` of its total length, then stops — the
+## polygon equivalent of a circle's eroding reserve arc (see _draw_ring),
+## so a tool's own body outline IS its remaining-charge gauge, not a
+## separate ring floating outside the shape. Feedback: the earlier separate
+## outer ring read as clutter; this folds the same information into the one
+## border the shape already has.
+func _draw_partial_outline(pts: PackedVector2Array, ratio: float, col: Color, width: float) -> void:
+	if ratio <= 0.0:
 		return
-	var n := mutation_marks.size()
-	for i in n:
-		var a := TAU * (float(i) / float(maxi(n, 5))) - PI * 0.5
-		var p := Vector2(cos(a), sin(a)) * (r + 16.0)
-		var ring := Palette.PERSISTENT
-		ring.a = 0.16
-		draw_circle(p, 11.0, ring)
-		var col := Palette.PERSISTENT
-		col.a = 0.6 + pulse * 0.2
-		draw_mark(self, mutation_marks[i], p, 6.5, col)
+	var closed := pts.duplicate()
+	closed.append(pts[0])
+	if ratio >= 0.999:
+		draw_polyline(closed, col, width, true)
+		return
+	var total := 0.0
+	var seg_len: Array[float] = []
+	for i in closed.size() - 1:
+		var l := closed[i].distance_to(closed[i + 1])
+		seg_len.append(l)
+		total += l
+	var target := total * ratio
+	var out := PackedVector2Array()
+	out.append(closed[0])
+	var acc := 0.0
+	for i in seg_len.size():
+		var l: float = seg_len[i]
+		if acc + l >= target:
+			var f := 0.0 if l <= 0.0 else (target - acc) / l
+			out.append(closed[i].lerp(closed[i + 1], f))
+			break
+		out.append(closed[i + 1])
+		acc += l
+	draw_polyline(out, col, width, true)
 
 
 ## The shape the Heart is asking for, floating inside it. This is the only
@@ -503,175 +527,79 @@ func _draw_ring(r: float, col: Color) -> void:
 		_draw_necrotic(r)
 		return
 
+	# Softer than it was: playtest called the Wells "very bold and dominant,
+	# both border width and colour." Thin the ring and drop the fill so a
+	# circle reads as a quiet vessel, not a loud disc.
 	var fill := col
-	fill.a = 0.10 + pulse * 0.22
+	fill.a = 0.06 + pulse * 0.16
 	draw_circle(Vector2.ZERO, r, fill)
 
 	# The ring IS the reserve. A full Well is a closed circle; a drained one is a
 	# vanishing arc. No number, and you can read your whole board's life
 	# expectancy in one glance.
 	var ghost := col
-	ghost.a = 0.13
-	draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, ghost, 2.0, true)
+	ghost.a = 0.11
+	draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, ghost, 1.3, true)
 
 	var left := reserve_ratio()
 	if left > 0.0:
 		var start := -PI * 0.5
-		draw_arc(Vector2.ZERO, r, start, start + TAU * left, 32, col, 2.5, true)
+		draw_arc(Vector2.ZERO, r, start, start + TAU * left, 32, col, 1.7, true)
 
 
-## A Boost: a four-pointed star that never stops twinkling, the one shape on the
-## board that is not part of the circulatory system. Distinctness IS the message
-## — it does not carry, buffer, or demand; it is a gift, and it disappears the
-## instant a vein reaches it.
-func _draw_boost(r: float) -> void:
-	var s := r * 1.35
-	var spin := float(Time.get_ticks_msec()) * 0.0011
-	var pts := PackedVector2Array()
-	for i in 8:
-		var a := TAU * (float(i) / 8.0) + spin
-		var rr := s if i % 2 == 0 else s * 0.34
-		pts.append(Vector2(cos(a), sin(a)) * rr)
-	pts.append(pts[0])
-
-	var fill := Palette.BOOST
-	fill.a = 0.16 + pulse * 0.3
-	draw_colored_polygon(pts, fill)
-	var edge := Palette.BOOST
-	edge.a = 0.7 + pulse * 0.3
-	draw_polyline(pts, edge, 2.2 + pulse * 1.6, true)
-
-	# A slow halo ring, always present, so a Boost reads as "special" even from
-	# across the board before the player is close enough to see the star.
-	var halo := Palette.BOOST
-	halo.a = 0.10 + 0.06 * sin(spin * 2.3)
-	draw_arc(Vector2.ZERO, r * 2.0, 0.0, TAU, 28, halo, 1.4, true)
-
-	_draw_pickup_label(r, Palette.BOOST)
-
-
-## A Relic: a six-point hexagram, always spawned in a contradictory pair.
-## Deliberately a different silhouette from both Boost's four-point star (an
-## instant grab) and Mutation's diamond (a permanent choice) — a Relic is a
-## fork like Mutation, but the effect is temporary, and it needs to read as
-## its own category at a glance, not a reskin of either. Palette.RELIC (burnt
-## orange) is the colour half of that; the extra points are the shape half.
-func _draw_relic(r: float) -> void:
-	var s := r * 1.2
-	var spin := float(Time.get_ticks_msec()) * 0.0008
-	var star := PackedVector2Array()
-	for i in 12:
-		var a := TAU * (float(i) / 12.0) + spin
-		var rr := s if i % 2 == 0 else s * 0.5
-		star.append(Vector2(cos(a), sin(a)) * rr)
-	star.append(star[0])
-
-	var fill := Palette.RELIC
-	fill.a = 0.13 + pulse * 0.24
-	draw_colored_polygon(star, fill)
-	var edge := Palette.RELIC
-	edge.a = 0.68 + pulse * 0.3
-	draw_polyline(star, edge, 2.3 + pulse * 1.3, true)
-
-	var halo := Palette.RELIC
-	halo.a = 0.09 + 0.05 * sin(spin * 2.4)
-	draw_arc(Vector2.ZERO, r * 1.85, 0.0, TAU, 24, halo, 1.2, true)
-
-	# TIME_BASED shares its glyph vocabulary with PERSISTENT (see draw_mark)
-	# — both draw from game.gd's same BoosterEffect enum now, so one shared
-	# static function is the whole vocabulary, not two parallel ones.
-	draw_mark(self, relic_id, Vector2.ZERO, r * 0.6, Palette.RELIC)
-	_draw_pickup_label(r, Palette.RELIC)
-
-
-## A Mutation: a slow diamond, always spawned in a pair. Taking either one
-## removes both — a fork, not a freebie, so its silhouette must read as
-## "deliberate choice" rather than "gift". Coloured Palette.PERSISTENT, not
-## Palette.WARM or Palette.RELIC — a Mutation's perk outlives the run even
-## longer than a Relic's timer outlives its own pickup, so it gets its own
-## hue rather than sharing either the "instant grab" or "temporary" family's.
-## The inner mark (see draw_mark) is the only thing distinguishing which
-## perk this half grants.
-func _draw_mutation(r: float) -> void:
-	var s := r * 1.15
-	var spin := float(Time.get_ticks_msec()) * 0.0009
-	var dia := PackedVector2Array()
-	for i in 4:
-		var a := TAU * (float(i) / 4.0) + spin + PI * 0.25
-		dia.append(Vector2(cos(a), sin(a)) * s)
-	dia.append(dia[0])
-
-	var fill := Palette.PERSISTENT
-	fill.a = 0.12 + pulse * 0.22
-	draw_colored_polygon(dia, fill)
-	var edge := Palette.PERSISTENT
-	edge.a = 0.65 + pulse * 0.3
-	draw_polyline(dia, edge, 2.2 + pulse * 1.3, true)
-
-	var halo := Palette.PERSISTENT
-	halo.a = 0.08 + 0.05 * sin(spin * 2.1)
-	draw_arc(Vector2.ZERO, r * 1.8, 0.0, TAU, 24, halo, 1.2, true)
-
-	draw_mark(self, mutation_id, Vector2.ZERO, r * 0.62, Palette.PERSISTENT)
-	_draw_pickup_label(r, Palette.PERSISTENT)
-
-
-## The readable icon text ("1.15×", "+25", "⇄", "14s", ...) every booster
-## pickup carries — see the `label` field. Same font/centring pattern as
-## score_hud.gd and float_text.gd (ThemeDB.fallback_font, no custom font
-## resource in the project), sitting just below the shape so it never
-## competes with the inner glyph or the Heart's own score readout.
-func _draw_pickup_label(r: float, col: Color) -> void:
-	if label == "":
-		return
-	var font := ThemeDB.fallback_font
-	var size := 13
-	var w := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
-	var lc := col
-	lc.a = 0.75 + pulse * 0.25
-	draw_string(font, Vector2(-w * 0.5, r + 22.0), label,
-		HORIZONTAL_ALIGNMENT_LEFT, -1, size, lc)
-
-
-## Shape-only, per the palette rule ("colour is a redundant channel"). Static
-## so every rendering of a given BoosterEffect — the PERSISTENT diamond, the
-## TIME_BASED hexagram, and the Heart's own persistent tray/active-effect
-## ring (game.gd) — all draw the exact same glyph, the shared vocabulary a
-## returning player learns once and recognises everywhere.
-static func draw_mark(ci: CanvasItem, effect_id: int, center: Vector2, s: float, col: Color) -> void:
-	match effect_id:
-		0: # score — a rising chevron, climbing
-			var pts := PackedVector2Array([
-				center + Vector2(-s, s * 0.5), center + Vector2(0.0, -s * 0.6),
-				center + Vector2(s, s * 0.5),
-			])
-			ci.draw_polyline(pts, col, 2.8, true)
-		1: # appetite — concentric still rings, calm
-			ci.draw_arc(center, s * 0.35, 0.0, TAU, 16, col, 2.2, true)
-			ci.draw_arc(center, s * 0.75, 0.0, TAU, 20, col, 2.0, true)
-		2: # capacity — two bold parallel bars, a fat pipe
-			ci.draw_line(center + Vector2(-s, -s * 0.35), center + Vector2(s, -s * 0.35), col, 3.0)
-			ci.draw_line(center + Vector2(-s, s * 0.35), center + Vector2(s, s * 0.35), col, 3.0)
-		_: # reach — a four-point burst, reaching outward
-			for i in 4:
-				var a := TAU * float(i) / 4.0
-				ci.draw_line(center, center + Vector2(cos(a), sin(a)) * s * 1.3, col, 2.8)
-
-
-## A spent Well, gone necrotic: cold, jagged, and beating out of time with you.
+## A spent Well, gone necrotic — and WRONG in a way nothing healthy ever is:
+## it glitches. The shape stutters off its own centre, splits into offset
+## ghost copies, grows unstable spikes, and gets sliced by scanline tears.
+## Everything healthy in VEIN moves smoothly; this is the one thing on the
+## board that moves BROKEN, which is exactly the alarm it should be.
 func _draw_necrotic(r: float) -> void:
-	var wobble := 0.5 + 0.5 * sin(float(Time.get_ticks_msec()) * 0.004)
+	var ms := Time.get_ticks_msec()
+	# Coarse time buckets so the glitch STUTTERS between held poses instead
+	# of smearing smoothly — smooth is alive, stutter is wrong.
+	var frame := ms / 90
+	var g := _noise01(frame * 7 + int(position.x))
+
+	var jit := Vector2.ZERO
+	if g > 0.62:
+		jit = Vector2(_noise01(frame * 13 + 5) - 0.5, _noise01(frame * 17 + 9) - 0.5) * r * 0.55
+
 	var fill := Palette.VOID_DIM
 	fill.a = 0.55 + pulse * 0.35
-	draw_circle(Vector2.ZERO, r * (0.9 + pulse * 0.15), fill)
+	draw_circle(jit, r * (0.9 + pulse * 0.15), fill)
+
+	# Split ghost copies: the same corpse, displaced, in the only cold colour
+	# on the board.
+	if g > 0.45:
+		var ghost := Palette.VOID
+		ghost.a = 0.22
+		var off := Vector2(r * (0.28 + g * 0.3), 0.0).rotated(g * TAU)
+		draw_arc(jit + off, r * 0.9, 0.0, TAU, 20, ghost, 1.6, true)
+		draw_arc(jit - off, r * 0.9, 0.0, TAU, 20, ghost, 1.2, true)
 
 	var spikes := PackedVector2Array()
 	for i in 14:
 		var a := TAU * (float(i) / 14.0)
-		var rr := r * (1.18 if i % 2 == 0 else 0.72 - wobble * 0.08)
-		spikes.append(Vector2(cos(a), sin(a)) * rr)
+		var wob := _noise01(frame * 3 + i * 11)
+		var rr := r * ((1.05 + wob * 0.45) if i % 2 == 0 else (0.6 + wob * 0.2))
+		spikes.append(jit + Vector2(cos(a), sin(a)) * rr)
 	spikes.append(spikes[0])
-	draw_polyline(spikes, Palette.VOID, 2.0, true)
+	draw_polyline(spikes, Palette.VOID, 2.0 + g * 1.4, true)
+
+	# Scanline tears: horizontal slices through the node, the visual language
+	# of a corrupted signal rather than a living thing.
+	if g > 0.55:
+		for i in 3:
+			var y := (_noise01(frame * 5 + i * 23) - 0.5) * r * 1.7
+			var wl := r * (0.7 + _noise01(frame * 9 + i * 31) * 0.9)
+			var tear := Palette.VOID
+			tear.a = 0.35 + g * 0.3
+			draw_line(jit + Vector2(-wl, y), jit + Vector2(wl * 0.6, y), tear, 1.4, true)
+
+
+## Cheap deterministic per-bucket noise for the glitch — cosmetic only, never
+## part of the sim, so it deliberately does NOT touch the seeded rng.
+static func _noise01(n: int) -> float:
+	return float(absi((n * 2654435761) % 4096)) / 4096.0
 
 
 ## A Forge. Playtest: "what is the red triangle, I don't know what it's about."
@@ -691,16 +619,24 @@ func _draw_tri(r: float, col: Color) -> void:
 	fill.a = 0.07 + pulse * 0.20 + smelt_flash * 0.45
 	draw_colored_polygon(tri, fill)
 
-	var edge := col
-	# Idle equipment sits back; a working Forge lights up.
-	edge.a = 0.45 + pulse * 0.3 + smelt_flash * 0.55
-	var outline := tri.duplicate()
-	outline.append(tri[0])
-	draw_polyline(outline, edge, 2.5 + smelt_flash * 2.0, true)
+	# A dim full-silhouette ghost, same two-part language as a circle's
+	# reserve ring (see _draw_ring): a faint complete outline underneath...
+	var ghost := col
+	ghost.a = 0.14
+	var full := tri.duplicate()
+	full.append(tri[0])
+	draw_polyline(full, ghost, 1.3, true)
 
-	_draw_forge_recipe(r)
+	# ...and the border ITSELF is the remaining charge, same eroding-arc
+	# design as a Well, just traced around a triangle. Full-bodied while
+	# fresh; it visibly shortens as the Forge is milked toward corruption.
+	var edge := col
+	edge.a = 0.88 + pulse * 0.12 + smelt_flash * 0.12
+	_draw_partial_outline(tri, reserve_ratio(), edge, 2.6 + smelt_flash * 1.8)
+
+	_draw_recipe_slots(r)
 	if teach:
-		_draw_teach_demo(r, Res.RAW)
+		_draw_teach_demo(r)
 
 	# The output leaving: a ring blooming outward on the beat it was made.
 	if smelt_flash > 0.0:
@@ -714,19 +650,28 @@ func _draw_tri(r: float, col: Color) -> void:
 ## new silhouette for a deeper strategic ask.
 func _draw_square(r: float, col: Color) -> void:
 	var side := r * (1.65 + smelt_flash * 0.14)
-	var rect := Rect2(Vector2(-side * 0.5, -side * 0.5), Vector2(side, side))
+	var half := side * 0.5
+	var sq := PackedVector2Array([
+		Vector2(-half, -half), Vector2(half, -half), Vector2(half, half), Vector2(-half, half),
+	])
 
 	var fill := col
 	fill.a = 0.06 + pulse * 0.16 + smelt_flash * 0.38
-	draw_rect(rect, fill, true)
+	draw_colored_polygon(sq, fill)
+
+	var ghost := col
+	ghost.a = 0.14
+	var full := sq.duplicate()
+	full.append(sq[0])
+	draw_polyline(full, ghost, 1.3, true)
 
 	var edge := col
-	edge.a = 0.42 + pulse * 0.28 + smelt_flash * 0.52
-	draw_rect(rect, edge, false, 2.5 + smelt_flash * 2.0)
+	edge.a = 0.88 + pulse * 0.12 + smelt_flash * 0.12
+	_draw_partial_outline(sq, reserve_ratio(), edge, 2.6 + smelt_flash * 1.8)
 
-	_draw_loom_recipe(r)
+	_draw_recipe_slots(r)
 	if teach:
-		_draw_teach_demo(r, Res.REFINED)
+		_draw_teach_demo(r)
 
 	if smelt_flash > 0.0:
 		var halo := Palette.CLOTH
@@ -751,15 +696,19 @@ func _draw_pentagon(r: float, col: Color) -> void:
 	fill.a = 0.07 + pulse * 0.20 + smelt_flash * 0.42
 	draw_colored_polygon(pent, fill)
 
-	var edge := col
-	edge.a = 0.44 + pulse * 0.3 + smelt_flash * 0.54
-	var outline := pent.duplicate()
-	outline.append(pent[0])
-	draw_polyline(outline, edge, 2.5 + smelt_flash * 2.0, true)
+	var ghost := col
+	ghost.a = 0.14
+	var full := pent.duplicate()
+	full.append(pent[0])
+	draw_polyline(full, ghost, 1.3, true)
 
-	_draw_kiln_recipe(r)
+	var edge := col
+	edge.a = 0.88 + pulse * 0.12 + smelt_flash * 0.12
+	_draw_partial_outline(pent, reserve_ratio(), edge, 2.6 + smelt_flash * 1.8)
+
+	_draw_recipe_slots(r)
 	if teach:
-		_draw_teach_demo(r, Res.CLOTH)
+		_draw_teach_demo(r)
 
 	if smelt_flash > 0.0:
 		var halo := Palette.PRISM
@@ -773,24 +722,25 @@ func _draw_pentagon(r: float, col: Color) -> void:
 		draw_polyline(pts, halo, 2.0 + smelt_flash * 2.0, true)
 
 
-## Loops a few times on this tool's first-ever appearance: two ghost dots of
-## `input_res` fall in from outside, the node flashes, one ghost dot of
+## Loops a few times on this tool's first-ever appearance: ghost dots of the
+## recipe's inputs fall in from outside, the node flashes, one ghost dot of
 ## `produces` (the output) leaves. This is the exact motion a real feed will
 ## later cause — showing it before the player has built anything teaches the
-## recipe without a word, where the static recipe pips alone did not.
-func _draw_teach_demo(r: float, input_res: int) -> void:
+## recipe without a word, where the static requirement glyphs alone did not.
+func _draw_teach_demo(r: float) -> void:
 	var phase := fmod(_teach_t, TEACH_REP_TIME) / TEACH_REP_TIME
+	var n := maxi(recipe.size(), 2)
 
 	if phase < 0.55:
 		var t := phase / 0.55
 		var ease := t * t
-		var col := Palette.of_res(input_res)
-		col.a = 0.85 * (1.0 - ease * 0.3)
-		for side in [-1.0, 1.0]:
+		for i in mini(recipe.size(), 3):
+			var col := Palette.of_res(recipe[i])
+			col.a = 0.85 * (1.0 - ease * 0.3)
+			var side := (float(i) - float(n - 1) * 0.5) * 1.4
 			var from := Vector2(side * r * 0.9, -r * 2.6)
 			var to := Vector2(side * r * 0.22, -r * 0.1)
-			var p := from.lerp(to, ease)
-			draw_circle(p, 3.2, col)
+			draw_circle(from.lerp(to, ease), 3.2, col)
 	elif phase < 0.65:
 		var burst := 1.0 - (phase - 0.55) / 0.10
 		var ring := Palette.WARM
@@ -806,38 +756,45 @@ func _draw_teach_demo(r: float, input_res: int) -> void:
 		draw_circle(from2.lerp(to2, ease2), 3.6, col2)
 
 
-func _draw_forge_recipe(r: float) -> void:
-	var a := 0.42 + smelt_flash * 0.35
-	var raw := Palette.RAW
-	raw.a = a
-	draw_circle(Vector2(-r * 0.28, r * 0.16), 3.0, raw)
-	draw_circle(Vector2(r * 0.28, r * 0.16), 3.0, raw)
-
-	var out := Palette.REFINED
-	out.a = 0.58 + smelt_flash * 0.32
-	_draw_mini_tri(Vector2.ZERO + Vector2(0.0, -r * 0.16), r * 0.18, out, 1.7)
-
-
-func _draw_loom_recipe(r: float) -> void:
-	var refined := Palette.REFINED
-	refined.a = 0.42 + smelt_flash * 0.35
-	_draw_mini_tri(Vector2(-r * 0.25, r * 0.15), r * 0.13, refined, 1.4)
-	_draw_mini_tri(Vector2(r * 0.25, r * 0.15), r * 0.13, refined, 1.4)
-
-	var cloth := Palette.CLOTH
-	cloth.a = 0.58 + smelt_flash * 0.32
-	_draw_mini_square(Vector2(0.0, -r * 0.16), r * 0.16, cloth, 1.7)
-
-
-func _draw_kiln_recipe(r: float) -> void:
-	var cloth := Palette.CLOTH
-	cloth.a = 0.42 + smelt_flash * 0.35
-	_draw_mini_square(Vector2(-r * 0.25, r * 0.15), r * 0.13, cloth, 1.4)
-	_draw_mini_square(Vector2(r * 0.25, r * 0.15), r * 0.13, cloth, 1.4)
-
-	var prism := Palette.PRISM
-	prism.a = 0.58 + smelt_flash * 0.32
-	_draw_mini_pentagon(Vector2(0.0, -r * 0.16), r * 0.16, prism, 1.7)
+## The tool's interior is its SHOPPING LIST, nothing else — feedback: "don't
+## show their own shape anymore, only show what they need so you can make
+## them bigger." One glyph per recipe slot, in the slot's own resource
+## colour, drawn dim while empty and lit once an intake item fills it — the
+## interior IS the progress bar toward the next smelt.
+func _draw_recipe_slots(r: float) -> void:
+	if recipe.is_empty():
+		return
+	var n := recipe.size()
+	var s := r * (0.42 if n <= 2 else 0.32)
+	var gap := s * 2.4
+	var have := intake.duplicate()
+	for i in n:
+		var res: int = recipe[i]
+		var p := Vector2((float(i) - float(n - 1) * 0.5) * gap, 0.0)
+		var filled := false
+		var hi := have.find(res)
+		if hi >= 0:
+			filled = true
+			have.remove_at(hi)
+		# Feedback: the unfilled state read as too pale/washed-out to register
+		# as "a shape" at all. Sharper on both counts now, while keeping a
+		# clear filled/unfilled contrast (still the whole point of the gauge).
+		var col := Palette.of_res(res)
+		col.a = (0.95 if filled else 0.58) + smelt_flash * 0.1
+		var w := 2.4 if filled else 2.0
+		match res:
+			Res.REFINED:
+				_draw_mini_tri(p, s, col, w)
+			Res.CLOTH:
+				_draw_mini_square(p, s * 0.85, col, w)
+			Res.PRISM:
+				_draw_mini_pentagon(p, s, col, w)
+			_:
+				draw_arc(p, s * 0.8, 0.0, TAU, 20, col, w, true)
+				if filled:
+					var fill := col
+					fill.a = 0.25
+					draw_circle(p, s * 0.8, fill)
 
 
 func _draw_mini_tri(center: Vector2, size: float, col: Color, width: float) -> void:
@@ -863,22 +820,16 @@ func _draw_mini_pentagon(center: Vector2, size: float, col: Color, width: float)
 	draw_polyline(pent, col, width, true)
 
 
-## Input waiting to be smelted, drawn INSIDE the tool so a starved tool (one pip,
-## waiting forever for its pair) is distinguishable from a busy one.
-func _draw_intake(r: float) -> void:
-	if (kind != Kind.FORGE and kind != Kind.LOOM and kind != Kind.KILN) or intake.is_empty():
-		return
-	for i in mini(intake.size(), BUFFER_CAP):
-		var p := Vector2(-6.0 + 6.0 * float(i % 3), 4.0 + 6.0 * float(i / 3))
-		draw_circle(p, 2.0, Palette.of_res(intake[i]))
-
-
-## Buffered items orbit the node as pips. A backed-up Well wears its congestion.
+## Buffered items orbit the node as pips. A backed-up Well wears its
+## congestion — kept small and slightly soft so a full buffer reads as texture,
+## not a second bold ring around every node.
 func _draw_buffer(r: float, col: Color) -> void:
 	if buffer.is_empty():
 		return
 	var n := buffer.size()
 	for i in n:
 		var a := TAU * (float(i) / float(BUFFER_CAP)) - PI * 0.5
-		var p := Vector2(cos(a), sin(a)) * (r + 9.0)
-		draw_circle(p, 2.6, Palette.of_res(buffer[i]))
+		var p := Vector2(cos(a), sin(a)) * (r + 8.0)
+		var pc := Palette.of_res(buffer[i])
+		pc.a = 0.9
+		draw_circle(p, 2.1, pc)

@@ -87,10 +87,11 @@ func _record() -> void:
 			rotted += 1
 
 	print(("run %d: beat %4d | rt %5.1f | budget %2d | spawned %2d live %2d (%d fed) | withered %d"
-		+ " collapsed %d rotted %d | poisoned %d | wasted %d | ruptures %d | one-offs %d persist %d time %d")
+		+ " collapsed %d rotted %d | poisoned %d | wasted %d | ruptures %d | dropped %d | rescues %d"
+		+ " | chain %d")
 		% [_idx + 1, beats, _game.run_time, _game.budget, _game.spawned_wells, wells, fed,
 			_game.withered, _game.collapsed, rotted, _game.poisoned, _game.wasted, _game.ruptures,
-			_game.one_offs_taken, _game.persistents_taken, _game.time_baseds_taken])
+			_game.dropped, _game.rescues, _game.chain_rescues])
 
 	_idx += 1
 	if _idx >= runs:

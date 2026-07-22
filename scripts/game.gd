@@ -21,7 +21,7 @@ const SAVE_PATH := "user://vein.cfg"
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 7
+const TUNING_VERSION := 8
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 const START_BUDGET := 4
@@ -59,9 +59,15 @@ const CUT_BLEED_BY_DOT := 0.35
 ## That is a scripted death, not a skill test. Pulled both tools' lead time
 ## forward so a fast, correct build can actually beat its flip; the flip
 ## itself stays exactly as sudden.
-const FIRST_FORGE_TIME := 4.0
-const FORGE_GAP := 21.0
-const FIRST_LOOM_TIME := 19.0
+## Was 4.0 — but that landed a Forge before the first extra Well even arrived,
+## which is part of why the opening felt like a spawn flood. It now comes after
+## a couple of Wells exist to feed it, still with lead time before the REFINED
+## flip. During the tutorial the demand flip is held off entirely until the
+## connect+chain lessons are done (see tutorial.gd), so the Forge is never a
+## surprise there either.
+const FIRST_FORGE_TIME := 9.0
+const FORGE_GAP := 22.0
+const FIRST_LOOM_TIME := 22.0
 const LOOM_GAP := 36.0
 ## A Kiln needs a full Well->Forge->Loom chain already functioning before it's
 ## worth anything, so it gets the longest lead time of any tool — arriving
@@ -174,7 +180,14 @@ const APPETITE_BASE := 0.22
 const APPETITE_RATE := 0.024    # per second
 
 ## Seconds of exertion before the heart is fully racing.
-const EXERTION_SPAN := 150.0
+##
+## Was 150 — but probe runs die at ~100-105s, so the whole back half of the
+## threat curve (fast rot, airborne blight, tight rotation gaps) sat past the
+## end of every real run: ruptures and poisonings read zero seed after seed
+## because the enemy's feral phase was scheduled for a time nobody survives
+## to. 110 puts full intensity just inside a good run's reach — the curve is
+## unchanged, it just finishes while there is still someone alive to feel it.
+const EXERTION_SPAN := 110.0
 
 ## Missed feedings before the beat stops for good.
 const MISSES_STRAINED := 1
@@ -191,103 +204,49 @@ const MISSES_FATAL := 6
 const MAX_LIVE_WELLS := 14
 
 # Spawns and budget are on the clock for the same reason as appetite.
-const FIRST_WELL_TIME := 3.0
-const WELL_GAP_START := 5.5
-const WELL_GAP_DECAY := 0.45     # wells arrive faster and faster
-const WELL_GAP_MIN := 3.25
+##
+## Slowed at the open, ramping with the run. Playtest: "objects get spawned
+## very quickly at the beginning; the spawning should match the game tempo and
+## progression." The board used to fill with Wells inside the first ten
+## seconds. It now opens sparse — a first Well only after the two starters have
+## had time to be wired in — and the gap DECAYS as the run escalates, so late
+## play stays busy. Slow start, quickening finish, same as appetite.
+const FIRST_WELL_TIME := 7.0
+const WELL_GAP_START := 11.0
+const WELL_GAP_DECAY := 0.55     # wells arrive faster and faster as the run climbs
+const WELL_GAP_MIN := 3.75
 
 const FIRST_BUDGET_TIME := 8.0
 const BUDGET_GAP_START := 12.0
 const BUDGET_GAP_GROWTH := 3.5  # ...while veins arrive slower and slower
 
-## BOOSTERS. Three families, one shared pickup mechanic (reach it with a vein
-## from an already-live node — see _add_vein): ONE_OFF is a rare, self-
-## consuming pickup, gone the instant it's taken; PERSISTENT is a permanent,
-## run-long perk that replaces whichever persistent perk you already hold;
-## TIME_BASED is a stronger, temporary version of the same perk pool that
-## expires on its own clock. Every PERSISTENT/TIME_BASED effect pairs a real
-## benefit with a real, felt cost — no free multipliers, per the
-## WRONG_SHAPE_FUEL lesson (an invisible or costless bonus explains nothing
-## and gets ignored). A ONE_OFF grab stays pure: the detour to reach it, and
-## the vein budget spent doing so, is already the cost.
-##
-## Playtest: "no boosts, combos, crazy features" — they existed, but at
-## 24s/46s a run barely contained one. A mechanic the player never sees may as
-## well not be implemented; both families stay rare enough to be a recurring
-## decision ("detour for it, or hold the line?"), never a once-a-run curiosity.
-const FIRST_ONE_OFF_TIME := 50.0
-const ONE_OFF_GAP := 22.0
+## Nothing spawns inside this radius of the Heart. Playtest: "don't spawn
+## objects too close to the Heart, it makes around the Heart very messy." Tools
+## used to be scored to HUG the Heart and could land ~24px off its centre,
+## piling up on top of it; Wells could creep in behind the starters. A clearance
+## ring keeps the area around the Heart readable. It stays well under Vein.MAX_LEN
+## so a tool can still always reach the Heart from just outside the ring.
+const MIN_HEART_CLEARANCE := 132.0
+## Where a tool prefers to sit: out in the reachable band, not on the Heart.
+## Kept modest — far enough to clear the Heart's surroundings, close enough that
+## the tool->Heart vein isn't so long that delivery latency starves the run.
+const TOOL_IDEAL_HEART_DIST := 195.0
 
-## A pure grab, no paired cost — see the family comment above. CLEANSE only
-## makes sense with something to cleanse.
-##
-## SWAP_SYMBOLS and EXTRA_SLOT were cut from this roster: both worked by
-## banking INVISIBLE state (a hidden charge that silently changed what the
-## next drag did; a cap raise you couldn't see until much later) — pure
-## ambiguity with no on-board representation, exactly the kind of mechanic
-## the diegetic pillar exists to forbid. Every surviving one-off's entire
-## effect is visible the moment it fires.
-enum OneOff { SCORE_BURST, EXTRA_VEIN, CLEANSE }
-const ONE_OFF_SCORE_BURST := 25
-const EXTRA_VEIN_BUDGET := 1
-## Weighted so CLEANSE never wastes itself as a no-op reroll when nothing is
-## corrupted — see _roll_one_off.
-const ONE_OFF_WEIGHTS := [0.38, 0.36, 0.26]
+## A non-circle (Forge/Loom/Kiln) may link DIRECTLY to the Heart across a longer
+## span than a normal vein — its reach to the Heart is Vein.MAX_LEN * this. This
+## is what lets the whole Well->Forge->Loom->Kiln chain live scattered out in the
+## field near its supply instead of collapsing onto the Heart: the tool sits by
+## its feeder and still delivers to the Heart across the long link. Connections
+## stay two-way and flow stays graph-directed; only the reach ceiling changes,
+## and only for a tool<->Heart pair.
+const TOOL_HEART_REACH := 1.45
 
-## Shared by both PERSISTENT and TIME_BASED — the same four effect types,
-## offered in two flavours: a weaker permanent version and a stronger
-## temporary one. SCORE's cost lands on APPETITE and APPETITE's cost lands on
-## SCORE — the two sit on each other's benefit axis, so you cannot cheaply
-## stack both directions at once.
-enum BoosterEffect { SCORE, APPETITE, CAPACITY, REACH }
-
-const FIRST_PERSISTENT_TIME := 12.0
-## Gap counted from calendar time, not from when the current perk is replaced
-## — a persistent offer is a genuine ongoing choice (keep what you hold, or
-## trade it for the new offer), so unlike time-based it keeps arriving even
-## while a slot is already full.
-const PERSISTENT_GAP := 34.0
-
-const FIRST_TIME_BASED_TIME := 65.0
-## Gap counted from calendar time; the spawn gate itself (see _tick_escalation)
-## only opens once a slot is actually free.
-const TIME_BASED_GAP := 20.0
-const TIME_BASED_DURATION := 14.0
-
-## [benefit, cost] per BoosterEffect. Persistent is the weaker, permanent
-## half; time-based is the stronger, temporary half of the same idea.
-const PERSISTENT_SCORE_MULT := 1.15
-const PERSISTENT_SCORE_COST_APPETITE := 1.15
-const PERSISTENT_APPETITE_MULT := 0.85
-const PERSISTENT_APPETITE_COST_SCORE := 0.9
-const PERSISTENT_CAPACITY_MULT := 1.3
-const PERSISTENT_CAPACITY_COST_BUDGET_GAP := 1.25
-const PERSISTENT_REACH_MULT := 1.2
-const PERSISTENT_REACH_COST_APPETITE := 1.15
-
-const TIME_SCORE_MULT := 1.4
-const TIME_SCORE_COST_APPETITE := 1.3
-const TIME_APPETITE_MULT := 0.6
-const TIME_APPETITE_COST_SCORE := 0.75
-## Capacity's time-based cost is stronger than persistent's: the whole budget
-## freezes for the duration (mirrors the old VAULT trade), not just a slower
-## grow-rate.
-const TIME_CAPACITY_MULT := 1.6
-const TIME_REACH_MULT := 1.5
-const TIME_REACH_COST_APPETITE := 1.35
-
-const PERSISTENT_BENEFIT := {
-	BoosterEffect.SCORE: PERSISTENT_SCORE_MULT,
-	BoosterEffect.APPETITE: PERSISTENT_APPETITE_MULT,
-	BoosterEffect.CAPACITY: PERSISTENT_CAPACITY_MULT,
-	BoosterEffect.REACH: PERSISTENT_REACH_MULT,
-}
-const TIME_BENEFIT := {
-	BoosterEffect.SCORE: TIME_SCORE_MULT,
-	BoosterEffect.APPETITE: TIME_APPETITE_MULT,
-	BoosterEffect.CAPACITY: TIME_CAPACITY_MULT,
-	BoosterEffect.REACH: TIME_REACH_MULT,
-}
+## Live-tool ceilings. Playtest: "after a while the screen is full of
+## triangles and squares" — tools never die, so without a cap every gap tick
+## added scenery forever. Enough for one canonical of each plus exotics.
+const MAX_LIVE_FORGES := 3
+const MAX_LIVE_LOOMS := 2
+const MAX_LIVE_KILNS := 2
 
 ## Rot that is never cut does not get to sit there forever as free clutter,
 ## poisoning at your leisure — it collapses outright, taking the asset with it.
@@ -304,10 +263,24 @@ const TIME_BENEFIT := {
 const SPREAD_TIME_LATE := 5.0     ## VNode.SPREAD_TIME at intensity 1.0
 ## Rot keeps tightening past EXERTION_SPAN (see pressure()) down to this.
 const SPREAD_TIME_FLOOR := 3.0
-const AIRBORNE_AT := 0.42         ## intensity floor before blight can jump gaps
+const AIRBORNE_AT := 0.38         ## intensity floor before blight can jump gaps
 const AIRBORNE_RADIUS := 190.0
 const AIRBORNE_CHANCE := 0.35     ## per spread-tick, once AIRBORNE_AT is crossed
 const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
+
+## How fast a tool spends its reserve per smelt, at intensity 0 — see
+## VNode.depletion_rate. Playtest: a Forge could go necrotic within the
+## player's first minute, right as they were still learning the recipe
+## mechanic, which reads as "the game is broken" rather than "the game is
+## hard" — this game's whole design language is escalation ON THE CLOCK
+## (see pressure()/intensity()), and tool death shipped as the one exception,
+## a flat cost from beat one. 0.12 means an early tool effectively never dies
+## from ordinary use; by EXERTION_SPAN it reaches the full 1.0 that
+## FORGE_YIELD/LOOM_YIELD/KILN_YIELD were actually tuned against.
+const TOOL_DEPLETION_EARLY := 0.12
+## Keeps climbing past pressure 1.0, same rule as SPREAD_TIME/AIRBORNE_CHANCE
+## above — the enemy never stops getting worse.
+const TOOL_DEPLETION_POST_EXTRA := 0.6
 
 ## Veins cannot cross — this is the spatial skill check: spaghetti is not a
 ## strategy. A bad draw is simply REFUSED (see _add_vein), not punished; it used
@@ -337,10 +310,18 @@ const DRAG_SLOP := 12.0
 @onready var best_label: Label = $Ui/Death/Best
 @onready var budget_hint: Node2D = $BudgetHint
 @onready var score_hud: Node2D = $ScoreHud
-@onready var restart_hint: Node2D = $RestartHint
+@onready var tutorial: Node2D = $Tutorial
+@onready var replay_btn: Button = $Ui/Death/ReplayBtn
+@onready var tutorial_btn: Button = $Ui/Death/TutorialBtn
 
 var rng := RandomNumberGenerator.new()
 var seed_used := 0
+
+## True when any dev harness (probe/shot/audiocheck) is driving the game.
+## Harness runs must never persist saves: the probe was writing every bot
+## death into the player's own best/lifetime via _store_save — a bot-set
+## best is a wall the player never earned and can't fairly chase.
+var _harness_active := false
 
 var nodes: Array[VNode] = []
 var veins: Array[Vein] = []
@@ -361,13 +342,11 @@ var beats := 0
 ## pop that lands is exactly what score moved by — so it reads 0 when
 ## nothing was ever connected, not some unrelated survival-time number.
 var score := 0
-## Fractional score a SCORE perk's multiplier produced but hasn't rounded
-## into a pop yet (e.g. a RAW well at ×1.15 is worth 1.15 score, and 0.15
-## can't pop on its own) — carried to the NEXT delivery instead of being
-## silently discarded every time. Without this a multiplier under 2x was
-## invisible on every single RAW delivery (roundi(1.0 * 1.15) == roundi(1.0)
-## == 1, forever) even though the math was right; the fraction now
-## accumulates until it actually earns an extra point, then pops it.
+## Fractional score the combo bonus produced but hasn't rounded into a pop
+## yet (a RAW delivery at combo ×1.07 is worth 1.07 score, and 0.07 can't
+## pop on its own) — carried to the NEXT delivery instead of being silently
+## discarded every time, so the fraction accumulates until it actually earns
+## an extra point, then pops it.
 var _score_carry := 0.0
 
 ## The number to beat. There is no winning in VEIN — every run ends — so the
@@ -381,6 +360,15 @@ var beat_best_this_run := false
 var seen_forge := false
 var seen_loom := false
 var seen_kiln := false
+## The Cut-the-Rope-style first-run tutorial (see tutorial.gd). Each lesson
+## persists separately so dying mid-tutorial never re-teaches a verb already
+## performed; tutorial_done is the aggregate that switches the whole system
+## off forever.
+var tut_connect := false
+var tut_chain := false
+var tut_forge := false
+var tut_cut := false
+var tutorial_done := false
 ## Ruptures this run. If this stays at zero, trunk capacity never binds and
 ## layout still does not matter — the probe watches it for exactly that reason.
 var ruptures := 0
@@ -398,8 +386,6 @@ var corruptions := 0
 ## instead.
 var withered := 0
 var collapsed := 0
-## One-offs nobody claimed before VNode.BOOST_LIFE ran out.
-var one_offs_expired := 0
 ## Every node ever created, by kind — `nodes.size()` alone undercounts once
 ## withering/collapse can remove them mid-run.
 var spawned_wells := 0
@@ -417,53 +403,30 @@ var demand: int = VNode.Res.RAW
 var _unlocked_res: Array[int] = [VNode.Res.RAW]
 var _next_rotate_time := INF
 
+## True from the instant the Heart has EVER received a delivery — any kind,
+## even a wrong-shape one, since it only exists to prove the player has
+## actually engaged. Gates the DEMAND_TIERS schedule below: playtest reported
+## dying of pure opening neglect (nothing ever connected) right as the demand
+## flip to REFINED happened to land, which reads as "the triangle killed me"
+## when neglect already had. The schedule simply doesn't run until this is
+## true, so an idle board never sees a demand change to blame.
+var _heart_fed_ever := false
+## Seconds since the FIRST feed, not since run start — this is what
+## DEMAND_TIERS is actually measured against (see _tick_escalation). Frozen at
+## 0 until _heart_fed_ever flips true.
+var _demand_clock := 0.0
+
 ## Seconds this run has been alive. The escalation clock — see APPETITE_RATE.
 var run_time := 0.0
 var _next_well_time := FIRST_WELL_TIME
 var _next_forge_time := FIRST_FORGE_TIME
 var _next_loom_time := FIRST_LOOM_TIME
 var _next_kiln_time := FIRST_KILN_TIME
-var _next_one_off_time := FIRST_ONE_OFF_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
-var _next_persistent_time := FIRST_PERSISTENT_TIME
-var _next_time_based_time := FIRST_TIME_BASED_TIME
 
 var _appetite_clock := 0.0
-## One-offs collected this run — useful for the probe to confirm they are
-## actually being reached rather than sitting decorative.
-var one_offs_taken := 0
-var persistents_taken := 0
-var time_baseds_taken := 0
-
-## The PERSISTENT perk currently held (BoosterEffect id), or -1 for none.
-## Never expires on its own; taking a new one replaces it (see
-## _apply_persistent). Pushed into heart.mutation_marks the instant it
-## changes so the Heart wears the held perk on its own body, same spot every
-## time, the same way a Forge's triangle or a Loom's square are learned by
-## sight — see VNode._draw_mutation_marks. One scalar, not an array: exactly
-## one of each family may ever be held, so the state should be incapable of
-## expressing anything else.
-var _active_persistent := -1
-## The TIME_BASED perk currently running (BoosterEffect id, -1 for none) and
-## its remaining seconds — see _tick_time_based.
-var _active_time_effect := -1
-var _time_left := 0.0
-
-## Folded from the two actives every time either changes (see
-## _recompute_boosters) — the single set of modifiers every other system
-## actually reads, so appetite()/fuel math/vein creation never need to know
-## which category produced a number.
-var _boost_score_mult := 1.0
-var _boost_appetite_mult := 1.0
-var _boost_capacity_mult := 1.0
-var _boost_reach_mult := 1.0
-## CAPACITY's persistent cost (budget grows slower) and time-based cost
-## (budget growth pauses entirely) — kept separate because they are
-## different mechanisms, not different strengths of the same one.
-var _boost_budget_gap_mult := 1.0
-var _boost_budget_frozen := false
 
 var _drag_from: VNode = null
 var _drag_pos := Vector2.ZERO
@@ -497,6 +460,13 @@ func _ready() -> void:
 	_fit_desktop_window()
 	drag_layer.draw.connect(_draw_drag)
 	death_ui.hide()
+	# Death-screen buttons. A real Button consumes its own tap before
+	# _unhandled_input sees it, so each does its own thing while a tap anywhere
+	# ELSE on the death screen still does the default retry. The primary
+	# Replay button was previously never connected — tapping it ate the tap
+	# and did nothing, which read as "the replay button is broken".
+	replay_btn.pressed.connect(func() -> void: start_run(0))
+	tutorial_btn.pressed.connect(_on_replay_tutorial)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
@@ -531,9 +501,16 @@ func _load_save() -> void:
 	seen_forge = bool(cfg.get_value("run", "seen_forge", false))
 	seen_loom = bool(cfg.get_value("run", "seen_loom", false))
 	seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
+	tut_connect = bool(cfg.get_value("run", "tut_connect", false))
+	tut_chain = bool(cfg.get_value("run", "tut_chain", false))
+	tut_forge = bool(cfg.get_value("run", "tut_forge", false))
+	tut_cut = bool(cfg.get_value("run", "tut_cut", false))
+	tutorial_done = bool(cfg.get_value("run", "tutorial_done", false))
 
 
 func _store_save() -> void:
+	if _harness_active:
+		return
 	var cfg := ConfigFile.new()
 	cfg.set_value("run", "best", best)
 	cfg.set_value("run", "lifetime", lifetime_beats)
@@ -541,6 +518,11 @@ func _store_save() -> void:
 	cfg.set_value("run", "seen_forge", seen_forge)
 	cfg.set_value("run", "seen_loom", seen_loom)
 	cfg.set_value("run", "seen_kiln", seen_kiln)
+	cfg.set_value("run", "tut_connect", tut_connect)
+	cfg.set_value("run", "tut_chain", tut_chain)
+	cfg.set_value("run", "tut_forge", tut_forge)
+	cfg.set_value("run", "tut_cut", tut_cut)
+	cfg.set_value("run", "tutorial_done", tutorial_done)
 	cfg.save(SAVE_PATH)
 
 
@@ -572,6 +554,10 @@ func _maybe_attach_harness() -> void:
 			after = float(a.get_slice("=", 1))
 
 	if probe_runs > 0:
+		# The tutorial's grace window would silently change probe balance —
+		# harness runs always measure the real game, never the lesson.
+		_harness_active = true
+		tutorial.enabled = false
 		var p: Node = _load_harness("res://tests/probe.gd")
 		if p == null:
 			return
@@ -580,16 +566,36 @@ func _maybe_attach_harness() -> void:
 		p.cap = cap
 		add_child(p)
 	elif "--audiocheck" in OS.get_cmdline_user_args():
+		_harness_active = true
+		tutorial.enabled = false
 		var a: Node = _load_harness("res://tests/audiocheck.gd")
 		if a != null:
 			add_child(a)
+	elif "--chainstress" in OS.get_cmdline_user_args():
+		_harness_active = true
+		tutorial.enabled = false
+		var c: Node = _load_harness("res://tests/chain_stress.gd")
+		if c != null:
+			add_child(c)
 	elif shot_path != "":
+		_harness_active = true
+		# `--tutorial` forces the hints on regardless of the save, so they
+		# can be screenshot-verified; a plain shot shows the real game.
+		if "--tutorial" in OS.get_cmdline_user_args():
+			tut_connect = false
+			tut_chain = false
+			tut_forge = false
+			tut_cut = false
+			tutorial_done = false
+		else:
+			tutorial.enabled = false
 		var s: Node = _load_harness("res://tests/shot.gd")
 		if s == null:
 			return
 		s.out_path = shot_path
 		s.after = after
 		s.speed = speed if speed > 0.0 else 3.0
+		s.demo_tutorial = "--tutorial" in OS.get_cmdline_user_args()
 		add_child(s)
 
 
@@ -602,6 +608,20 @@ func _load_harness(path: String) -> Node:
 
 
 # --- Run lifecycle ----------------------------------------------------------
+
+## Wipes the tutorial-completion flags and starts a fresh run, so the
+## Cut-the-Rope lessons play again from the top — wired to the death screen's
+## "Replay tutorial" button. Persisted, so the replayed tutorial also sticks
+## if the player quits partway and comes back.
+func _on_replay_tutorial() -> void:
+	tut_connect = false
+	tut_chain = false
+	tut_forge = false
+	tut_cut = false
+	tutorial_done = false
+	_store_save()
+	start_run(0)
+
 
 func start_run(run_seed: int) -> void:
 	Audio.start()
@@ -625,7 +645,6 @@ func start_run(run_seed: int) -> void:
 	dropped = 0
 	withered = 0
 	collapsed = 0
-	one_offs_expired = 0
 	spawned_wells = 0
 	poisoned = 0
 	corruptions = 0
@@ -634,34 +653,25 @@ func start_run(run_seed: int) -> void:
 	demand = VNode.Res.RAW
 	_unlocked_res = [VNode.Res.RAW]
 	_next_rotate_time = INF
+	_heart_fed_ever = false
+	_demand_clock = 0.0
+	_no_move_time = 0.0
+	rescues = 0
 	_rescue = 0.0
 	_drain_amt = 0.0
 	_sync_flash = 0.0
 	_bad_tempo_flash = 0.0
 	_appetite_clock = 0.0
-	one_offs_taken = 0
-	persistents_taken = 0
-	time_baseds_taken = 0
-	_active_persistent = -1
-	_active_time_effect = -1
-	_time_left = 0.0
-	_boost_score_mult = 1.0
-	_boost_appetite_mult = 1.0
-	_boost_capacity_mult = 1.0
-	_boost_reach_mult = 1.0
-	_boost_budget_gap_mult = 1.0
-	_boost_budget_frozen = false
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
 	_next_loom_time = FIRST_LOOM_TIME
 	_next_kiln_time = FIRST_KILN_TIME
-	_next_one_off_time = FIRST_ONE_OFF_TIME
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
-	_next_persistent_time = FIRST_PERSISTENT_TIME
-	_next_time_based_time = FIRST_TIME_BASED_TIME
+	_chain_stall.clear()
+	chain_rescues = 0
 
 	var vp := design_size()
 	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
@@ -679,6 +689,8 @@ func start_run(run_seed: int) -> void:
 
 	death_ui.hide()
 	alive = true
+	if tutorial != null:
+		tutorial.reset()
 	Beat.reset()
 	_rebuild_graph()
 
@@ -803,10 +815,7 @@ func intensity() -> float:
 	return clampf(pressure(), 0.0, 1.0)
 
 
-## Fuel the Heart burns per beat, rising on the run clock — scaled by
-## `_boost_appetite_mult`, folded from every active PERSISTENT/TIME_BASED
-## APPETITE perk plus the appetite cost of every SCORE/REACH perk (see
-## _recompute_boosters).
+## Fuel the Heart burns per beat, rising on the run clock.
 ##
 ## The climb used to be a flat ramp: predictable the moment you'd seen a
 ## minute of it. A sine wave riding on top makes the hunger itself feel
@@ -821,7 +830,7 @@ const APPETITE_WAVE_PERIOD := 17.0
 func appetite() -> float:
 	var base := APPETITE_BASE + APPETITE_RATE * _appetite_clock
 	var wave := sin(_appetite_clock * TAU / APPETITE_WAVE_PERIOD) * APPETITE_WAVE_AMP * intensity()
-	return maxf(0.02, (base + wave) * _boost_appetite_mult)
+	return maxf(0.02, base + wave)
 
 
 func fuel_cap() -> float:
@@ -838,92 +847,102 @@ func _jitter(base: float, spread: float) -> float:
 	return base * rng.randf_range(1.0 - spread, 1.0 + spread)
 
 
+func _tut_holds_demand() -> bool:
+	return tutorial != null and tutorial.holds_demand()
+
+
+func _tut_gates_spawns() -> bool:
+	return tutorial != null and tutorial.gates_spawns()
+
+
 ## Drives the spawn and budget clocks. Kept out of _on_beat so a slowing Heart
 ## cannot slow its own escalation.
 func _tick_escalation(delta: float) -> void:
 	run_time += delta
 	_appetite_clock += delta
+	# The demand SCHEDULE runs on time-since-first-feed, not run_time — see
+	# _heart_fed_ever. Everything else (appetite, spawns, corruption) still
+	# escalates on real run_time regardless of engagement; only the "what does
+	# the Heart want" clock waits for proof the player has done something.
+	if _heart_fed_ever:
+		_demand_clock += delta
 
-	_tick_time_based(delta)
+	# During the tutorial the demand schedule is suspended — the tutorial owns
+	# `demand` and brings the triangle in on its own paced clock (see
+	# tutorial.holds_demand), so a first-timer isn't hit with a flip before
+	# they've learned to connect and chain.
+	if not _tut_holds_demand():
+		var want: int = demand
+		for t in DEMAND_TIERS:
+			if _demand_clock >= t.at:
+				want = t.res
+				if not _unlocked_res.has(t.res):
+					_unlocked_res.append(t.res)
 
-	# A fresh PERSISTENT offer keeps arriving on a flat calendar cadence even
-	# while a slot is already full — taking one is always a real trade (give
-	# up what you hold), not something you have to wait to become eligible
-	# for. A TIME_BASED offer only appears once an actual slot is free.
-	if run_time >= _next_persistent_time and not _has_persistent_pair():
-		_spawn_persistent_pair()
-		_next_persistent_time += _jitter(PERSISTENT_GAP, 0.3)
+		# Teaching schedule is over once every DEMAND_TIERS entry has landed —
+		# from here, demand jumps randomly among everything unlocked instead of
+		# sitting at PRISM forever (see ROTATE_GAP_START/MIN above).
+		# _next_rotate_time starts at INF (see start_run) so the first crossing
+		# just arms the timer rather than firing an immediate switch the instant
+		# PRISM lands.
+		if _demand_clock >= DEMAND_TIERS[-1].at and _next_rotate_time == INF:
+			_next_rotate_time = _demand_clock + _jitter(ROTATE_GAP_START, 0.3)
+		elif _demand_clock >= _next_rotate_time:
+			var pool := _unlocked_res.duplicate()
+			pool.erase(want)
+			if not pool.is_empty():
+				want = pool[rng.randi() % pool.size()]
+			# Keeps shrinking past pressure 1.0 (see pressure()) toward a hard
+			# floor, so deep-late demand flips genuinely never stop accelerating.
+			var gap := lerpf(ROTATE_GAP_START, ROTATE_GAP_MIN, intensity())
+			gap = maxf(ROTATE_GAP_FLOOR, gap - maxf(pressure() - 1.0, 0.0) * 2.0)
+			_next_rotate_time = _demand_clock + _jitter(gap, 0.35)
 
-	if run_time >= _next_time_based_time and _active_time_effect < 0 \
-			and not _has_time_based_pair():
-		_spawn_time_based_pair()
-		_next_time_based_time += _jitter(TIME_BASED_GAP, 0.3)
+		if want != demand:
+			demand = want
+			heart.demand = want
+			# The Heart changing its mind is the loudest event in the run:
+			# everything you built is now feeding it the wrong thing.
+			heart.pulse = 1.0
+			Audio.play("corrupt", -6.0, 1.5)
+			if OS.has_feature("mobile"):
+				Input.vibrate_handheld(220)
 
-	var want: int = demand
-	for t in DEMAND_TIERS:
-		if run_time >= t.at:
-			want = t.res
-			if not _unlocked_res.has(t.res):
-				_unlocked_res.append(t.res)
+	# During the tutorial's controlled opening, spawns are suspended entirely —
+	# the tutorial injects the one Well it needs and keeps the board calm until
+	# chaining is taught (see tutorial.gates_spawns). Budget still grows below.
+	if not _tut_gates_spawns():
+		if run_time >= _next_well_time:
+			_spawn_well()
+			_next_well_time += _jitter(_well_gap, 0.3)
+			_well_gap = maxf(WELL_GAP_MIN, _well_gap - WELL_GAP_DECAY)
 
-	# Teaching schedule is over once every DEMAND_TIERS entry has landed —
-	# from here, demand jumps randomly among everything unlocked instead of
-	# sitting at PRISM forever (see ROTATE_GAP_START/MIN above). _next_rotate_time
-	# starts at INF (see start_run) so the first crossing just arms the timer
-	# rather than firing an immediate switch the instant PRISM lands.
-	if run_time >= DEMAND_TIERS[-1].at and _next_rotate_time == INF:
-		_next_rotate_time = run_time + _jitter(ROTATE_GAP_START, 0.3)
-	elif run_time >= _next_rotate_time:
-		var pool := _unlocked_res.duplicate()
-		pool.erase(want)
-		if not pool.is_empty():
-			want = pool[rng.randi() % pool.size()]
-		# Keeps shrinking past pressure 1.0 (see pressure()) toward a hard
-		# floor, so deep-late demand flips genuinely never stop accelerating.
-		var gap := lerpf(ROTATE_GAP_START, ROTATE_GAP_MIN, intensity())
-		gap = maxf(ROTATE_GAP_FLOOR, gap - maxf(pressure() - 1.0, 0.0) * 2.0)
-		_next_rotate_time = run_time + _jitter(gap, 0.35)
+		_ensure_move(delta)
+		_tick_tool_chain(delta)
 
-	if want != demand:
-		demand = want
-		heart.demand = want
-		# The Heart changing its mind is the loudest event in the run: everything
-		# you built is now feeding it the wrong thing.
-		heart.pulse = 1.0
-		Audio.play("corrupt", -6.0, 1.5)
-		if OS.has_feature("mobile"):
-			Input.vibrate_handheld(220)
+		# Tools keep arriving on their cadence but the BOARD stays capped —
+		# playtest: "after a while the screen is full of triangles and squares."
+		# At cap the timer still advances, so a slot freed later (a collapse)
+		# refills on the next tick rather than never.
+		if run_time >= _next_forge_time:
+			if _count_healthy_kind(VNode.Kind.FORGE) < MAX_LIVE_FORGES:
+				_spawn_node(VNode.Kind.FORGE)
+			_next_forge_time += _jitter(FORGE_GAP, 0.25)
 
-	if run_time >= _next_well_time:
-		_spawn_well()
-		_next_well_time += _jitter(_well_gap, 0.3)
-		_well_gap = maxf(WELL_GAP_MIN, _well_gap - WELL_GAP_DECAY)
+		if run_time >= _next_loom_time:
+			if _count_healthy_kind(VNode.Kind.LOOM) < MAX_LIVE_LOOMS:
+				_spawn_node(VNode.Kind.LOOM)
+			_next_loom_time += _jitter(LOOM_GAP, 0.2)
 
-	if run_time >= _next_forge_time:
-		_spawn_node(VNode.Kind.FORGE)
-		_next_forge_time += _jitter(FORGE_GAP, 0.25)
+		if run_time >= _next_kiln_time:
+			if _count_healthy_kind(VNode.Kind.KILN) < MAX_LIVE_KILNS:
+				_spawn_node(VNode.Kind.KILN)
+			_next_kiln_time += _jitter(KILN_GAP, 0.2)
 
-	if run_time >= _next_loom_time:
-		_spawn_node(VNode.Kind.LOOM)
-		_next_loom_time += _jitter(LOOM_GAP, 0.2)
-
-	if run_time >= _next_kiln_time:
-		_spawn_node(VNode.Kind.KILN)
-		_next_kiln_time += _jitter(KILN_GAP, 0.2)
-
-	if run_time >= _next_one_off_time:
-		_spawn_one_off()
-		_next_one_off_time += _jitter(ONE_OFF_GAP, 0.4)
-
-	# A time-based CAPACITY perk (see _recompute_boosters) freezes this: the
-	# network stops expanding for the duration in exchange for a much bigger
-	# vein throughput. run_time keeps sailing past _next_budget_time while
-	# frozen, so the tick fires the instant the freeze ends rather than
-	# losing the progress entirely.
-	if not _boost_budget_frozen and run_time >= _next_budget_time:
+	if run_time >= _next_budget_time:
 		budget += 1
 		_next_budget_time += _jitter(_budget_gap, 0.15)
-		_budget_gap += BUDGET_GAP_GROWTH * _boost_budget_gap_mult
+		_budget_gap += BUDGET_GAP_GROWTH
 		budget_hint.queue_redraw()
 
 
@@ -951,30 +970,6 @@ func _spawn_well() -> void:
 		_remove_node(oldest)
 
 	_spawn_node(VNode.Kind.WELL)
-
-
-## Only one instant one-off ever sits on the board. Feedback: "you can't have
-## multiple boosters at the same time... let's say you can have one active
-## booster at the time." A fresh one-off still displaces whichever one is
-## already there rather than being skipped, so the cadence stays exactly as
-## regular as before — there is just never more than one to choose from.
-const MAX_LIVE_ONE_OFFS := 1
-
-
-func _spawn_one_off() -> void:
-	var live: Array[VNode] = []
-	for n in nodes:
-		if n.kind == VNode.Kind.BOOST:
-			live.append(n)
-
-	if live.size() >= MAX_LIVE_ONE_OFFS:
-		var oldest: VNode = null
-		for n in live:
-			if oldest == null or n.orphan_age > oldest.orphan_age:
-				oldest = n
-		_remove_node(oldest)
-
-	_spawn_node(VNode.Kind.BOOST)
 
 
 ## New nodes spawn in awkward places, forcing rerouting. Bias to the lower two
@@ -1037,29 +1032,77 @@ func _spawn_node(kind: int) -> void:
 	# one link further down the chain: it anchors to the midpoint between the
 	# Heart and an existing Loom, so Loom->Kiln->Heart is guaranteed the same
 	# way Forge->Loom->Heart is.
+	# A Well's anchor must not just be CONNECTED, it must be able to USE what
+	# a Well makes: a Well whose only in-reach neighbour is a Loom/Kiln (which
+	# may refuse RAW) or a corrupted node "spawned reachable" but every vein
+	# you could draw to it was a dead move — RAW arrived and was refused on
+	# contact. Anchoring only to nodes that accept or relay RAW (the Heart,
+	# healthy Wells) guarantees at least one USEFUL connection exists the
+	# moment it appears, not merely a drawable one.
+	#
+	# The pool also includes the FRONTIER: orphan Wells that are themselves
+	# within reach of the network. Playtest: "spawning seems to happen in a
+	# perfect circle around the heart" — with only the connected core as
+	# anchors, every new node landed on the same annulus around the same few
+	# points. Growing off the frontier too lets the board wander outward in
+	# organic chains instead of stacking rings.
 	var connected: Array[VNode] = []
 	for n in nodes:
-		if n.depth >= 0:
+		if n.depth < 0 or n.corrupted:
+			continue
+		if n.kind == VNode.Kind.HEART or n.kind == VNode.Kind.WELL \
+				or (n.kind == VNode.Kind.FORGE and n.recipe.has(VNode.Res.RAW)):
 			connected.append(n)
 	if connected.is_empty():
-		connected = nodes
+		connected = [heart]
+	var anchors := connected.duplicate()
+	for n in nodes:
+		if n.depth >= 0 or n.corrupted or n.kind != VNode.Kind.WELL:
+			continue
+		for m in connected:
+			if in_reach(n, m):
+				anchors.append(n)
+				break
 
 	var is_tool := kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM or kind == VNode.Kind.KILN
+
+	# A tool is USELESS unless BOTH its feeder and its delivery target can reach
+	# it — playtest: "the triangle spawned where no circle could reach it,
+	# there must never be a scenario with no move." The feeder is what hands it
+	# raw material (a Forge eats from a Well, a Loom from a Forge, a Kiln from a
+	# Loom); the target is always the Heart (every chain drains to it). Placing
+	# the tool near the MIDPOINT of feeder<->Heart, inside a ring tight enough
+	# that any candidate stays within Vein.MAX_LEN of both, makes the whole
+	# link buildable by construction. The reach is then re-checked per
+	# candidate below, so an off-midpoint pick can never sneak out of range.
+	var tool_heart_reach := Vein.MAX_LEN * TOOL_HEART_REACH
 	var anchor_point := heart.position
-	var min_dist := 112.0
+	var feeder: VNode = null
+	var min_dist := 40.0
 	var max_dist := Vein.MAX_LEN * 0.9
-	if kind == VNode.Kind.LOOM:
-		var forge := _random_node_of_kind(VNode.Kind.FORGE)
-		if forge != null:
-			anchor_point = (heart.position + forge.position) * 0.5
-			min_dist = 40.0
-			max_dist = 90.0
-	elif kind == VNode.Kind.KILN:
-		var loom := _random_node_of_kind(VNode.Kind.LOOM)
-		if loom != null:
-			anchor_point = (heart.position + loom.position) * 0.5
-			min_dist = 40.0
-			max_dist = 90.0
+	if is_tool:
+		if kind == VNode.Kind.FORGE:
+			feeder = _nearest_node_of_kind(VNode.Kind.WELL, heart.position)
+		elif kind == VNode.Kind.LOOM:
+			feeder = _nearest_node_of_kind(VNode.Kind.FORGE, heart.position)
+		else:
+			feeder = _nearest_node_of_kind(VNode.Kind.LOOM, heart.position)
+		# A tool now anchors to its FEEDER, not the feeder<->Heart midpoint: it
+		# lives out in the field next to its supply and reaches the Heart across
+		# the long tool<->Heart link (see TOOL_HEART_REACH). That is the whole
+		# scatter fix — the chain no longer collapses onto the Heart. The feeder
+		# must itself be within extended Heart reach, or a tool placed by it
+		# couldn't also reach the Heart; if it isn't, fall back to hugging the
+		# Heart and let the rescue system drop supply nearby.
+		if feeder != null and heart.position.distance_to(feeder.position) > tool_heart_reach - 24.0:
+			feeder = null
+		if feeder != null:
+			anchor_point = feeder.position
+			min_dist = 78.0
+			max_dist = Vein.MAX_LEN * 0.82
+		else:
+			min_dist = MIN_HEART_CLEARANCE
+			max_dist = tool_heart_reach * 0.7
 
 	for _i in 64:
 		var p: Vector2
@@ -1068,12 +1111,26 @@ func _spawn_node(kind: int) -> void:
 			var dist := rng.randf_range(min_dist, max_dist)
 			p = anchor_point + Vector2(cos(bearing), sin(bearing)) * dist
 		else:
-			var anchor: VNode = connected[rng.randi() % connected.size()]
+			var anchor: VNode = anchors[rng.randi() % anchors.size()]
 			var bearing := rng.randf() * TAU
-			var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.9)
+			var dist := rng.randf_range(90.0, Vein.MAX_LEN * 0.95)
 			p = anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
 		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
 			continue
+
+		var to_heart := p.distance_to(heart.position)
+		# Keep the Heart's immediate surroundings clear — nothing crowds it.
+		if to_heart < MIN_HEART_CLEARANCE:
+			continue
+
+		# Hard reachability gate for tools: reject any spot the Heart or the
+		# feeder cannot directly reach. This is the guarantee, not a preference.
+		# The Heart gate uses the EXTENDED tool reach, so a tool may sit far out.
+		if is_tool:
+			if to_heart > tool_heart_reach:
+				continue
+			if feeder != null and p.distance_to(feeder.position) > Vein.MAX_LEN:
+				continue
 
 		var near := INF
 		for n in nodes:
@@ -1081,11 +1138,12 @@ func _spawn_node(kind: int) -> void:
 		if near < 104.0:
 			continue
 
-		var to_heart := p.distance_to(heart.position)
 		var s := 0.0
 		if is_tool:
-			# Tools must stand between a cluster of supply and the Heart.
-			s = -to_heart
+			# Tools stand between supply and the Heart, but out in the reachable
+			# band — not piled on the Heart. Reward elbow room and sitting near
+			# the ideal ring distance, so tools scatter across the mid-field.
+			s = near - absf(to_heart - TOOL_IDEAL_HEART_DIST) * 0.6
 		else:
 			# Prefer awkward — elbow room from neighbours — WITHOUT preferring a
 			# compass direction. Distance from the Heart is deliberately not a
@@ -1096,19 +1154,26 @@ func _spawn_node(kind: int) -> void:
 			best = p
 
 	if best_score == -INF:
-		if not is_tool:
-			return
-		# A tool is NOT allowed to just silently fail to spawn because its
-		# usual ring is crowded — that IS the "no square anywhere" bug.
-		# Guaranteed placement: whichever fixed bearing around the anchor
-		# point is least crowded, elbow-room minimum ignored if it has to be.
-		# A little visual overlap costs far less than the tool not existing.
-		best = _least_crowded_spot(anchor_point, (min_dist + max_dist) * 0.5)
+		# NOTHING is allowed to silently fail to spawn. For a tool the fallback
+		# must STILL be reachable, so it goes at the feeder<->Heart midpoint
+		# (which is within one reach of both by construction) nudged to the
+		# least-crowded nearby bearing; a Well falls back to a spot off any
+		# anchor.
+		if is_tool:
+			if feeder != null:
+				# Sample the full allowed ring, not a tight 40px stub: the
+				# least-crowded spot is also the one farthest from the Heart, so
+				# a fallback tool spreads outward rather than piling on the Heart.
+				best = _least_crowded_spot(anchor_point, max_dist)
+			else:
+				best = _least_crowded_spot(anchor_point, Vein.MAX_LEN * 0.6)
+		else:
+			var anchor: VNode = anchors[rng.randi() % anchors.size()]
+			best = _least_crowded_spot(anchor.position, Vein.MAX_LEN * 0.7)
 	var n := _make_node(kind, best)
-	if kind == VNode.Kind.BOOST:
-		n.boost_effect = _roll_one_off()
-		n.label = _one_off_headline(n.boost_effect)
-	elif kind == VNode.Kind.FORGE and not seen_forge:
+	if is_tool:
+		n.recipe = _roll_recipe(kind)
+	if kind == VNode.Kind.FORGE and not seen_forge:
 		seen_forge = true
 		n.teach = true
 		_store_save()
@@ -1123,6 +1188,62 @@ func _spawn_node(kind: int) -> void:
 	_rebuild_graph()
 
 
+## What each tool kind makes never varies; what it EATS does. The plain
+## recipe is two of the tier below — the classic chain. Exotic recipes are
+## mixed multisets ("1 square and 1 circle", "2 x 1 y", up to three slots)
+## drawn from everything the run has unlocked so far, excluding VOID and the
+## tool's own product.
+const CANONICAL_RECIPE := {
+	VNode.Kind.FORGE: [VNode.Res.RAW, VNode.Res.RAW],
+	VNode.Kind.LOOM: [VNode.Res.REFINED, VNode.Res.REFINED],
+	VNode.Kind.KILN: [VNode.Res.CLOTH, VNode.Res.CLOTH],
+}
+## Chance a tool rolls exotic, growing with run pressure — the opening stays
+## the learnable classic chain, the late game goes strange.
+const EXOTIC_CHANCE_BASE := 0.25
+const EXOTIC_CHANCE_MAX := 0.75
+
+
+## THE NO-MOVE GUARANTEE APPLIES HERE TOO: the first tool of each kind on
+## the board — and any tool spawned while no plain-recipe sibling of its
+## kind is alive — is always canonical, so every demand tier is always
+## answerable through the classic Well->Forge->Loom->Kiln chain no matter
+## how weird the extras get.
+func _roll_recipe(kind: int) -> Array[int]:
+	var canonical: Array[int] = []
+	canonical.assign(CANONICAL_RECIPE[kind])
+
+	var has_canonical := false
+	for n in nodes:
+		if n.kind == kind and not n.corrupted and n.recipe == canonical:
+			has_canonical = true
+			break
+	if not has_canonical:
+		return canonical
+
+	var chance := lerpf(EXOTIC_CHANCE_BASE, EXOTIC_CHANCE_MAX, intensity())
+	if rng.randf() > chance:
+		return canonical
+
+	var produces: int = VNode.Res.REFINED
+	match kind:
+		VNode.Kind.LOOM: produces = VNode.Res.CLOTH
+		VNode.Kind.KILN: produces = VNode.Res.PRISM
+	var pool: Array[int] = []
+	for res in _unlocked_res:
+		if res != produces and res != VNode.Res.VOID:
+			pool.append(res)
+	if pool.is_empty():
+		return canonical
+
+	var out: Array[int] = []
+	var slots := 2 + (1 if rng.randf() < 0.3 else 0)
+	for _i in slots:
+		out.append(pool[rng.randi() % pool.size()])
+	out.sort()
+	return out
+
+
 func _random_node_of_kind(kind: int) -> VNode:
 	var matches: Array[VNode] = []
 	for n in nodes:
@@ -1131,16 +1252,41 @@ func _random_node_of_kind(kind: int) -> VNode:
 	return matches[rng.randi() % matches.size()] if not matches.is_empty() else null
 
 
-## Guaranteed fallback placement for a tool when the normal rejection search
-## above found nowhere valid: whichever of a fixed ring of bearings around
-## `center` is farthest from every existing node, so a Forge/Loom always gets
-## SOMEWHERE on the board rather than silently not spawning at all.
+func _count_kind(kind: int) -> int:
+	var c := 0
+	for n in nodes:
+		if n.kind == kind:
+			c += 1
+	return c
+
+
+## Live, non-corrupted nodes of a kind. The tool caps count this so a necrotic
+## tool waiting to collapse doesn't hold its own replacement out — the board
+## should always be working back toward a full spread of every shape, ready for
+## whatever the Heart demands next.
+func _count_healthy_kind(kind: int) -> int:
+	var c := 0
+	for n in nodes:
+		if n.kind == kind and not n.corrupted:
+			c += 1
+	return c
+
+
+## Guaranteed fallback placement when the normal rejection search found
+## nowhere valid: whichever of a fixed ring of bearings around `center` is
+## farthest from every existing node, so the node always gets SOMEWHERE on
+## the board rather than silently not spawning at all. Candidates are clamped
+## into the playfield margins before scoring — clamping only ever pulls a
+## point INWARD toward the anchor, so it can never push one out of reach.
 func _least_crowded_spot(center: Vector2, dist: float) -> Vector2:
+	var vp := design_size()
 	var best := center + Vector2(dist, 0.0)
 	var best_near := -INF
 	for i in 24:
 		var a := TAU * float(i) / 24.0
 		var p := center + Vector2(cos(a), sin(a)) * dist
+		p.x = clampf(p.x, 56.0, vp.x - 56.0)
+		p.y = clampf(p.y, 70.0, vp.y - 70.0)
 		var near := INF
 		for n in nodes:
 			near = minf(near, p.distance_to(n.position))
@@ -1150,355 +1296,361 @@ func _least_crowded_spot(center: Vector2, dist: float) -> Vector2:
 	return best
 
 
-## Where the next Relic/Mutation fork centers. Reuses the exact same
-## anchor-off-a-connected-node search Wells and Boosts already use to spread
-## across the whole board, rather than the fixed 96px ring around the Heart
-## both forks used to spawn on unconditionally. Feedback: "boosters should
-## spawn anywhere in the screen not just near the heart."
-##
-## The two halves of a fork sit ANCHOR_HALF_SPREAD apart from this point, so
-## the search keeps its own distance from a connected node short enough
-## (well under Vein.MAX_LEN) that both halves stay in reach of it no matter
-## which way the pair happens to be split.
-const PICKUP_ANCHOR_MIN := 90.0
-const PICKUP_ANCHOR_MAX := 140.0
-const PICKUP_HALF_SPREAD := 40.0
+# --- The no-move guarantee ---------------------------------------------------
+#
+# The one unrecoverable state VEIN must never produce: the Heart is starving
+# and there is nothing on the board the player could possibly do about it.
+# Spawn anchoring (see _spawn_node) makes every new node reachable AND useful
+# at the moment it appears, but reachability decays as the run chews the board
+# up — Wells deplete, corrupt, wither; the network gets amputated — so the
+# guarantee also needs a live check, not just careful placement.
 
-func _random_pickup_anchor() -> Vector2:
-	var vp := design_size()
-	var connected: Array[VNode] = []
+## How long the board may sit with no claimable fresh supply before a rescue
+## Well is forced in. Non-zero so a transient gap (the half-second between
+## cutting a rotten limb and wiring its replacement) doesn't trigger it, but
+## short enough that the rescue lands with several missed feedings still in
+## hand (MISSES_FATAL) — the player should experience "supply is scarce",
+## never "supply is impossible".
+const RESCUE_DEBOUNCE := 1.5
+
+var _no_move_time := 0.0
+## Rescue Wells forced in this run — the probe reads it: a handful per run is
+## the guarantee working; dozens means normal spawning itself is starving the
+## board and needs retuning.
+var rescues := 0
+
+
+## True while at least one healthy Well with reserve left can still be wired
+## into the live network — already on it, or within one vein of a connected
+## node that would actually accept RAW (Heart, healthy Well, Forge; a Loom or
+## a rotten node in reach is not a move, it just looks like one).
+func _has_reachable_supply() -> bool:
 	for n in nodes:
+		if n.kind != VNode.Kind.WELL or n.corrupted or n.reserve <= 0.0:
+			continue
 		if n.depth >= 0:
-			connected.append(n)
-	if connected.is_empty():
-		connected = nodes
+			return true
+		for m in nodes:
+			if m.depth < 0 or m.corrupted or not in_reach(n, m):
+				continue
+			if m.kind == VNode.Kind.HEART or m.kind == VNode.Kind.WELL \
+					or (m.kind == VNode.Kind.FORGE and m.recipe.has(VNode.Res.RAW)):
+				return true
+	return false
 
-	var best := heart.position
-	var best_near := -INF
-	for _i in 48:
-		var anchor: VNode = connected[rng.randi() % connected.size()]
+
+func _ensure_move(delta: float) -> void:
+	if _has_reachable_supply():
+		_no_move_time = 0.0
+		return
+	_no_move_time += delta
+	if _no_move_time < RESCUE_DEBOUNCE:
+		return
+	_no_move_time = 0.0
+	rescues += 1
+	_spawn_rescue_well()
+
+
+## Where a rescue Well must appear to be answerable: near the entry point of
+## the chain the CURRENT demand needs. For RAW that's the Heart itself; for
+## every refined tier the chain enters through a Forge (RAW is the only thing
+## a Well makes), so it lands by the Forge best placed for the rest of the
+## chain — nearest a Loom when the demand needs one, nearest the Heart
+## otherwise. Every link downstream of that Forge is already guaranteed by
+## tool anchoring (see _spawn_node).
+func _rescue_anchor() -> Vector2:
+	if demand == VNode.Res.RAW:
+		return heart.position
+	var goal := heart.position
+	if demand == VNode.Res.CLOTH or demand == VNode.Res.PRISM:
+		var loom := _nearest_node_of_kind(VNode.Kind.LOOM, heart.position)
+		if loom != null:
+			goal = loom.position
+	# Only a RAW-eating Forge is a chain entry a fresh Well can actually
+	# feed — an exotic one that wants squares is no rescue at all.
+	var forge: VNode = null
+	var best_d := INF
+	for n in nodes:
+		if n.kind != VNode.Kind.FORGE or n.corrupted or not n.recipe.has(VNode.Res.RAW):
+			continue
+		var d := n.position.distance_to(goal)
+		if d < best_d:
+			best_d = d
+			forge = n
+	return forge.position if forge != null else heart.position
+
+
+func _nearest_node_of_kind(kind: int, to: Vector2) -> VNode:
+	var best: VNode = null
+	var best_d := INF
+	for n in nodes:
+		if n.kind != kind or n.corrupted:
+			continue
+		var d := n.position.distance_to(to)
+		if d < best_d:
+			best_d = d
+			best = n
+	return best
+
+
+## Forces a fresh Well within one vein of _rescue_anchor(). Ignores
+## MAX_LIVE_WELLS — when this fires the board has zero usable supply, and
+## survival outranks board hygiene. Same elbow-room sampling as _spawn_node,
+## same guaranteed _least_crowded_spot fallback, so this can never itself
+## fail to place.
+func _spawn_rescue_well() -> void:
+	var vp := design_size()
+	var center := _rescue_anchor()
+	var best := Vector2.ZERO
+	var best_score := -INF
+	for _i in 64:
 		var bearing := rng.randf() * TAU
-		var dist := rng.randf_range(PICKUP_ANCHOR_MIN, PICKUP_ANCHOR_MAX)
-		var p: Vector2 = anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
-		if p.x < 70.0 or p.x > vp.x - 70.0 or p.y < 90.0 or p.y > vp.y - 90.0:
+		var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.85)
+		var p := center + Vector2(cos(bearing), sin(bearing)) * dist
+		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+			continue
+		if p.distance_to(heart.position) < MIN_HEART_CLEARANCE:
 			continue
 		var near := INF
 		for n in nodes:
 			near = minf(near, p.distance_to(n.position))
-		if near > best_near:
-			best_near = near
+		if near < 104.0:
+			continue
+		if near > best_score:
+			best_score = near
 			best = p
+	if best_score == -INF:
+		best = _least_crowded_spot(center, Vein.MAX_LEN * 0.6)
+	_make_node(VNode.Kind.WELL, best)
+	_rebuild_graph()
+
+
+# --- The chain-integrity guarantee -------------------------------------------
+#
+# _has_reachable_supply/_spawn_rescue_well above guarantee RAW is always
+# reachable, but they predate tools being able to DIE (see VNode's per-smelt
+# depletion). Once a Forge/Loom/Kiln can corrupt from use, two new
+# unrecoverable states become possible that the RAW-only guarantee doesn't
+# cover: every canonical instance of a tier's tool dies at once (the tier
+# becomes unbuildable, full stop — no Well hookup fixes it), or one survives
+# but the specific node that fed it just corrupted and nothing else has ever
+# spawned close enough to replace it (the tool exists but is permanently
+# stranded). Either one is exactly "the Heart wants X and there is nothing you
+# can do about it" for that tier — this section closes both, for every tier
+# the run has ever unlocked, not just the one currently demanded, since
+# rotation can bring any of them back at any time.
+
+## Debounce for the checks below. Tighter than RESCUE_DEBOUNCE: a broken tier
+## link is a harder stop than "supply is scarce" (nothing you build reaches the
+## Heart as the right shape until it resolves), so it gets caught sooner.
+const CHAIN_STALL_DEBOUNCE := 2.0
+
+var _chain_stall := {}   # String key -> accumulated stall seconds, per check.
+## Rescue tools/feeders forced in by the checks below, this run. Like
+## `rescues`, a handful is the guarantee working; a flood means a tier is
+## structurally too fragile and needs retuning (MAX_LIVE_* caps, yield, gaps).
+var chain_rescues := 0
+
+
+## Live, non-corrupted instances of `kind` running the CANONICAL recipe (the
+## plain "two of the tier below," not an exotic mix). The classic
+## Well->Forge->Loom->Kiln chain must stay completable through at least one
+## canonical instance of every unlocked tier — exotic siblings are flavour,
+## never the only way through.
+func _count_canonical_healthy(kind: int) -> int:
+	if not CANONICAL_RECIPE.has(kind):
+		return 0
+	var canonical: Array[int] = []
+	canonical.assign(CANONICAL_RECIPE[kind])
+	var c := 0
+	for n in nodes:
+		if n.kind == kind and not n.corrupted and n.recipe == canonical:
+			c += 1
+	return c
+
+
+## True if at least one live, non-corrupted `kind` node has a live,
+## non-corrupted `feeder_kind` node within reach (a Well must also have
+## reserve left). This is the "is the link actually USABLE" check, distinct
+## from merely existing: a Loom can sit on the board forever while the one
+## Forge that used to feed it is long gone and nothing new ever spawned close
+## enough — it looks like progress but is dead weight.
+func _any_kind_fed(kind: int, feeder_kind: int) -> bool:
+	for n in nodes:
+		if n.kind != kind or n.corrupted:
+			continue
+		for m in nodes:
+			if m.kind != feeder_kind or m.corrupted:
+				continue
+			if feeder_kind == VNode.Kind.WELL and m.reserve <= 0.0:
+				continue
+			if in_reach(n, m):
+				return true
+	return false
+
+
+## The best live, non-corrupted `kind` node to rescue-feed: nearest the Heart,
+## since that is the one most likely already load-bearing in the player's build.
+func _pick_stranded(kind: int) -> VNode:
+	var best: VNode = null
+	var best_d := INF
+	for n in nodes:
+		if n.kind != kind or n.corrupted:
+			continue
+		var d := n.position.distance_to(heart.position)
+		if d < best_d:
+			best_d = d
+			best = n
 	return best
 
 
-## Rolled from the seeded run RNG, not global randf() — the whole sim stays
-## deterministic given a seed, which is what the Daily and the probe both rely
-## on. CLEANSE only makes sense with something to cleanse; falling back to
-## Rolled from the seeded run RNG, not global randf() — the whole sim stays
-## deterministic given a seed. CLEANSE only makes sense with something to
-## cleanse; weighted down to zero (see ONE_OFF_WEIGHTS) when nothing is
-## corrupted so a one-off is never a wasted no-op.
-func _roll_one_off() -> int:
-	var has_target := false
-	for n in nodes:
-		if n.corrupted:
-			has_target = true
-			break
-
-	var weights := ONE_OFF_WEIGHTS.duplicate()
-	if not has_target:
-		weights[OneOff.CLEANSE] = 0.0
-
-	var total := 0.0
-	for w in weights:
-		total += w
-	var roll := rng.randf() * total
-	var acc := 0.0
-	for i in weights.size():
-		acc += weights[i]
-		if roll <= acc:
-			return i
-	return OneOff.EXTRA_VEIN
-
-
-## The readable icon label for a one-off — see the label field on VNode.
-func _one_off_headline(id: int) -> String:
-	match id:
-		OneOff.SCORE_BURST:
-			return "+%d" % ONE_OFF_SCORE_BURST
-		OneOff.EXTRA_VEIN:
-			return "+%d" % EXTRA_VEIN_BUDGET
-		_: # CLEANSE — a star with NO label read as "same as the others but
-			# broken"; the cure needs its own mark even though the cured
-			# node's un-rotting is the real confirmation.
-			return "✚"
-
-
-## Spawns the two halves of one PERSISTENT fork, symmetric about a random
-## board anchor (see _random_pickup_anchor) so both are always in easy
-## one-thumb reach. Rolled from the seeded rng, so a given seed always offers
-## the same choice.
-func _spawn_persistent_pair() -> void:
-	var pool: Array = [
-		BoosterEffect.SCORE, BoosterEffect.APPETITE,
-		BoosterEffect.CAPACITY, BoosterEffect.REACH,
-	]
-	var i := rng.randi() % pool.size()
-	var id_a: int = pool[i]
-	pool.remove_at(i)
-	var id_b: int = pool[rng.randi() % pool.size()]
-
-	var vp := design_size()
-	var center := _random_pickup_anchor()
-	var ang := rng.randf() * TAU
-	var a_pos: Vector2 = center + Vector2(cos(ang), sin(ang)) * PICKUP_HALF_SPREAD
-	var b_pos: Vector2 = center + Vector2(cos(ang + PI), sin(ang + PI)) * PICKUP_HALF_SPREAD
-	a_pos.x = clampf(a_pos.x, 40.0, vp.x - 40.0)
-	a_pos.y = clampf(a_pos.y, 60.0, vp.y - 60.0)
-	b_pos.x = clampf(b_pos.x, 40.0, vp.x - 40.0)
-	b_pos.y = clampf(b_pos.y, 60.0, vp.y - 60.0)
-
-	var na := _make_node(VNode.Kind.MUTATION, a_pos)
-	var nb := _make_node(VNode.Kind.MUTATION, b_pos)
-	na.mutation_id = id_a
-	nb.mutation_id = id_b
-	na.mutation_pair = nb
-	nb.mutation_pair = na
-	na.label = _booster_headline(true, id_a)
-	nb.label = _booster_headline(true, id_b)
-	_rebuild_graph()
-
-
-func _has_persistent_pair() -> bool:
-	for n in nodes:
-		if n.kind == VNode.Kind.MUTATION:
-			return true
-	return false
-
-
-## Same structural trick as _spawn_persistent_pair, drawing from the same
-## four-effect pool — a TIME_BASED pair offers any two of the four, not a
-## fixed opposed pair, same as PERSISTENT.
-func _spawn_time_based_pair() -> void:
-	var pool: Array = [
-		BoosterEffect.SCORE, BoosterEffect.APPETITE,
-		BoosterEffect.CAPACITY, BoosterEffect.REACH,
-	]
-	var i := rng.randi() % pool.size()
-	var id_a: int = pool[i]
-	pool.remove_at(i)
-	var id_b: int = pool[rng.randi() % pool.size()]
-
-	var vp := design_size()
-	var center := _random_pickup_anchor()
-	var ang := rng.randf() * TAU
-	var a_pos: Vector2 = center + Vector2(cos(ang), sin(ang)) * PICKUP_HALF_SPREAD
-	var b_pos: Vector2 = center + Vector2(cos(ang + PI), sin(ang + PI)) * PICKUP_HALF_SPREAD
-	a_pos.x = clampf(a_pos.x, 40.0, vp.x - 40.0)
-	a_pos.y = clampf(a_pos.y, 60.0, vp.y - 60.0)
-	b_pos.x = clampf(b_pos.x, 40.0, vp.x - 40.0)
-	b_pos.y = clampf(b_pos.y, 60.0, vp.y - 60.0)
-
-	var na := _make_node(VNode.Kind.RELIC, a_pos)
-	var nb := _make_node(VNode.Kind.RELIC, b_pos)
-	na.relic_id = id_a
-	nb.relic_id = id_b
-	na.relic_pair = nb
-	nb.relic_pair = na
-	na.label = _booster_headline(false, id_a)
-	nb.label = _booster_headline(false, id_b)
-	_rebuild_graph()
-
-
-func _has_time_based_pair() -> bool:
-	for n in nodes:
-		if n.kind == VNode.Kind.RELIC:
-			return true
-	return false
-
-
-## A bare "×1.2" reads the same whether it multiplies score, appetite,
-## capacity, or reach — real confusion in practice, not a hypothetical:
-## reported as "I got a ×1.2 booster and my score didn't go up 1.2x" when
-## the perk taken was actually REACH (×1.2), not SCORE (×1.15/×1.4). The
-## small inner glyph alone (see draw_mark) wasn't legible enough on its own
-## to prevent that read. This prefix ties the number to its own axis inline,
-## so the two numbers most likely to be confused for each other — REACH's
-## ×1.2 and SCORE's ×1.15 — are never shown without also saying which is
-## which.
-const EFFECT_GLYPH := {
-	BoosterEffect.SCORE: "★",
-	BoosterEffect.APPETITE: "♥",
-	BoosterEffect.CAPACITY: "═",
-	BoosterEffect.REACH: "↔",
-}
-
-## The headline number for a perk's primary effect — same "eat it, see the
-## multiplier" confirmation Notcoin/Hamster Kombat give a booster, so the
-## payoff is legible the instant it's taken, not just inferred later from
-## how the run happens to feel.
-func _booster_headline(persistent: bool, effect: int) -> String:
-	var mult: float = (PERSISTENT_BENEFIT if persistent else TIME_BENEFIT)[effect]
-	var glyph: String = EFFECT_GLYPH[effect]
-	if effect == BoosterEffect.CAPACITY and not persistent:
-		return "%s×%.1f" % [glyph, mult]
-	return "%s×%.2f" % [glyph, mult]
-
-
-## Folds the two held perks into the single set of modifiers
-## appetite()/in_reach()/_add_vein/_tick_escalation actually read — see the
-## field comments above. Called any time either active changes, so a stale
-## scalar can never linger after a perk is replaced or expires.
-func _recompute_boosters() -> void:
-	_boost_score_mult = 1.0
-	_boost_appetite_mult = 1.0
-	_boost_capacity_mult = 1.0
-	_boost_reach_mult = 1.0
-	_boost_budget_gap_mult = 1.0
-	_boost_budget_frozen = false
-
-	match _active_persistent:
-		BoosterEffect.SCORE:
-			_boost_score_mult *= PERSISTENT_SCORE_MULT
-			_boost_appetite_mult *= PERSISTENT_SCORE_COST_APPETITE
-		BoosterEffect.APPETITE:
-			_boost_appetite_mult *= PERSISTENT_APPETITE_MULT
-			_boost_score_mult *= PERSISTENT_APPETITE_COST_SCORE
-		BoosterEffect.CAPACITY:
-			_boost_capacity_mult *= PERSISTENT_CAPACITY_MULT
-			_boost_budget_gap_mult *= PERSISTENT_CAPACITY_COST_BUDGET_GAP
-		BoosterEffect.REACH:
-			_boost_reach_mult *= PERSISTENT_REACH_MULT
-			_boost_appetite_mult *= PERSISTENT_REACH_COST_APPETITE
-
-	match _active_time_effect:
-		BoosterEffect.SCORE:
-			_boost_score_mult *= TIME_SCORE_MULT
-			_boost_appetite_mult *= TIME_SCORE_COST_APPETITE
-		BoosterEffect.APPETITE:
-			_boost_appetite_mult *= TIME_APPETITE_MULT
-			_boost_score_mult *= TIME_APPETITE_COST_SCORE
-		BoosterEffect.CAPACITY:
-			_boost_capacity_mult *= TIME_CAPACITY_MULT
-			_boost_budget_frozen = true
-		BoosterEffect.REACH:
-			_boost_reach_mult *= TIME_REACH_MULT
-			_boost_appetite_mult *= TIME_REACH_COST_APPETITE
-
-
-## Counts down the running TIME_BASED perk and folds the modifiers back the
-## instant it ends.
-func _tick_time_based(delta: float) -> void:
-	if _active_time_effect < 0:
+## Ensures at least one CANONICAL `kind` stays alive once `unlock_res` has ever
+## been demanded. Spawns through the normal _spawn_node path, which already
+## rolls canonical automatically when none of that kind survive (see
+## _roll_recipe) — this just ignores the live-count cap, because a fully dead
+## tier is worse than one extra tool on the board.
+func _ensure_canonical_alive(kind: int, unlock_res: int, delta: float) -> void:
+	if not _unlocked_res.has(unlock_res):
 		return
-	_time_left -= delta
-	if _time_left <= 0.0:
-		_active_time_effect = -1
-		_time_left = 0.0
-		_recompute_boosters()
+	var key := "canon_%d" % kind
+	if _count_canonical_healthy(kind) > 0:
+		_chain_stall[key] = 0.0
+		return
+	_chain_stall[key] = _chain_stall.get(key, 0.0) + delta
+	if _chain_stall[key] < CHAIN_STALL_DEBOUNCE:
+		return
+	_chain_stall[key] = 0.0
+	chain_rescues += 1
+	_spawn_node(kind)
 
 
-## Sets the held PERSISTENT perk, replacing whatever was there — this IS the
-## trade-off: a persistent slot is never a free stack, it is always "keep
-## what I have, or take the new offer instead."
-func _apply_persistent(effect: int) -> void:
-	_active_persistent = effect
-	_recompute_boosters()
-	if heart != null:
-		heart.mutation_marks = [effect] as Array[int]
+## Ensures a live `kind` has a USABLE `feeder_kind` in reach once `unlock_res`
+## has ever been demanded — the tool existing is not enough if the one thing
+## that fed it is gone (see _any_kind_fed).
+func _ensure_chain_link(kind: int, feeder_kind: int, unlock_res: int, delta: float) -> void:
+	if not _unlocked_res.has(unlock_res):
+		return
+	var key := "link_%d" % kind
+	var live := _count_healthy_kind(kind) > 0
+	if not live or _any_kind_fed(kind, feeder_kind):
+		_chain_stall[key] = 0.0
+		return
+	_chain_stall[key] = _chain_stall.get(key, 0.0) + delta
+	if _chain_stall[key] < CHAIN_STALL_DEBOUNCE:
+		return
+	_chain_stall[key] = 0.0
+	chain_rescues += 1
+	var target := _pick_stranded(kind)
+	if target != null:
+		_spawn_rescue_feeder(feeder_kind, target)
 
 
-func _apply_time_based(effect: int) -> void:
-	_active_time_effect = effect
-	_time_left = TIME_BASED_DURATION
-	_recompute_boosters()
+func _tick_tool_chain(delta: float) -> void:
+	_ensure_canonical_alive(VNode.Kind.FORGE, VNode.Res.REFINED, delta)
+	_ensure_canonical_alive(VNode.Kind.LOOM, VNode.Res.CLOTH, delta)
+	_ensure_canonical_alive(VNode.Kind.KILN, VNode.Res.PRISM, delta)
+	_ensure_chain_link(VNode.Kind.FORGE, VNode.Kind.WELL, VNode.Res.REFINED, delta)
+	_ensure_chain_link(VNode.Kind.LOOM, VNode.Kind.FORGE, VNode.Res.CLOTH, delta)
+	_ensure_chain_link(VNode.Kind.KILN, VNode.Kind.LOOM, VNode.Res.PRISM, delta)
 
 
-## Shared payoff FX for every booster pickup — burst + a floating headline (if
-## it has one) + audio + haptic. Same visual weight for a rare grab as for a
-## rupture, just warm instead of violent.
-func _booster_fx(n: VNode, col: Color, headline: String) -> void:
-	var burst: Node2D = BurstScene.new()
-	vein_layer.add_child(burst)
-	var ring: Array[Vector2] = []
-	var kinds: Array[int] = []
-	for i in 10:
-		var a := TAU * float(i) / 10.0
-		ring.append(n.position + Vector2(cos(a), sin(a)) * 6.0)
-		kinds.append(0)
-	burst.spawn(ring, kinds, rng.randi(), col)
+## Emergency placement for a feeder a live, stranded `target` needs RIGHT NOW.
+## A Well just needs to land within reach of `target`; a rescue tool (a Forge
+## for a stranded Loom, a Loom for a stranded Kiln) also needs its OWN feeder
+## in reach — the same dual-anchor rule _spawn_node uses, just anchored to
+## `target` instead of the Heart, since here the Heart isn't the broken link.
+func _spawn_rescue_feeder(feeder_kind: int, target: VNode) -> void:
+	if feeder_kind == VNode.Kind.WELL:
+		_spawn_rescue_well_near(target.position)
+		return
 
-	if headline != "":
-		var pop: Node2D = FloatTextScene.new()
-		vein_layer.add_child(pop)
-		pop.spawn(headline, n.position, col, 20)
+	var vp := design_size()
+	var sub_feeder: VNode = null
+	match feeder_kind:
+		VNode.Kind.FORGE:
+			sub_feeder = _nearest_node_of_kind(VNode.Kind.WELL, target.position)
+		VNode.Kind.LOOM:
+			sub_feeder = _nearest_node_of_kind(VNode.Kind.FORGE, target.position)
 
-	Audio.play("refined", -2.0, 1.5)
-	if OS.has_feature("mobile"):
-		Input.vibrate_handheld(180)
+	var anchor := target.position
+	var min_dist := 60.0
+	var max_dist := Vein.MAX_LEN * 0.85
+	if sub_feeder != null and target.position.distance_to(sub_feeder.position) <= Vein.MAX_LEN * 1.9:
+		anchor = (target.position + sub_feeder.position) * 0.5
+		var half := target.position.distance_to(sub_feeder.position) * 0.5
+		max_dist = clampf(Vein.MAX_LEN - half - 14.0, 24.0, 135.0)
+		min_dist = minf(48.0, max_dist * 0.6)
+	else:
+		sub_feeder = null
 
+	var best := Vector2.ZERO
+	var best_score := -INF
+	for _i in 64:
+		var bearing := rng.randf() * TAU
+		var dist := rng.randf_range(min_dist, max_dist)
+		var p := anchor + Vector2(cos(bearing), sin(bearing)) * dist
+		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+			continue
+		if p.distance_to(target.position) > Vein.MAX_LEN:
+			continue
+		if sub_feeder != null and p.distance_to(sub_feeder.position) > Vein.MAX_LEN:
+			continue
+		if p.distance_to(heart.position) < MIN_HEART_CLEARANCE:
+			continue
+		var near := INF
+		for n in nodes:
+			near = minf(near, p.distance_to(n.position))
+		if near < 104.0:
+			continue
+		if near > best_score:
+			best_score = near
+			best = p
+	if best_score == -INF:
+		best = _least_crowded_spot(anchor, minf(max_dist, 60.0))
 
-## Apply a one-off's effect and remove the node — this is the payoff for the
-## detour to reach it.
-func _take_one_off(n: VNode) -> void:
-	one_offs_taken += 1
-	var headline := n.label
-	match n.boost_effect:
-		OneOff.SCORE_BURST:
-			score += ONE_OFF_SCORE_BURST
-		OneOff.EXTRA_VEIN:
-			budget += EXTRA_VEIN_BUDGET
-			budget_hint.queue_redraw()
-		OneOff.CLEANSE:
-			var target: VNode = null
-			var best := INF
-			for c in nodes:
-				if not c.corrupted:
-					continue
-				var d := c.position.distance_to(n.position)
-				if d < best:
-					best = d
-					target = c
-			if target != null:
-				target.uncorrupt()
-				# No clean number for "cured" — the target's own visible
-				# un-rotting is the confirmation, not a popup here.
-			else:
-				budget += EXTRA_VEIN_BUDGET
-				budget_hint.queue_redraw()
-				headline = "+%d" % EXTRA_VEIN_BUDGET
-	_booster_fx(n, Palette.BOOST, headline)
-	_remove_node(n)
-
-
-## A vein reaching either half of a fork resolves the WHOLE fork — the road
-## not taken has to visibly vanish, or the choice never reads as a choice.
-func _take_persistent(n: VNode) -> void:
-	persistents_taken += 1
-	_apply_persistent(n.mutation_id)
-	_booster_fx(n, Palette.PERSISTENT, n.label)
-
-	var sibling := n.mutation_pair
-	n.mutation_pair = null
-	_remove_node(n)
-	if sibling != null and is_instance_valid(sibling):
-		sibling.mutation_pair = null
-		_remove_node(sibling)
+	var n := _make_node(feeder_kind, best)
+	var canonical: Array[int] = []
+	canonical.assign(CANONICAL_RECIPE[feeder_kind])
+	n.recipe = canonical
+	if feeder_kind == VNode.Kind.FORGE and not seen_forge:
+		seen_forge = true
+		n.teach = true
+		_store_save()
+	elif feeder_kind == VNode.Kind.LOOM and not seen_loom:
+		seen_loom = true
+		n.teach = true
+		_store_save()
+	_rebuild_graph()
 
 
-## Same fork resolution as _take_persistent — taking either half removes both
-## — but this one starts a timer instead of a permanent modifier.
-func _take_time_based(n: VNode) -> void:
-	time_baseds_taken += 1
-	_apply_time_based(n.relic_id)
-	_booster_fx(n, Palette.RELIC, n.label)
-
-	var sibling := n.relic_pair
-	n.relic_pair = null
-	_remove_node(n)
-	if sibling != null and is_instance_valid(sibling):
-		sibling.relic_pair = null
-		_remove_node(sibling)
+## Well-flavoured half of _spawn_rescue_feeder: lands a fresh Well within reach
+## of `near`, same elbow-room sampling and guaranteed fallback as
+## _spawn_rescue_well, just anchored to a specific stranded tool instead of
+## _rescue_anchor()'s single current-demand guess.
+func _spawn_rescue_well_near(near: Vector2) -> void:
+	var vp := design_size()
+	var best := Vector2.ZERO
+	var best_score := -INF
+	for _i in 64:
+		var bearing := rng.randf() * TAU
+		var dist := rng.randf_range(70.0, Vein.MAX_LEN * 0.85)
+		var p := near + Vector2(cos(bearing), sin(bearing)) * dist
+		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+			continue
+		if p.distance_to(heart.position) < MIN_HEART_CLEARANCE:
+			continue
+		var nd := INF
+		for n in nodes:
+			nd = minf(nd, p.distance_to(n.position))
+		if nd < 104.0:
+			continue
+		if nd > best_score:
+			best_score = nd
+			best = p
+	if best_score == -INF:
+		best = _least_crowded_spot(near, Vein.MAX_LEN * 0.6)
+	_make_node(VNode.Kind.WELL, best)
+	_rebuild_graph()
 
 
 # --- Graph: everything flows downhill toward demand -------------------------
@@ -1506,6 +1658,7 @@ func _take_time_based(n: VNode) -> void:
 func _rebuild_graph() -> void:
 	for n in nodes:
 		n.depth = -1
+		n.feed_depth = -1
 	if heart == null:
 		return
 	heart.depth = 0
@@ -1517,6 +1670,27 @@ func _rebuild_graph() -> void:
 			if o != null and o.depth < 0:
 				o.depth = cur.depth + 1
 				q.append(o)
+
+	# Secondary orientation for everything the Heart can't reach: a
+	# multi-source BFS out from the Wells (and corrupted Wells, which push
+	# VOID) still stranded at depth < 0. This is what makes a circle->triangle
+	# with no onward path actually FLOW and pool at the triangle, instead of
+	# sitting inert. A node's feed_depth is its hop-distance from the nearest
+	# such Well; veins between two disconnected nodes orient low->high, i.e.
+	# away from the Well toward the dead-end (see Vein.update_dir).
+	var fq: Array[VNode] = []
+	for n in nodes:
+		if n.depth < 0 and (n.kind == VNode.Kind.WELL or n.corrupted):
+			n.feed_depth = 0
+			fq.append(n)
+	while not fq.is_empty():
+		var cur: VNode = fq.pop_front()
+		for v in veins:
+			var o := v.other(cur)
+			if o != null and o.depth < 0 and o.feed_depth < 0:
+				o.feed_depth = cur.feed_depth + 1
+				fq.append(o)
+
 	for v in veins:
 		v.update_dir()
 	budget_hint.queue_redraw()
@@ -1538,48 +1712,28 @@ func _find_vein(a: VNode, b: VNode) -> Vein:
 
 
 ## Can these two ever be joined directly? Reach is the constraint the whole
-## puzzle rests on — see Vein.MAX_LEN. A REACH perk raises the multiplier for
-## as long as it's held.
+## puzzle rests on — see Vein.MAX_LEN. A tool<->Heart pair reaches farther (see
+## TOOL_HEART_REACH), so the chain can sit scattered in the field.
 func in_reach(a: VNode, b: VNode) -> bool:
-	return a.position.distance_to(b.position) <= Vein.MAX_LEN * _boost_reach_mult
+	return a.position.distance_to(b.position) <= reach_limit(a, b)
+
+
+## Max span at which `a` and `b` may be joined. Extended only for a
+## tool<->Heart link; everything else is the plain Vein.MAX_LEN.
+func reach_limit(a: VNode, b: VNode) -> float:
+	var has_heart := a.kind == VNode.Kind.HEART or b.kind == VNode.Kind.HEART
+	var has_tool := _is_tool_kind(a.kind) or _is_tool_kind(b.kind)
+	if has_heart and has_tool:
+		return Vein.MAX_LEN * TOOL_HEART_REACH
+	return Vein.MAX_LEN
+
+
+func _is_tool_kind(k: int) -> bool:
+	return k == VNode.Kind.FORGE or k == VNode.Kind.LOOM or k == VNode.Kind.KILN
 
 
 func _add_vein(a: VNode, b: VNode) -> void:
-	# can_afford() is deliberately NOT checked yet — a pickup grab below
-	# never creates an edge, so being out of vein budget must not lock the
-	# player out of boosters (it silently did: the guard sat above the
-	# pickup dispatch, so at budget cap every grab no-opped with zero
-	# feedback, exactly when a +1-vein one-off would matter most).
 	if a == b or _find_vein(a, b) != null or not in_reach(a, b):
-		return
-
-	# A booster pickup is not part of the flow graph — reaching for one is a
-	# detour, not a route. It triggers the instant a vein touches it, at full
-	# value: no crossing-vein penalty, no tempo requirement, because punishing
-	# a reward pickup for incidental geometry would just feel arbitrary.
-	#
-	# But the OTHER end of that drag must already be live (depth >= 0, i.e.
-	# reachable from the Heart right now) — feedback: dragging from any stray,
-	# unclaimed node let you snag a pickup for free without ever touching your
-	# actual network, which made a pickup read as "just tap anywhere near it"
-	# instead of "your network reached this". A pickup still never joins the
-	# graph itself once taken, this only gates who may reach it.
-	if a.kind == VNode.Kind.BOOST or b.kind == VNode.Kind.BOOST \
-			or a.kind == VNode.Kind.MUTATION or b.kind == VNode.Kind.MUTATION \
-			or a.kind == VNode.Kind.RELIC or b.kind == VNode.Kind.RELIC:
-		var pickup_is_a := a.kind == VNode.Kind.BOOST or a.kind == VNode.Kind.MUTATION \
-			or a.kind == VNode.Kind.RELIC
-		var pickup: VNode = a if pickup_is_a else b
-		var anchor: VNode = b if pickup_is_a else a
-		if anchor.depth < 0:
-			return
-		match pickup.kind:
-			VNode.Kind.BOOST:
-				_take_one_off(pickup)
-			VNode.Kind.MUTATION:
-				_take_persistent(pickup)
-			_: # RELIC
-				_take_time_based(pickup)
 		return
 
 	# Crossing BLOCKS the connection — it does not destroy the crossed vein.
@@ -1598,7 +1752,6 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	if _crossing_vein(a, b) != null:
 		return
 
-	# A real edge from here on, so budget finally applies.
 	if not can_afford():
 		return
 
@@ -1607,11 +1760,12 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	# Alternate the bend so parallel veins fan out instead of overlapping.
 	v.setup(a, b, 1.0 if veins.size() % 2 == 0 else -1.0)
 	v.tempo_grade = combo if synced else -1
-	# Baked in at creation, same as tempo_grade — see Vein.capacity_mult.
-	v.capacity_mult = _boost_capacity_mult
 	v.ruptured.connect(_on_ruptured)
 	vein_layer.add_child(v)
 	veins.append(v)
+	# Flash the line inventory on every spend so a first-timer sees the budget
+	# tick down — the just-spent slot is the highest lit one.
+	budget_hint.flash(veins.size() - 1)
 	_rebuild_graph()
 
 
@@ -1648,10 +1802,9 @@ func _tempo_quality() -> float:
 
 
 ## Shared teardown for a node leaving the board outside of the normal
-## rupture/cut paths — booster pickups, withered Wells, collapsed rot. Always
-## drops any vein still attached (there should be at most one for a one-off
-## pickup; a withered/collapsed node is by definition orphaned or about to be
-## cut).
+## rupture/cut paths — withered Wells, collapsed rot. Always drops any vein
+## still attached (a withered/collapsed node is by definition orphaned or
+## about to be cut).
 func _remove_node(n: VNode) -> void:
 	for v in veins.duplicate():
 		if v.a == n or v.b == n:
@@ -1713,6 +1866,9 @@ func _remove_vein(v: Vein, surgical := false) -> void:
 		burst.spawn(pts, kinds, rng.randi(), Color(0, 0, 0, 0), intensity())
 		Audio.play("rupture", -8.0, 0.75)
 	veins.erase(v)
+	# Flash the line inventory on a refund too — a cut hands a slot back, and
+	# seeing it light up teaches that veins are finite and reclaimable.
+	budget_hint.flash(veins.size())
 	# die() lets the vein shrink-and-fade in place (see vein.gd) instead of
 	# blinking out — the removal itself needs to be visible even when there
 	# was nothing precious in flight to burst, which is the common case for a
@@ -1775,10 +1931,19 @@ func _process(delta: float) -> void:
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
 	heart.fuel_ratio = fuel / fuel_cap()
+	# Same escalation shape as corruption spread/airborne blight/demand
+	# rotation: near-zero at the open, ramping to full bite by EXERTION_SPAN,
+	# and still climbing past it (see pressure()) — a tool's per-smelt reserve
+	# cost is not exempt from "the enemy never stops getting worse."
+	var tool_depletion := lerpf(TOOL_DEPLETION_EARLY, 1.0, intensity()) \
+		+ maxf(pressure() - 1.0, 0.0) * TOOL_DEPLETION_POST_EXTRA
+	for n in nodes:
+		if n.kind == VNode.Kind.FORGE or n.kind == VNode.Kind.LOOM or n.kind == VNode.Kind.KILN:
+			n.depletion_rate = tool_depletion
 	_push_from_nodes()
 	for v in veins:
-		for kind in v.advance(delta):
-			_deliver(kind, v, v.sink())
+		for item in v.advance(delta):
+			_deliver(item.kind, v, v.sink(), item.pot)
 
 	# Driven every frame, not per-beat: a dying run's beats slow way down, and
 	# the mix must keep evolving smoothly through that instead of freezing
@@ -1817,63 +1982,15 @@ func _draw() -> void:
 	var phase := Beat.phase
 	var beat_r := 48.0 + phase * (44.0 + exert * 54.0)
 
+	# The heartbeat pulse — a ring that blooms outward on every beat. This is
+	# the whole on-Heart overlay now: the rhythm-target arc, the combo teeth,
+	# and the off-beat flash that used to ring the Heart were removed as
+	# unreadable clutter (playtest: "a half curve and dashes around the heart
+	# I don't understand"). The rhythm bonus still pays out under the hood, it
+	# just no longer draws a gauge nobody was reading.
 	var ring := Palette.HEART
 	ring.a = (1.0 - phase) * (0.22 + exert * 0.22)
 	draw_arc(centre, beat_r, 0.0, TAU, 72, ring, 1.5 + exert * 2.0, true)
-
-	# An active TIME_BASED perk used to have zero on-screen presence beyond
-	# the pickup pop — nothing distinguished the active window from ordinary
-	# play, or told you WHICH perk you'd chosen. A ring that counts down
-	# (shrinking as TIME_BASED_DURATION runs out), in the family's own
-	# colour, plus the same mark glyph the pick-time hexagram wore and a
-	# ticking "Ns" label, makes "still active", "which one", and "how long
-	# left" all visible for the whole duration, not just its start.
-	if _active_time_effect >= 0:
-		var t := clampf(_time_left / TIME_BASED_DURATION, 0.0, 1.0)
-		var off := Vector2(0.0, -104.0)
-		var col := Palette.RELIC
-		col.a = 0.18 + t * 0.22
-		draw_arc(centre + off, 20.0 + t * 6.0, 0.0, TAU * t, 32, col, 2.5, true)
-		var mark_col := Palette.RELIC
-		mark_col.a = 0.55 + t * 0.3
-		VNode.draw_mark(self, _active_time_effect, centre + off, 8.0, mark_col)
-		var label_col := Palette.RELIC
-		label_col.a = 0.5 + t * 0.35
-		var label := "%ds" % maxi(1, roundi(_time_left))
-		var w := ThemeDB.fallback_font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
-		draw_string(ThemeDB.fallback_font, centre + off - Vector2(w * 0.5, -20.0), label,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_col)
-
-	# The rhythm target. Used to sit at a flat baseline brightness and only
-	# flash AFTER a hit — pure confirmation, nothing that could be learned by
-	# watching it before acting. It now breathes brighter as the live beat
-	# phase nears either edge of the hittable window (_tempo_quality is
-	# lowest right after a beat lands and right before the next one), the
-	# same "get brighter as the good moment approaches" language every rhythm
-	# game uses, so the target teaches its own timing just by being watched.
-	var live_q := minf(phase, 1.0 - phase)
-	var anticipate := 1.0 - clampf(live_q / GOOD_WINDOW, 0.0, 1.0)
-	var window := Palette.WARM
-	window.a = 0.12 + anticipate * 0.5 + _sync_flash * 0.45
-	draw_arc(centre, 58.0, -PI * 0.5 - PERFECT_WINDOW * TAU,
-		-PI * 0.5 + PERFECT_WINDOW * TAU, 18, window,
-		2.0 + anticipate * 2.5 + _sync_flash * 3.0, true)
-
-	if _bad_tempo_flash > 0.0:
-		var bad := Palette.VEIN_STRAINED
-		bad.a = _bad_tempo_flash * 0.65
-		draw_arc(centre, 74.0 + (1.0 - _bad_tempo_flash) * 24.0, 0.0, TAU, 44,
-			bad, 4.0 * _bad_tempo_flash, true)
-
-	if combo > 0:
-		var teeth := combo
-		for i in teeth:
-			var a := TAU * (float(i) / float(COMBO_CAP)) - PI * 0.5
-			var p0 := centre + Vector2(cos(a), sin(a)) * 72.0
-			var p1 := centre + Vector2(cos(a), sin(a)) * (82.0 + _sync_flash * 8.0)
-			var c := Palette.WARM.lerp(Palette.CLOTH, float(i) / float(COMBO_CAP))
-			c.a = 0.65 + _sync_flash * 0.35
-			draw_line(p0, p1, c, 3.0, true)
 
 
 ## Rot spreads down live veins. Leaving a necrotic Well wired in doesn't just
@@ -1935,31 +2052,16 @@ func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
 	return best
 
 
-## Wells nobody ever wired in wither away; Boosts nobody ever claimed do too;
-## rot nobody ever cut collapses outright. All three remove the node itself
-## (see _remove_node), which is what keeps the board turning over instead of
-## only ever accumulating — every object that appears either gets used, gets
-## cut, or eventually leaves.
+## Wells nobody ever wired in wither away; rot nobody ever cut collapses
+## outright. Both remove the node itself (see _remove_node), which is what
+## keeps the board turning over instead of only ever accumulating — every
+## object that appears either gets used, gets cut, or eventually leaves.
 func _tick_lifecycle(_delta: float) -> void:
 	for n in nodes.duplicate():
-		# Fork expiry below removes a node's sibling mid-loop, so a later
-		# entry in this duplicate can already be freed by its own pair.
 		if not is_instance_valid(n) or n not in nodes:
 			continue
 		if n.wither_ratio() >= 1.0:
-			# Kept separate from `withered`, which the probe reads specifically
-			# to tune Well-neglect pacing (see VNode.WITHER_TIME) — folding
-			# pickup expiry into the same number would muddy that signal.
-			if n.kind == VNode.Kind.BOOST:
-				one_offs_expired += 1
-			elif n.kind == VNode.Kind.MUTATION or n.kind == VNode.Kind.RELIC:
-				# A fork expires as the unit it is — the sibling goes too,
-				# or a half-fork would linger as an unexplained lone choice.
-				var sibling: VNode = n.mutation_pair if n.kind == VNode.Kind.MUTATION else n.relic_pair
-				if sibling != null and is_instance_valid(sibling):
-					_remove_node(sibling)
-			else:
-				withered += 1
+			withered += 1
 			_remove_node(n)
 		elif n.collapse_ratio() >= 1.0:
 			collapsed += 1
@@ -1992,9 +2094,21 @@ func _push_from_nodes() -> void:
 		# fall through to the others rather than stalling on a full one.
 		var placed := false
 		var start := n.next_out(outs.size())
+		var pot: float = n.poison_pot if n.corrupted else 1.0
+		var item: int = n.buffer[0]
 		for i in outs.size():
 			var v: Vein = outs[(start + i) % outs.size()]
-			if v.inject(n.buffer[0]):
+			var sink := v.sink()
+			# A sink that would just refuse this item on arrival is treated as
+			# blocked, same as one with no physical room left — sending it
+			# anyway only burns THIS node's reserve to watch it get discarded
+			# as `dropped` at the far end. Holding it here instead lets the
+			# backlog build and correctly back-pressure all the way up to
+			# whatever is producing it (see VNode.can_accept).
+			if sink != null and not sink.can_accept(item):
+				v.note_blocked()
+				continue
+			if v.inject(item, pot):
 				n.buffer.remove_at(0)
 				n.pulse = 1.0
 				placed = true
@@ -2015,10 +2129,13 @@ func _push_from_nodes() -> void:
 				v.note_blocked()
 
 
-func _deliver(kind: int, v: Vein, to: VNode) -> void:
+func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 	if to == null:
 		return
 	if to.kind == VNode.Kind.HEART:
+		# The very first delivery of the run, of any kind — this is what starts
+		# the demand SCHEDULE's own clock (see _demand_clock / _tick_escalation).
+		_heart_fed_ever = true
 		# Near-miss engineering: a save when the heart is nearly gone must feel
 		# enormous.
 		if misses >= MISSES_DYING:
@@ -2026,6 +2143,9 @@ func _deliver(kind: int, v: Vein, to: VNode) -> void:
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(120)
 		var gain := float(FUEL_BY_RES.get(kind, 1.0))
+		# A spent tool's poison bites harder than a spent circle's (pot > 1).
+		if kind == VNode.Res.VOID:
+			gain *= pot
 		var off_demand := kind != demand and kind != VNode.Res.VOID
 		if off_demand:
 			# Wrong shape is wasted, not damaging — so no hurt cue and no fuel
@@ -2109,20 +2229,14 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 
 		var mark: Node2D = FloatTextScene.new()
 		vein_layer.add_child(mark)
-		# "!" not "×" — the old cross collided head-on with the booster
-		# labels' multiplication sign ("★×1.15") the moment those shipped,
-		# so a wasted delivery could read as a multiplier event.
 		mark.spawn("!", at + jitter, warn, 20, out_dir)
 		return
 	if absf(gain) < 0.5:
 		return
-	# A SCORE perk (see _recompute_boosters) multiplies score earning only —
-	# never the poison hit below, and never the raw fuel gain already applied
-	# in _deliver. Carried through _score_carry (see its own comment) rather
-	# than rounded per-delivery, or a multiplier under 2x would vanish on
-	# every single RAW delivery without ever showing up in the total either.
-	var score_gain := gain if kind == VNode.Res.VOID else gain * _boost_score_mult
-	_score_carry += score_gain
+	# Carried through _score_carry (see its own comment) rather than rounded
+	# per-delivery, so the combo bonus's fractional score is never silently
+	# discarded on every delivery.
+	_score_carry += gain
 	var rounded := int(_score_carry)
 	_score_carry -= float(rounded)
 	if rounded == 0:
@@ -2176,12 +2290,6 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _on_press(p: Vector2) -> void:
-	# The corner icon works whether the run is alive or already over — the
-	# death screen's tap-anywhere only ever fires post-death; this lets a
-	# bad run be abandoned early instead of waiting it out.
-	if restart_hint != null and restart_hint.hit(p):
-		start_run(0)
-		return
 	if not alive:
 		start_run(0)
 		return
@@ -2247,10 +2355,19 @@ func _draw_drag() -> void:
 	var reach := Palette.HEART
 	reach.a = 0.10
 	drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN, 0.0, TAU, 64, reach, 1.5, true)
+	# A tool (or the Heart) also gets a fainter OUTER ring at the extended
+	# tool<->Heart reach, so the longer link a scattered chain relies on is a
+	# visible affordance, not a hidden rule.
+	if _is_tool_kind(_drag_from.kind) or _drag_from.kind == VNode.Kind.HEART:
+		var far := Palette.HEART
+		far.a = 0.05
+		drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN * TOOL_HEART_REACH,
+			0.0, TAU, 72, far, 1.2, true)
 
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
-	var stretched := _drag_from.position.distance_to(end) > Vein.MAX_LEN
+	var limit := reach_limit(_drag_from, to) if to != null else Vein.MAX_LEN
+	var stretched := _drag_from.position.distance_to(end) > limit
 	var crossing := to != null and to != _drag_from and _crossing_vein(_drag_from, to) != null
 
 	var col := Palette.VEIN_STRAINED if stretched or crossing else Palette.VEIN_LIVE
@@ -2259,17 +2376,8 @@ func _draw_drag() -> void:
 
 	if to == null:
 		return
-	# A pickup grab needs no budget and ignores crossings (see _add_vein), so
-	# the preview ring must not flash red for either when the target is one —
-	# the preview has to promise exactly what release will do.
-	var to_pickup := to.kind == VNode.Kind.BOOST or to.kind == VNode.Kind.RELIC \
-		or to.kind == VNode.Kind.MUTATION
-	var ok: bool
-	if to_pickup:
-		ok = to != _drag_from and in_reach(_drag_from, to) and _drag_from.depth >= 0
-	else:
-		ok = to != _drag_from and can_afford() and _find_vein(_drag_from, to) == null \
-			and in_reach(_drag_from, to) and not crossing
+	var ok := to != _drag_from and can_afford() and _find_vein(_drag_from, to) == null \
+		and in_reach(_drag_from, to) and not crossing
 	var ring := Palette.WARM if ok else Palette.VEIN_STRAINED
 	ring.a = 0.85
 	drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU, 28, ring, 2.0, true)

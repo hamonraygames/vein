@@ -20,35 +20,31 @@ static func step(game) -> void:
 	if not game.alive:
 		return
 
-	# Cut the rot first. Without this the bot sits there letting necrotic Wells
-	# pump VOID into the Heart and dies at ~69 beats, which measures its
-	# blindness rather than the game. Amputation is the basic human response and
-	# the floor has to include it.
+	# Cut the rot first. Without this the bot sits there letting necrotic
+	# Wells pump VOID into the Heart and dies at ~69 beats, which measures
+	# its blindness rather than the game. Amputation is the basic human
+	# response and the floor has to include it.
 	for v in game.veins:
 		if v.a.corrupted or v.b.corrupted:
 			game._remove_vein(v)
 			return
 
-	# Once demand changes, old direct lines become traps: they spend scarce vein
-	# budget to feed scraps. Humans should learn to amputate them; the probe
-	# floor needs the same instinct. Generalized to "whatever this direct line
-	# into the Heart produces, is it still what's wanted" rather than a
-	# hardcoded per-tier list — demand can now rotate to ANY unlocked shape
-	# (see game.gd's ROTATE_GAP_START), not just march forward, so a list that
-	# only knew about REFINED/CLOTH stopped covering the game the moment
-	# demand could jump backward too.
+	# Once demand changes, old direct lines become traps: they spend scarce
+	# vein budget to feed scraps. Humans should learn to amputate them; the
+	# probe floor needs the same instinct. Generalized to "whatever this
+	# direct line into the Heart produces, is it still what's wanted" rather
+	# than a hardcoded per-tier list — demand can now rotate to ANY unlocked
+	# shape (see game.gd's ROTATE_GAP_START), not just march forward, so a
+	# list that only knew about REFINED/CLOTH stopped covering the game the
+	# moment demand could jump backward too.
 	for v in game.veins:
 		var source := _heart_source(v)
 		if source != null and source.produces != game.demand:
 			game._remove_vein(v, true)
 			return
 
-	# Pickups cost no budget (see game.gd's _add_vein), so being tapped out
-	# only rules out REAL edges — a maxed-budget bot must still grab boosters,
-	# same as a human should. This also matters to the probe: late-run the bot
-	# is almost always at cap, which kept every late-spawning pickup counter
-	# pinned at zero.
-	var afford: bool = game.can_afford()
+	if not game.can_afford():
+		return
 
 	# Prefer the live production chain over extra raw supply, one priority
 	# band per tier of depth needed:
@@ -70,10 +66,6 @@ static func step(game) -> void:
 		# for free.
 		if n.kind == VNode.Kind.HEART or n.depth >= 0:
 			continue
-		var is_pickup: bool = n.kind == VNode.Kind.BOOST or n.kind == VNode.Kind.RELIC \
-			or n.kind == VNode.Kind.MUTATION
-		if not afford and not is_pickup:
-			continue
 		for m in game.nodes:
 			if m.depth < 0 or not game.in_reach(n, m):
 				continue
@@ -81,12 +73,6 @@ static func step(game) -> void:
 			# Getting the demanded tool chain connected, then fed, outranks
 			# everything. These are coarse priorities for a floor bot, not optimal
 			# play.
-			# Booster pickups are worth a detour but never outrank getting the
-			# demanded tool chain online — mirrors the intended human priority
-			# and, just as importantly, makes the probe actually exercise the
-			# booster systems instead of reporting them permanently at zero.
-			if is_pickup:
-				score -= 600000.0
 			if need_kiln:
 				if n.kind == VNode.Kind.KILN:
 					score -= 3000000.0

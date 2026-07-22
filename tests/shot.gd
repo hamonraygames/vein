@@ -13,6 +13,14 @@ var out_path := "shot.png"
 var after := 20.0
 var speed := 3.0
 var run_seed := 4242
+## Set by game.gd when `--tutorial` is passed: AutoPlay only plays the two
+## opening connections (completing the CONNECT lesson), then two more once
+## REFINED lands (Forge->Heart, Well->Forge — walking the FORGE lesson's own
+## build phases), and then leaves the board alone. That parks the run in
+## each hint the tutorial can show, by --after time: CONNECT early, the
+## Forge link/feed ghosts just past the flip, the stale-line cut ghost once
+## the chain stands, and the poison-cut ghost when the opening Wells rot.
+var demo_tutorial := false
 
 var _game: Node
 var _t := 0.0
@@ -32,11 +40,17 @@ func _process(delta: float) -> void:
 
 	_t += delta
 	_accum += delta
-	if _accum >= AUTOPLAY_PERIOD:
+	# For a --tutorial capture we leave the board untouched so the opening
+	# CONNECT hint is what the frame shows; otherwise AutoPlay builds a
+	# plausible network.
+	if not demo_tutorial and _accum >= AUTOPLAY_PERIOD:
 		_accum = 0.0
 		AutoPlay.step(_game)
 
-	if _t >= after:
+	# Grab at the scheduled time, OR the moment the run dies (so `--after` set
+	# high enough reliably captures the death screen regardless of how the
+	# harness clock drifts from sim time at high --speed).
+	if _t >= after or (_t > 6.0 and not _game.alive):
 		_done = true
 		_grab()
 

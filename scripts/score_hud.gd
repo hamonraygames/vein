@@ -5,12 +5,16 @@ extends Node2D
 ## game.gd's _pop_gain), so it reads exactly what those pops add up to.
 ##
 ## The doc's diegetic pillar bans HUD numbers, and this is a deliberate exception
-## — without a visible score there is nothing to beat, and beating your own last
-## run is the only pull VEIN has (there is no win state). It earns its place by
-## behaving like part of the organism rather than a readout: dim, centred under
-## the Heart, and it swells on the beat. The personal best sits beneath it as a
-## ghost until you pass it, then disappears — the target stops mattering once
-## it's gone.
+## — without a visible score there is nothing to beat. It stays dim and swells
+## on the beat so it reads as part of the organism, not a readout.
+##
+## It used to sit directly under the Heart with the personal-best ghost beneath
+## it, but the Heart is where every vein, tool, and the beat ring already
+## converge — playtest: "the area around the heart becomes very messy very
+## soon." The score now lives at the TOP of the screen, clear of that traffic,
+## and the best is gone from live play entirely (it only appears on the death
+## screen now) — mid-run, the only number that matters is the one you're
+## building.
 
 var _font: Font
 var _swell := 0.0
@@ -30,20 +34,17 @@ func _process(delta: float) -> void:
 
 
 func _draw() -> void:
-	if game == null or game.heart == null or not game.alive:
+	if game == null or not game.alive:
 		return
 
-	var origin: Vector2 = game.heart.position + Vector2(0.0, 74.0)
+	# Top-centre, clear of the Heart's traffic. Best is intentionally absent
+	# here — it lives only on the death screen now.
+	var vp: Vector2 = game.design_size()
+	var origin := Vector2(vp.x * 0.5, 70.0)
 
 	var col := Palette.HEART
 	col.a = 0.30 + _swell * 0.34
 	_centred(str(game.score), origin, 26, col)
-
-	# The number to beat, shown only while it is still ahead of you.
-	if game.best > 0 and game.score < game.best:
-		var ghost := Palette.HEART
-		ghost.a = 0.16
-		_centred(str(game.best), origin + Vector2(0.0, 22.0), 14, ghost)
 
 
 func _centred(text: String, at: Vector2, size: int, col: Color) -> void:

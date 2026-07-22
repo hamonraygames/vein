@@ -8,11 +8,25 @@ class_name Palette
 
 const BG := Color("0d0d10")
 
-const RAW := Color("e8a33d")      # circle   — amber
-const REFINED := Color("e4572e")  # triangle — coral
-const CLOTH := Color("e8e3d3")    # square   — bone
-const PRISM := Color("c2547a")    # pentagon — warm rose
-const HEART := Color("f5f2ea")    # hexagon  — white
+## One fixed hue per shape, unchanged for a resource's whole life and IDENTICAL
+## everywhere it appears — as a node's body, as the demand glyph inside the
+## Heart, as a requirement glyph inside a tool, as a dot on a vein, as a
+## buffer pip — all routed through of_res() so there is exactly one source of
+## truth. Red is deliberately absent from every object: it reads as HAZARD
+## (the old "red triangle" confusion), and the only thing allowed to alarm is
+## VOID. REFINED was coral e4572e and is now teal-green, well clear of red.
+## Muted, not garish. Playtest: "the circles are very bold and dominant, both
+## border width and colour; everything except the Heart is not good." The
+## Heart's soft ivory is the reference for the whole family — every resource
+## is now a DESATURATED tint in that same register (bright saturated amber/
+## teal/rose read as loud stickers against the dark, fighting the Heart for
+## the eye). Lower saturation, similar softness, so the board reads as one
+## quiet organism with the Heart clearly its brightest point.
+const RAW := Color("bb9a6b")      # circle   — soft sand-gold (was bright amber)
+const REFINED := Color("7ea394")  # triangle — muted sage (was saturated teal)
+const CLOTH := Color("b8b09a")    # square   — warm stone (was near-white bone, read as washed-out)
+const PRISM := Color("b0879b")    # pentagon — dusty mauve (was hot rose)
+const HEART := Color("f5f2ea")    # hexagon  — ivory (kept: the one bright point)
 
 ## Corruption. The one COLD colour in a warm-on-dark palette, and the only thing
 ## on screen that does not belong — a spent Well gone necrotic, and the poison it
@@ -31,21 +45,6 @@ const VEIN_INERT := Color("221e24")
 const VEIN_STRAINED := Color("6b2230")
 
 const WARM := Color("ffb765")     # the rescue flash
-## Three booster families, three colours — feedback: "color code the
-## different types of boosters, one time and persistent." BOOST (gold) is a
-## ONE_OFF instant grab. RELIC (burnt orange) is a TIME_BASED perk — strong,
-## temporary. PERSISTENT (jade) is a run-long perk — permanent, one slot,
-## replaced rather than stacked. PERSISTENT and RELIC used to share this same
-## burnt-orange hue (reasoned at the time as "both outlive a single grab"),
-## which meant the one visual cue meant to separate "temporary" from
-## "permanent" didn't actually cover the two families that most need telling
-## apart, since both spawn as forks and both use the same effect pool.
-## Shape still carries the real distinction (star vs hexagram vs diamond, and
-## which inner glyph) — colour is the redundant, at-a-glance channel, per the
-## rule above.
-const BOOST := WARM
-const RELIC := Color("d97b3d")
-const PERSISTENT := Color("5aab6e")
 
 
 static func of_res(kind: int) -> Color:
