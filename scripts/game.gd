@@ -415,6 +415,9 @@ var _heart_fed_ever := false
 ## DEMAND_TIERS is actually measured against (see _tick_escalation). Frozen at
 ## 0 until _heart_fed_ever flips true.
 var _demand_clock := 0.0
+## run_time the moment PRISM was first unlocked (see _tick_escalation). INF
+## until then — read by _hardcore_ramp() below.
+var _prism_unlocked_at := INF
 
 ## Seconds this run has been alive. The escalation clock — see APPETITE_RATE.
 var run_time := 0.0
@@ -655,6 +658,7 @@ func start_run(run_seed: int) -> void:
 	_next_rotate_time = INF
 	_heart_fed_ever = false
 	_demand_clock = 0.0
+	_prism_unlocked_at = INF
 	_no_move_time = 0.0
 	rescues = 0
 	_rescue = 0.0
@@ -805,8 +809,33 @@ func _on_beat(index: int) -> void:
 ## thing still escalating used to be raw appetite, so a long run flattened
 ## into a grind against one number instead of a world still getting meaner.
 ## The loop runs forever; it just keeps getting harder until you lose.
+##
+## Muted while still walking the DEMAND_TIERS teaching schedule (RAW through
+## PRISM has never all been unlocked yet), then eases up to full strength
+## over HARDCORE_RAMP_TIME once PRISM lands. Playtest: the schedule itself
+## already waits for demand to flip gently (see _demand_clock), but every
+## OTHER threat — corruption spread, airborne blight, tool depletion, even
+## the appetite wave below — was still climbing on the raw run clock the
+## whole time, so by the time a player actually REACHED pentagon the world
+## was already nearly maxed out. "Easy to reach pentagon, then it gets hard"
+## needs the whole hazard mix gated on tier progress, not just the shape the
+## Heart is asking for. Nothing about the tuned LATE curve changes — this
+## only compresses how much of it you feel while still climbing to PRISM.
+const TEACHING_PRESSURE_MULT := 0.35
+## Seconds after PRISM unlocks before pressure reaches full strength — a
+## short breather for reaching the milestone, not a hard cutover mid-beat.
+const HARDCORE_RAMP_TIME := 10.0
+
 func pressure() -> float:
-	return run_time / EXERTION_SPAN
+	return run_time / EXERTION_SPAN * lerpf(TEACHING_PRESSURE_MULT, 1.0, _hardcore_ramp())
+
+
+## 0 while PRISM has never been unlocked, ramping 0->1 over HARDCORE_RAMP_TIME
+## once it is (see _prism_unlocked_at, set in _tick_escalation).
+func _hardcore_ramp() -> float:
+	if _prism_unlocked_at == INF:
+		return 0.0
+	return clampf((run_time - _prism_unlocked_at) / HARDCORE_RAMP_TIME, 0.0, 1.0)
 
 
 ## pressure() clamped to 0..1 — the cosmetic ceiling. Exertion, the mix, and
@@ -826,9 +855,15 @@ func intensity() -> float:
 ## changes, not the tuned difficulty.
 const APPETITE_WAVE_AMP := 0.09
 const APPETITE_WAVE_PERIOD := 17.0
+## How much slower the fuel drain's RATE climbs while still teaching (see
+## TEACHING_PRESSURE_MULT above — same reasoning, applied to the single
+## biggest killer in the game). APPETITE_BASE/START_FUEL are untouched: those
+## already carry the tuned "first ten seconds" grace on their own.
+const TEACHING_APPETITE_MULT := 0.4
 
 func appetite() -> float:
-	var base := APPETITE_BASE + APPETITE_RATE * _appetite_clock
+	var rate := APPETITE_RATE * lerpf(TEACHING_APPETITE_MULT, 1.0, _hardcore_ramp())
+	var base := APPETITE_BASE + rate * _appetite_clock
 	var wave := sin(_appetite_clock * TAU / APPETITE_WAVE_PERIOD) * APPETITE_WAVE_AMP * intensity()
 	return maxf(0.02, base + wave)
 
@@ -878,6 +913,8 @@ func _tick_escalation(delta: float) -> void:
 				want = t.res
 				if not _unlocked_res.has(t.res):
 					_unlocked_res.append(t.res)
+					if t.res == VNode.Res.PRISM:
+						_prism_unlocked_at = run_time
 
 		# Teaching schedule is over once every DEMAND_TIERS entry has landed —
 		# from here, demand jumps randomly among everything unlocked instead of
