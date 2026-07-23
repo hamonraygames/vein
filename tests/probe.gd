@@ -86,12 +86,15 @@ func _record() -> void:
 		if n.corrupted:
 			rotted += 1
 
-	print(("run %d: beat %4d | rt %5.1f | budget %2d | spawned %2d live %2d (%d fed) | withered %d"
-		+ " collapsed %d rotted %d | poisoned %d | wasted %d | ruptures %d | dropped %d | rescues %d"
-		+ " | chain %d")
-		% [_idx + 1, beats, _game.run_time, _game.budget, _game.spawned_wells, wells, fed,
+	var prism_at: float = _game._prism_unlocked_at
+	var prism_str := "%.1f" % prism_at if prism_at != INF else "never"
+
+	print(("run %d: beat %4d | rt %5.1f | prism %s | budget %2d | spawned %2d live %2d (%d fed)"
+		+ " | withered %d collapsed %d rotted %d | poisoned %d | wasted %d | ruptures %d | dropped %d"
+		+ " | rescues %d | chain %d | flow %d")
+		% [_idx + 1, beats, _game.run_time, prism_str, _game.budget, _game.spawned_wells, wells, fed,
 			_game.withered, _game.collapsed, rotted, _game.poisoned, _game.wasted, _game.ruptures,
-			_game.dropped, _game.rescues, _game.chain_rescues])
+			_game.dropped, _game.rescues, _game.chain_rescues, _game.throughput_rescues])
 
 	_idx += 1
 	if _idx >= runs:

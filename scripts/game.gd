@@ -21,11 +21,17 @@ const SAVE_PATH := "user://vein.cfg"
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 8
+const TUNING_VERSION := 9
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 const START_BUDGET := 4
-const FUEL_CAP := 5.0
+## Was a flat 5.0 that never grew while appetite (fuel burned per beat) climbs
+## toward ~2.9 by late-game — the buffer against a single missed beat shrank
+## to almost nothing exactly when supply gets hardest to keep up with. Real
+## playtest (not the bot): "heart dying rate is very fast." Raised so a bad
+## few seconds is survivable slack, not an instant strike against
+## MISSES_FATAL — see START_FUEL below, sized to match.
+const FUEL_CAP := 9.0
 
 ## Fuel per item by resource. A Forge burns two RAW (2.0 of fuel) into one
 ## REFINED (3.0), so refining is worth 1.5x — but it costs an extra vein and
@@ -114,11 +120,27 @@ const DEMAND_TIERS := [
 ## gets less predictable, via _jitter) as intensity climbs, so the opening of
 ## this phase still gives time to react and the tail end genuinely doesn't.
 const ROTATE_GAP_START := 26.0
-const ROTATE_GAP_MIN := 8.0
+## Physical floor under the tuned one below: the longest possible PRISM
+## lineage — Well->Forge->Loom->Kiln->Heart, four hops all at the single
+## uniform Vein.MAX_LEN now that every pair shares one reach ceiling (see
+## in_reach) — takes this long for a single item to physically cross, full
+## stop. By the time rotation starts, PRISM is always among the unlocked pool
+## (see _tick_escalation), so this is the real worst case the floor has to
+## clear, not a hypothetical one.
+const WORST_CASE_PRISM_TRAVEL := (Vein.MAX_LEN * 4.0) / Vein.SPEED   # ~8.10s
 ## Absolute floor the rotation gap keeps creeping toward past EXERTION_SPAN
-## (see pressure()) — below ~5s a flip can't be answered at all, even in
-## principle, and impossible stops being interesting.
-const ROTATE_GAP_FLOOR := 5.0
+## (see pressure()) — below this a flip can't be answered at all, even in
+## principle, and impossible stops being interesting. The 25% margin over
+## WORST_CASE_PRISM_TRAVEL covers dot-spacing queueing and an unbalanced
+## branch's assembly stall on top of pure travel.
+const ROTATE_GAP_FLOOR := WORST_CASE_PRISM_TRAVEL * 1.25   # ~10.13s
+## The lerp target intensity climbs toward — was a flat 8.0 from before the
+## reach unification raised WORST_CASE_PRISM_TRAVEL (see MAX_LEN in vein.gd),
+## which left it BELOW ROTATE_GAP_FLOOR: the hard clamp always overrode it and
+## the lerp's own floor was dead code. Pinned to the real floor so the curve
+## actually bottoms out where the clamp does, instead of asymptoting toward a
+## number it can never reach.
+const ROTATE_GAP_MIN := ROTATE_GAP_FLOOR
 
 ## Feeding the Heart something it did not ask for: WASTED, never poison.
 ##
@@ -175,24 +197,38 @@ const WRONG_SHAPE_FUEL := 0.05
 ## after also punished), while this only widens the OPENING buffer — the
 ## late-game slope (APPETITE_RATE, unchanged) is what still has to produce the
 ## skill gap, and it does (see probe numbers below). Slow start, hard finish.
-const START_FUEL := 2.6
-const APPETITE_BASE := 0.22
-const APPETITE_RATE := 0.024    # per second
+## Scaled up alongside FUEL_CAP above so the opening reserve is still the
+## same fraction of a full tank, not suddenly thin against a bigger cap.
+const START_FUEL := 4.5
+## Real playtest (not the bot bisection this was previously tuned against):
+## reaching PRISM landed right as the run was already nearly maxed out (see
+## EXERTION_SPAN below — PRISM unlocks at run-second 100, EXERTION_SPAN used
+## to be 110), so pentagon was a near-death-experience milestone instead of
+## the easy, generous one a first-time or non-expert player needs it to be.
+## Both cut roughly in half: the long-run curve a couple gets good at is
+## still there, it just takes longer to arrive.
+const APPETITE_BASE := 0.16
+const APPETITE_RATE := 0.013    # per second
 
 ## Seconds of exertion before the heart is fully racing.
 ##
-## Was 150 — but probe runs die at ~100-105s, so the whole back half of the
-## threat curve (fast rot, airborne blight, tight rotation gaps) sat past the
-## end of every real run: ruptures and poisonings read zero seed after seed
-## because the enemy's feral phase was scheduled for a time nobody survives
-## to. 110 puts full intensity just inside a good run's reach — the curve is
-## unchanged, it just finishes while there is still someone alive to feel it.
-const EXERTION_SPAN := 110.0
+## Was 150, then cut to 110 because bot probes were dying at ~100-105s and the
+## back half of the threat curve never got felt. That reasoning still holds,
+## but real (non-bot) playtest said the result was backwards for a human:
+## PRISM unlocking at t=100 against a 110 span meant pentagon arrived at ~91%
+## intensity — "easily reach pentagon" was never possible, the run was
+## already almost fully feral by the time it was reachable at all. Pushed
+## back out so PRISM has a real, generous window to be enjoyed at moderate
+## intensity before the late curve bites — see HARDCORE_RAMP_TIME below for
+## the other half of this fix.
+const EXERTION_SPAN := 200.0
 
-## Missed feedings before the beat stops for good.
+## Missed feedings before the beat stops for good. DYING/FATAL both raised a
+## notch alongside FUEL_CAP/APPETITE above — more real seconds of grace before
+## the beat slows, more before it stops for good.
 const MISSES_STRAINED := 1
-const MISSES_DYING := 3
-const MISSES_FATAL := 6
+const MISSES_DYING := 4
+const MISSES_FATAL := 8
 
 ## Hard cap on live Wells. Playtest: "the circles grow and grow" — the board
 ## only ever accumulated. Wither alone can't hold the line, because it only
@@ -201,7 +237,12 @@ const MISSES_FATAL := 6
 ## (the oldest orphan) rather than piling on: the board churns instead of
 ## silting up, and the screen stays readable at phone size. Connected Wells are
 ## never displaced — you never lose something you were actually using.
-const MAX_LIVE_WELLS := 14
+## Raised alongside the spawn-cadence cut below: real playtest said circle
+## supply couldn't keep pace with what the Heart wanted, especially by the
+## time it's asking for refined tiers with several Wells committed to one
+## lineage — more room for those lineages to coexist without evicting each
+## other.
+const MAX_LIVE_WELLS := 20
 
 # Spawns and budget are on the clock for the same reason as appetite.
 ##
@@ -211,14 +252,20 @@ const MAX_LIVE_WELLS := 14
 ## seconds. It now opens sparse — a first Well only after the two starters have
 ## had time to be wired in — and the gap DECAYS as the run escalates, so late
 ## play stays busy. Slow start, quickening finish, same as appetite.
-const FIRST_WELL_TIME := 7.0
-const WELL_GAP_START := 11.0
-const WELL_GAP_DECAY := 0.55     # wells arrive faster and faster as the run climbs
-const WELL_GAP_MIN := 3.75
+## Cadence cut further (11->8 start, 3.75->2.5 floor) on top of that shape:
+## real playtest said circles simply weren't arriving fast enough against the
+## Heart's pace, independent of the per-Well rate fix in VNode.WELL_PERIOD.
+const FIRST_WELL_TIME := 5.0
+const WELL_GAP_START := 8.0
+const WELL_GAP_DECAY := 0.6      # wells arrive faster and faster as the run climbs
+const WELL_GAP_MIN := 2.5
 
 const FIRST_BUDGET_TIME := 8.0
 const BUDGET_GAP_START := 12.0
-const BUDGET_GAP_GROWTH := 3.5  # ...while veins arrive slower and slower
+## Was 3.5 — with more Wells, longer reach, and deeper lineages all landing at
+## once (this pass), the player needs veins to keep pace for longer, not have
+## budget growth taper off early.
+const BUDGET_GAP_GROWTH := 2.5  # ...while veins arrive slower and slower
 
 ## Nothing spawns inside this radius of the Heart. Playtest: "don't spawn
 ## objects too close to the Heart, it makes around the Heart very messy." Tools
@@ -232,14 +279,14 @@ const MIN_HEART_CLEARANCE := 132.0
 ## the tool->Heart vein isn't so long that delivery latency starves the run.
 const TOOL_IDEAL_HEART_DIST := 195.0
 
-## A non-circle (Forge/Loom/Kiln) may link DIRECTLY to the Heart across a longer
-## span than a normal vein — its reach to the Heart is Vein.MAX_LEN * this. This
-## is what lets the whole Well->Forge->Loom->Kiln chain live scattered out in the
-## field near its supply instead of collapsing onto the Heart: the tool sits by
-## its feeder and still delivers to the Heart across the long link. Connections
-## stay two-way and flow stays graph-directed; only the reach ceiling changes,
-## and only for a tool<->Heart pair.
-const TOOL_HEART_REACH := 1.45
+## A tool<->Heart pair used to link across a longer span than every other
+## pair (TOOL_HEART_REACH, a 1.45x bonus on top of Vein.MAX_LEN) — that was
+## what let the whole Well->Forge->Loom->Kiln chain live scattered out in the
+## field near its supply instead of collapsing onto the Heart. Removed per
+## explicit direction: the small radius is gone for good, and the ONE radius
+## every pair now shares (Vein.MAX_LEN itself, raised to absorb the old
+## bonus — see vein.gd) does the same job for every pair, not just the
+## Heart-facing one.
 
 ## Live-tool ceilings. Playtest: "after a while the screen is full of
 ## triangles and squares" — tools never die, so without a cap every gap tick
@@ -676,6 +723,8 @@ func start_run(run_seed: int) -> void:
 	_budget_gap = BUDGET_GAP_START
 	_chain_stall.clear()
 	chain_rescues = 0
+	_throughput_stall = 0.0
+	throughput_rescues = 0
 
 	var vp := design_size()
 	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
@@ -822,9 +871,15 @@ func _on_beat(index: int) -> void:
 ## Heart is asking for. Nothing about the tuned LATE curve changes — this
 ## only compresses how much of it you feel while still climbing to PRISM.
 const TEACHING_PRESSURE_MULT := 0.35
-## Seconds after PRISM unlocks before pressure reaches full strength — a
-## short breather for reaching the milestone, not a hard cutover mid-beat.
-const HARDCORE_RAMP_TIME := 10.0
+## Seconds after PRISM unlocks before pressure reaches full strength.
+## Was 10 — a "short breather," but paired with the old EXERTION_SPAN=110 that
+## meant full hardcore intensity landed within 10s of reaching pentagon at
+## all, no matter how well built the board was. Real playtest: this needs to
+## be a real window to enjoy the milestone in, not a cutover with a different
+## number. Raised alongside EXERTION_SPAN's own increase above so "easy to
+## reach pentagon, then it gets hard" actually has a middle where it's just
+## pentagon for a while.
+const HARDCORE_RAMP_TIME := 60.0
 
 func pressure() -> float:
 	return run_time / EXERTION_SPAN * lerpf(TEACHING_PRESSURE_MULT, 1.0, _hardcore_ramp())
@@ -956,6 +1011,7 @@ func _tick_escalation(delta: float) -> void:
 
 		_ensure_move(delta)
 		_tick_tool_chain(delta)
+		_ensure_throughput(delta)
 
 		# Tools keep arriving on their cadence but the BOARD stays capped —
 		# playtest: "after a while the screen is full of triangles and squares."
@@ -1112,7 +1168,6 @@ func _spawn_node(kind: int) -> void:
 	# that any candidate stays within Vein.MAX_LEN of both, makes the whole
 	# link buildable by construction. The reach is then re-checked per
 	# candidate below, so an off-midpoint pick can never sneak out of range.
-	var tool_heart_reach := Vein.MAX_LEN * TOOL_HEART_REACH
 	var anchor_point := heart.position
 	var feeder: VNode = null
 	var min_dist := 40.0
@@ -1124,14 +1179,15 @@ func _spawn_node(kind: int) -> void:
 			feeder = _nearest_node_of_kind(VNode.Kind.FORGE, heart.position)
 		else:
 			feeder = _nearest_node_of_kind(VNode.Kind.LOOM, heart.position)
-		# A tool now anchors to its FEEDER, not the feeder<->Heart midpoint: it
-		# lives out in the field next to its supply and reaches the Heart across
-		# the long tool<->Heart link (see TOOL_HEART_REACH). That is the whole
-		# scatter fix — the chain no longer collapses onto the Heart. The feeder
-		# must itself be within extended Heart reach, or a tool placed by it
-		# couldn't also reach the Heart; if it isn't, fall back to hugging the
-		# Heart and let the rescue system drop supply nearby.
-		if feeder != null and heart.position.distance_to(feeder.position) > tool_heart_reach - 24.0:
+		# A tool anchors to its FEEDER, not the feeder<->Heart midpoint: it
+		# lives out in the field next to its supply and reaches the Heart
+		# across the same single Vein.MAX_LEN every other pair gets now. That
+		# is the whole scatter fix — the chain no longer collapses onto the
+		# Heart. The feeder must itself be within reach of the Heart, or a
+		# tool placed by it couldn't also reach the Heart; if it isn't, fall
+		# back to hugging the Heart and let the rescue system drop supply
+		# nearby.
+		if feeder != null and heart.position.distance_to(feeder.position) > Vein.MAX_LEN - 24.0:
 			feeder = null
 		if feeder != null:
 			anchor_point = feeder.position
@@ -1139,7 +1195,7 @@ func _spawn_node(kind: int) -> void:
 			max_dist = Vein.MAX_LEN * 0.82
 		else:
 			min_dist = MIN_HEART_CLEARANCE
-			max_dist = tool_heart_reach * 0.7
+			max_dist = Vein.MAX_LEN * 0.7
 
 	for _i in 64:
 		var p: Vector2
@@ -1162,9 +1218,8 @@ func _spawn_node(kind: int) -> void:
 
 		# Hard reachability gate for tools: reject any spot the Heart or the
 		# feeder cannot directly reach. This is the guarantee, not a preference.
-		# The Heart gate uses the EXTENDED tool reach, so a tool may sit far out.
 		if is_tool:
-			if to_heart > tool_heart_reach:
+			if to_heart > Vein.MAX_LEN:
 				continue
 			if feeder != null and p.distance_to(feeder.position) > Vein.MAX_LEN:
 				continue
@@ -1690,6 +1745,169 @@ func _spawn_rescue_well_near(near: Vector2) -> void:
 	_rebuild_graph()
 
 
+# --- The throughput guarantee -------------------------------------------------
+#
+# The two guarantees above answer "does a path exist" (_has_reachable_supply)
+# and "is that path's tool actually fed" (_any_kind_fed) — both are pass/fail,
+# neither asks how FAST. A Forge with exactly one starved-looking Well in
+# reach is a technical yes on both, but if the Heart burns through a
+# triangle's worth of fuel every few seconds and that Well can only make one
+# circle every WELL_PERIOD, the "move" the other guarantees promised isn't
+# actually one — the board just looks solvable. This section is the rate
+# check: the CURRENT demand's best buildable lineage must be able to sustain
+# at least the Heart's current burn rate, with margin, same debounce+rescue
+# shape as the two guarantees above.
+
+## Every hop's throughput ceiling, independent of length — see
+## Vein.DOT_SPACING. A vein's cap doesn't care whether it's short or stretched
+## to Vein.MAX_LEN; only the gap between items does.
+const EDGE_RATE := Vein.SPEED / Vein.DOT_SPACING
+
+## Fraction of bare-survival rate the achievable rate must clear before this
+## check is satisfied. NOT "stay fully fed forever" — that's explicitly not
+## the promise (see VEIN.md: "difficulty escalates until the topology problem
+## becomes unsolvable... collapse is the content"). A probe run with every
+## other guarantee healthy still dies right around EXERTION_SPAN on appetite
+## alone; a margin tuned to full sustainability would have this guarantee
+## fight that intended ending, forcing rescue Wells in every few seconds
+## through the entire back half of every run. What it must never allow is a
+## reachable, fed lineage reduced to a functional trickle — the SPECIFIC
+## complaint this guarantee exists for ("circles are rare around it so flow
+## can't keep the heart alive" even though a path exists and is fed). Wide
+## (near-full sustain) while still walking the teaching schedule, so a first
+## board never has to feel that trickle at all; falls to a low floor once the
+## run is at full intensity, on the same _hardcore_ramp() lever
+## TEACHING_PRESSURE_MULT/TEACHING_APPETITE_MULT already use — losing ground
+## late is intended, going to literally nothing is not.
+const THROUGHPUT_MARGIN_TEACHING := 1.0
+## Was 0.3 — raised alongside this pass's broader generosity push (EXERTION_
+## SPAN, HARDCORE_RAMP_TIME, FUEL_CAP). The late game staying genuinely
+## losable is still the intent; 0.45 just means "losing ground" doesn't start
+## from as thin a trickle as 0.3 allowed.
+const THROUGHPUT_MARGIN_HARDCORE := 0.45
+
+## Longer than RESCUE_DEBOUNCE/CHAIN_STALL_DEBOUNCE on purpose: appetite rides
+## a sine wave (see APPETITE_WAVE_PERIOD, 17s) that alone walks needed_rate
+## up and down, so a lean-but-working single-chain board can drift under
+## margin for a few seconds every wave cycle without ever being in real
+## trouble. A short debounce reacted to that wobble, not a genuine shortfall.
+const THROUGHPUT_DEBOUNCE := 4.0
+var _throughput_stall := 0.0
+## Rescue Wells forced in by a THROUGHPUT shortfall specifically — a chain
+## that exists and is fed, just too thinly to keep up. Distinct from
+## `rescues` (nothing reachable at all) and `chain_rescues` (a tier's tool or
+## link is dead): a flood here means the RATE side of the tuning (yields,
+## EDGE_RATE, well density near a tier's entry point) needs work even though
+## both existence guarantees read healthy.
+var throughput_rescues := 0
+
+
+## Items/sec of `demand` the Heart needs right now to hold fuel steady,
+## reading combo as zero — combo only ever helps, it must never be load-
+## bearing for the guarantee itself.
+func _needed_rate() -> float:
+	var interval := Beat.interval()
+	if interval <= 0.0 or interval == INF:
+		return 0.0
+	var gain: float = FUEL_BY_RES.get(demand, 1.0)
+	return appetite() / interval / gain
+
+
+## RAW is the one tier with no tool of its own — the Heart eats it directly.
+## Reachability here mirrors _has_reachable_supply's accept-list (a healthy
+## Well or a RAW-eating Forge; a Loom in reach is not a move, it just looks
+## like one) but walks it out through every hop instead of stopping at one —
+## Vein.MAX_LEN's own doc comment is explicit that a spread-out RAW network is
+## expected to chain distant Wells through nearer ones on the way to the
+## Heart, so a well three relays out still counts.
+func _raw_reachable_wells() -> Array[VNode]:
+	var out: Array[VNode] = []
+	var visited := {heart: true}
+	var frontier: Array[VNode] = [heart]
+	while not frontier.is_empty():
+		var cur: VNode = frontier.pop_back()
+		for m in nodes:
+			if visited.has(m) or m.corrupted or not in_reach(cur, m):
+				continue
+			var relay := m.kind == VNode.Kind.WELL \
+					or (m.kind == VNode.Kind.FORGE and m.recipe.has(VNode.Res.RAW))
+			if not relay:
+				continue
+			visited[m] = true
+			frontier.append(m)
+			if m.kind == VNode.Kind.WELL and m.reserve > 0.0:
+				out.append(m)
+	return out
+
+
+## Best steady-state items/sec of `demand` a BUILDABLE lineage could sustain
+## right now — buildable, not built, same philosophy as
+## _has_reachable_supply/_any_kind_fed above: this is "could the player make
+## this work", not "have they already".
+func _achievable_rate() -> float:
+	if demand == VNode.Res.RAW:
+		return _raw_reachable_wells().size() * (1.0 / VNode.WELL_PERIOD)
+	var kind := VNode.Kind.FORGE
+	match demand:
+		VNode.Res.CLOTH: kind = VNode.Kind.LOOM
+		VNode.Res.PRISM: kind = VNode.Kind.KILN
+	var best := 0.0
+	for n in nodes:
+		if n.kind != kind or n.corrupted or not in_reach(n, heart):
+			continue
+		best = maxf(best, _node_rate(n, {}))
+	return best
+
+
+## Recursive bottleneck: a tool's output rate is capped by the slowest of its
+## own recipe needs, where each need's rate is everything live and in reach
+## that makes it, summed, divided by how many of it the recipe actually wants
+## (a canonical [RAW, RAW] wants 2 total, from any mix of Wells — not two
+## separately-tracked slots). `seen` guards the cycle an exotic recipe can
+## create once every tier is unlocked (a Loom that wants PRISM, fed by a Kiln
+## that wants CLOTH, fed by that same Loom) — without it this recurses
+## forever the moment such a pair rolls.
+func _node_rate(n: VNode, seen: Dictionary) -> float:
+	if n == null or n.corrupted or seen.has(n):
+		return 0.0
+	seen = seen.duplicate()
+	seen[n] = true
+	if n.kind == VNode.Kind.WELL:
+		return 1.0 / VNode.WELL_PERIOD if n.reserve > 0.0 else 0.0
+	if n.recipe.is_empty():
+		return 0.0
+	var needed := {}
+	for r in n.recipe:
+		needed[r] = needed.get(r, 0) + 1
+	var worst := INF
+	for res_kind in needed:
+		var incoming := 0.0
+		for m in nodes:
+			if m == n or m.corrupted or m.produces != res_kind or not in_reach(n, m):
+				continue
+			incoming += minf(_node_rate(m, seen), EDGE_RATE)
+		worst = minf(worst, incoming / float(needed[res_kind]))
+	return minf(worst, EDGE_RATE)
+
+
+func _ensure_throughput(delta: float) -> void:
+	var needed := _needed_rate()
+	if needed <= 0.0:
+		_throughput_stall = 0.0
+		return
+	var margin := lerpf(THROUGHPUT_MARGIN_TEACHING, THROUGHPUT_MARGIN_HARDCORE, _hardcore_ramp())
+	var have := _achievable_rate()
+	if have >= needed * margin:
+		_throughput_stall = 0.0
+		return
+	_throughput_stall += delta
+	if _throughput_stall < THROUGHPUT_DEBOUNCE:
+		return
+	_throughput_stall = 0.0
+	throughput_rescues += 1
+	_spawn_rescue_well()
+
+
 # --- Graph: everything flows downhill toward demand -------------------------
 
 func _rebuild_graph() -> void:
@@ -1749,24 +1967,12 @@ func _find_vein(a: VNode, b: VNode) -> Vein:
 
 
 ## Can these two ever be joined directly? Reach is the constraint the whole
-## puzzle rests on — see Vein.MAX_LEN. A tool<->Heart pair reaches farther (see
-## TOOL_HEART_REACH), so the chain can sit scattered in the field.
+## puzzle rests on — see Vein.MAX_LEN. One radius for every pair, no
+## exceptions — a tool<->Heart pair used to reach farther (the since-removed
+## TOOL_HEART_REACH); that bonus is now just baked into Vein.MAX_LEN itself,
+## so every pair gets it.
 func in_reach(a: VNode, b: VNode) -> bool:
-	return a.position.distance_to(b.position) <= reach_limit(a, b)
-
-
-## Max span at which `a` and `b` may be joined. Extended only for a
-## tool<->Heart link; everything else is the plain Vein.MAX_LEN.
-func reach_limit(a: VNode, b: VNode) -> float:
-	var has_heart := a.kind == VNode.Kind.HEART or b.kind == VNode.Kind.HEART
-	var has_tool := _is_tool_kind(a.kind) or _is_tool_kind(b.kind)
-	if has_heart and has_tool:
-		return Vein.MAX_LEN * TOOL_HEART_REACH
-	return Vein.MAX_LEN
-
-
-func _is_tool_kind(k: int) -> bool:
-	return k == VNode.Kind.FORGE or k == VNode.Kind.LOOM or k == VNode.Kind.KILN
+	return a.position.distance_to(b.position) <= Vein.MAX_LEN
 
 
 func _add_vein(a: VNode, b: VNode) -> void:
@@ -2389,22 +2595,15 @@ func _draw_drag() -> void:
 
 	# How far this node can reach. Only shown while dragging — the constraint
 	# appears exactly when it is the question being asked, and never otherwise.
+	# One ring for every node kind now — no separate outer ring, since there
+	# is no longer a second, longer reach for a tool/Heart pair to show.
 	var reach := Palette.HEART
 	reach.a = 0.10
 	drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN, 0.0, TAU, 64, reach, 1.5, true)
-	# A tool (or the Heart) also gets a fainter OUTER ring at the extended
-	# tool<->Heart reach, so the longer link a scattered chain relies on is a
-	# visible affordance, not a hidden rule.
-	if _is_tool_kind(_drag_from.kind) or _drag_from.kind == VNode.Kind.HEART:
-		var far := Palette.HEART
-		far.a = 0.05
-		drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN * TOOL_HEART_REACH,
-			0.0, TAU, 72, far, 1.2, true)
 
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
-	var limit := reach_limit(_drag_from, to) if to != null else Vein.MAX_LEN
-	var stretched := _drag_from.position.distance_to(end) > limit
+	var stretched := _drag_from.position.distance_to(end) > Vein.MAX_LEN
 	var crossing := to != null and to != _drag_from and _crossing_vein(_drag_from, to) != null
 
 	var col := Palette.VEIN_STRAINED if stretched or crossing else Palette.VEIN_LIVE

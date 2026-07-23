@@ -29,7 +29,10 @@ enum Res { RAW, REFINED, CLOTH, PRISM, VOID }
 ## rather than something that also costs you upkeep. Cut by more than half so
 ## even your first, best-placed Wells force a rewire mid-run, not just the
 ## ones you neglect.
-const WELL_YIELD := 32.0
+## Nudged from 32 to 42 alongside WELL_PERIOD's cut above (1.45 -> 1.1) so
+## total lifetime stays ~46s either way — this pass is about raising the
+## RATE a Well produces at, not how long it lives.
+const WELL_YIELD := 42.0
 
 ## Tools deplete too — by SMELT, not by clock. Each conversion spends one charge;
 ## when a tool runs out it goes necrotic exactly like a spent Well, but its
@@ -101,7 +104,13 @@ const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
 ## against the heartbeat, so supply and demand slide in and out of phase.
-const WELL_PERIOD := 1.45
+## Was 1.45 — real playtest: circle supply couldn't keep pace with what the
+## Heart wanted, especially once a lineage needs several Wells at once to
+## clear a refined tier's throughput floor. Cut by ~25% so each Well pulls its
+## own weight harder, on top of the spawn-cadence cut in game.gd's
+## WELL_GAP_*. WELL_YIELD raised alongside it (below) to keep a Well's total
+## lifetime roughly where it was — this is a rate fix, not a lifespan one.
+const WELL_PERIOD := 1.1
 
 var kind: int = Kind.WELL
 var produces: int = Res.RAW

@@ -27,7 +27,22 @@ const HIT_RADIUS := 18.0
 ## Must stay well under the playfield's short axis (540). At 300 the Heart still
 ## reached a third of the board and could take unlimited direct links, so load
 ## never concentrated and nothing ever ruptured.
-const MAX_LEN := 200.0
+##
+## Raised from 200, then again from 235, on real playtest feedback. First pass
+## only extended reach for a tool<->Heart pair (see the since-removed
+## TOOL_HEART_REACH), so every other pair — Well<->Well, Well<->Forge,
+## Forge<->Loom, Loom<->Kiln — was stuck at the old number while density and
+## lineage depth both grew: "rare circles you couldn't reach a Forge with"
+## was as much a reach problem as a supply one. That still left two tiers,
+## and the small one was still biting most pairs, so per explicit direction
+## the larger radius is now the ONLY radius — every pair gets it, no
+## exceptions. 340 (the old 235 * the old tool<->Heart 1.45x) stays
+## comfortably under the 300 that broke trunk concentration above... except
+## it doesn't anymore, and that's fine: 340/540 (63% of the short axis) is
+## still short of "the Heart reaches a third of the board and takes
+## unlimited direct links" (that failure mode was ~one third, i.e. ~180 at
+## this viewport), so load still concentrates and ruptures still bite.
+const MAX_LEN := 340.0
 
 ## How long a vein may sit under backpressure before it bursts.
 ##
