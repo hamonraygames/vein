@@ -16,7 +16,7 @@ const COL := Color(0.56, 0.04, 0.06)
 
 const BURST_INTERVAL := 0.1
 const BURST_COUNT := 18
-const GRAVITY := 140.0
+const GRAVITY := 90.0
 
 var _origin := Vector2(270.0, 515.0)
 var _rng := RandomNumberGenerator.new()
@@ -41,14 +41,15 @@ func start(heart_pos: Vector2, run_seed: int) -> void:
 func _spawn_burst() -> void:
 	for i in BURST_COUNT:
 		var a := _rng.randf() * TAU
-		# Fast and long-lived enough to cross the whole screen from the
-		# Heart's position, not just spatter the area right around it.
-		var speed := _rng.randf_range(260.0, 760.0)
+		# Slower than the shard size suggests — big, heavy chunks that drift
+		# rather than shoot, but live long enough to still drift clear to the
+		# screen edges from the Heart's position.
+		var speed := _rng.randf_range(90.0, 260.0)
 		var n := _rng.randi_range(3, 5)
 		var shard := PackedVector2Array()
 		for j in n:
 			var sa := TAU * float(j) / float(n) + _rng.randf_range(-0.35, 0.35)
-			var sr := _rng.randf_range(9.0, 20.0)
+			var sr := _rng.randf_range(16.0, 34.0)
 			shard.append(Vector2(cos(sa), sin(sa)) * sr)
 		_drops.append({
 			"p": _origin,
@@ -57,7 +58,7 @@ func _spawn_burst() -> void:
 			"rot": _rng.randf() * TAU,
 			"spin": _rng.randf_range(-9.0, 9.0),
 			"life": 0.0,
-			"max_life": _rng.randf_range(0.9, 1.6),
+			"max_life": _rng.randf_range(1.4, 2.4),
 		})
 
 
