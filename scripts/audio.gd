@@ -226,8 +226,12 @@ func swallow(res_kind: int, fullness: float, wanted: bool = true) -> void:
 	# richer; a fuller Heart rings slightly brighter. The range is deliberately
 	# narrow because dragging a bell far off its recorded pitch is what made
 	# these sound like drums in the first place. PRISM extends the ladder
-	# below CLOTH, continuing "fuller shape, lower/richer tone".
-	if res_kind == VNode.Res.PRISM:
+	# below CLOTH, continuing "fuller shape, lower/richer tone"; HEXAGON
+	# extends it once more, the deepest and quietest note in the set — a
+	# Crucible delivery should feel rarer even in the ear, not just the eye.
+	if res_kind == VNode.Res.HEXAGON:
+		play("refined", -16.0, lerpf(0.66, 0.78, fullness))
+	elif res_kind == VNode.Res.PRISM:
 		play("refined", -18.0, lerpf(0.78, 0.90, fullness))
 	elif res_kind == VNode.Res.CLOTH:
 		play("refined", -20.0, lerpf(0.90, 1.02, fullness))

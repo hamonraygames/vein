@@ -18,6 +18,13 @@ extends Node2D
 
 var _font: Font
 var _swell := 0.0
+## Separate from `_swell` (a gentle every-beat ambient pulse regardless of
+## whether anything happened): this punches specifically when `score` itself
+## just went up, so the running total visibly reacts to the gain that fed
+## it — the same Notcoin-style "confirmation" language float_text.gd already
+## uses for the delivery pop, applied to the number it's adding up to.
+var _punch := 0.0
+var _last_score := 0
 
 @onready var game: Node2D = get_parent()
 
@@ -30,6 +37,11 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_swell = maxf(0.0, _swell - delta * 4.0)
+	_punch = maxf(0.0, _punch - delta * 3.4)
+	if game != null:
+		if game.score > _last_score:
+			_punch = 1.0
+		_last_score = game.score
 	queue_redraw()
 
 
@@ -42,9 +54,10 @@ func _draw() -> void:
 	var vp: Vector2 = game.design_size()
 	var origin := Vector2(vp.x * 0.5, 70.0)
 
-	var col := Palette.HEART
-	col.a = 0.30 + _swell * 0.34
-	_centred(str(game.score), origin, 26, col)
+	var col := Palette.SCORE
+	col.a = clampf(0.30 + _swell * 0.34 + _punch * 0.5, 0.0, 1.0)
+	var size := 30 + int(_punch * 9.0)
+	_centred(str(game.score), origin, size, col)
 
 
 func _centred(text: String, at: Vector2, size: int, col: Color) -> void:

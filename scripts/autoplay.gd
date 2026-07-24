@@ -51,10 +51,13 @@ static func step(game) -> void:
 	#   REFINED: Well -> Forge -> Heart
 	#   CLOTH:   Well -> Forge -> Loom -> Heart
 	#   PRISM:   Well -> Forge -> Loom -> Kiln -> Heart
+	#   HEXAGON: Well -> Forge -> Loom -> Kiln -> Crucible -> Heart
 	var need_forge: bool = game.demand == VNode.Res.REFINED or game.demand == VNode.Res.CLOTH \
-		or game.demand == VNode.Res.PRISM
-	var need_loom: bool = game.demand == VNode.Res.CLOTH or game.demand == VNode.Res.PRISM
-	var need_kiln: bool = game.demand == VNode.Res.PRISM
+		or game.demand == VNode.Res.PRISM or game.demand == VNode.Res.HEXAGON
+	var need_loom: bool = game.demand == VNode.Res.CLOTH or game.demand == VNode.Res.PRISM \
+		or game.demand == VNode.Res.HEXAGON
+	var need_kiln: bool = game.demand == VNode.Res.PRISM or game.demand == VNode.Res.HEXAGON
+	var need_crucible: bool = game.demand == VNode.Res.HEXAGON
 
 	var pick: VNode = null
 	var target: VNode = null
@@ -72,8 +75,21 @@ static func step(game) -> void:
 			var score: float = float(m.depth) * 10000.0 + n.position.distance_to(m.position)
 			# Getting the demanded tool chain connected, then fed, outranks
 			# everything. These are coarse priorities for a floor bot, not optimal
-			# play.
-			if need_kiln:
+			# play. need_crucible checked first — it, need_kiln, need_loom and
+			# need_forge are no longer mutually exclusive (HEXAGON demand needs
+			# the whole chain), so the DEEPEST need must win the branch.
+			if need_crucible:
+				if n.kind == VNode.Kind.CRUCIBLE:
+					score -= 3500000.0
+				elif n.kind == VNode.Kind.KILN and m.kind == VNode.Kind.CRUCIBLE:
+					score -= 3000000.0
+				elif n.kind == VNode.Kind.LOOM and m.kind == VNode.Kind.KILN:
+					score -= 2500000.0
+				elif n.kind == VNode.Kind.FORGE and m.kind == VNode.Kind.LOOM:
+					score -= 2000000.0
+				elif n.kind == VNode.Kind.WELL and m.kind == VNode.Kind.FORGE:
+					score -= 1500000.0
+			elif need_kiln:
 				if n.kind == VNode.Kind.KILN:
 					score -= 3000000.0
 				elif n.kind == VNode.Kind.LOOM and m.kind == VNode.Kind.KILN:

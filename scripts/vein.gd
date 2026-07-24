@@ -54,10 +54,11 @@ const MAX_LEN := 340.0
 ## length-independent and is exactly what "carrying more than it can bear" means.
 ##
 ## This MUST exceed the time to drain one full buffer, or connecting an orphaned
-## Well bursts its own fresh vein: an orphan sits at VNode.BUFFER_CAP, and
-## clearing it takes BUFFER_CAP / (SPEED/DOT_SPACING - 1/WELL_PERIOD) ~= 2.9s,
-## which at 2.5s meant every new link ruptured on contact. Keep roughly 2x that
-## drain time so only sustained oversubscription bursts.
+## Well bursts its own fresh vein: an orphan sits at a full buffer (a Well's own
+## VNode.buffer_cap(), 6), and clearing it takes buffer_cap / (SPEED/DOT_SPACING
+## - 1/WELL_PERIOD) ~= 2.9s, which at 2.5s meant every new link ruptured on
+## contact. Keep roughly 2x that drain time so only sustained oversubscription
+## bursts.
 const RUPTURE_TIME := 6.0
 
 signal ruptured(vein: Vein)
@@ -89,6 +90,13 @@ var peak_stress := 0.0
 ## heartbeat a routing mechanic, not just a soundtrack.
 var tempo_grade := 0
 var _blocked := false
+
+## Set every frame by game.gd: true while this vein is actively carrying
+## something the Heart does not currently want, straight into the Heart.
+## Drives a visible jiggle in _draw() — a line should be able to show it's
+## wrong on its own, not just leave the player to notice the eventual dull
+## "wasted" pop at the far end.
+var wrong_flow := false
 
 ## Playtest: "removing edges seems to be not clear for players." A cut vein
 ## used to vanish the instant it was freed — no feedback beyond a burst that
@@ -339,7 +347,11 @@ func _draw() -> void:
 		col = col.lerp(Palette.VEIN_STRAINED, 0.35 + s * 0.65)
 		width += s * (3.0 + throb * 3.5)
 
-	draw_polyline(pts, col, width, true)
+	if wrong_flow:
+		col = col.lerp(Palette.VEIN_STRAINED, 0.5)
+		draw_polyline(_wrong_jiggle(), col, width, true)
+	else:
+		draw_polyline(pts, col, width, true)
 
 	for d in dots:
 		var p := sample(d.t)
@@ -348,6 +360,25 @@ func _draw() -> void:
 		halo.a = 0.16
 		draw_circle(p, 7.0, halo)
 		draw_circle(p, 3.4, c)
+
+
+## A visual-only jitter of `pts` for wrong_flow — the underlying path (and
+## therefore dot sampling) is untouched, only the drawn line wobbles. A
+## smooth per-point sine rather than raw noise, so it reads as a deliberate
+## nervous shiver, not a rendering glitch; endpoints stay pinned to the nodes
+## (amplitude tapers to 0 there) and the middle wobbles most.
+func _wrong_jiggle() -> PackedVector2Array:
+	if pts.size() < 3:
+		return pts
+	var normal := (pts[pts.size() - 1] - pts[0]).orthogonal().normalized()
+	var t := float(Time.get_ticks_msec()) * 0.011
+	var out := PackedVector2Array()
+	var last := pts.size() - 1
+	for i in pts.size():
+		var f := float(i) / float(last)
+		var amp := sin(f * PI) * 3.2
+		out.append(pts[i] + normal * (sin(t * 10.0 + f * 16.0) * amp))
+	return out
 
 
 ## Sink-side easing: items accelerate into a node — they are being swallowed.

@@ -4,8 +4,11 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-enum Kind { HEART, WELL, FORGE, LOOM, KILN }
-enum Res { RAW, REFINED, CLOTH, PRISM, VOID }
+enum Kind { HEART, WELL, FORGE, LOOM, KILN, CRUCIBLE }
+## HEXAGON appended after VOID (not inserted before it) — VOID's numeric
+## value must not move, nothing else in the file ever assumes the LAST
+## entry is the deepest tier, everything reaches tiers by name.
+enum Res { RAW, REFINED, CLOTH, PRISM, VOID, HEXAGON }
 
 ## Tools condense inputs into one stronger output — but WHICH inputs is now
 ## per-instance: every tool spawns with its own `recipe` (see below), rolled
@@ -46,6 +49,13 @@ const WELL_YIELD := 42.0
 const FORGE_YIELD := 26.0
 const LOOM_YIELD := 20.0
 const KILN_YIELD := 16.0
+## The Crucible is the one VEIN.md always promised and the game never had:
+## "the Heart demands hexagons, which only a rare Crucible can make." Fewer
+## charges than a Kiln, continuing the same "higher tiers get fewer charges"
+## curve — a Crucible existing at all is already a huge investment (2 PRISM
+## in, each of which was already 2 CLOTH, each of which was already 2
+## REFINED...), so losing one should sting more than losing a Kiln does.
+const CRUCIBLE_YIELD := 10.0
 
 ## How much more a corrupted node's poison hurts the Heart, per delivered VOID
 ## dot, relative to a circle's (see game.FUEL_BY_RES[VOID] and _deliver). A
@@ -56,6 +66,7 @@ const POISON_POT_BY_KIND := {
 	Kind.FORGE: 1.35,
 	Kind.LOOM: 1.7,
 	Kind.KILN: 2.1,
+	Kind.CRUCIBLE: 2.5,
 }
 
 ## A spent Well does not politely stop. It goes necrotic and starts pumping VOID
@@ -100,7 +111,6 @@ const WITHER_WARN_AT := 0.6
 
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
-const BUFFER_CAP := 6
 
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
 ## against the heartbeat, so supply and demand slide in and out of phase.
@@ -158,6 +168,12 @@ var corrupted := false
 ## How hard this node's poison hits once corrupted, relative to a circle's — set
 ## from POISON_POT_BY_KIND the moment it turns. 1.0 until then.
 var poison_pot := 1.0
+## The identity colour this node had the instant before it corrupted —
+## `produces` gets overwritten to VOID by corrupt() below, so without this
+## the glitch render has no way to know what it USED to be. Drives
+## _draw_necrotic's tint: each corrupted object glitches in a darkened
+## version of its own colour, not a single generic violet for everything.
+var _corrupt_tint := Palette.VOID
 ## Tools only: reserve spent per smelt. Externally driven by game.gd from run
 ## intensity (see game._process/TOOL_DEPLETION_EARLY), NOT a flat 1.0. "Start
 ## gentle, get hardcore" — same shape every other escalating threat in this
@@ -189,12 +205,12 @@ var _teach_t := 0.0
 const TEACH_REPS := 3
 const TEACH_REP_TIME := 1.8
 
-## Heart only: how full it is, 0..1. Drawn as a level inside the hexagon so the
+## Heart only: how full it is, 0..1. Drawn as a level inside the heart so the
 ## goal of the game is legible on sight — the vessel is emptying, fill it. This
 ## is the one thing the player must understand and it must never need a number.
 var fuel_ratio := 1.0
 
-## Heart only: the shape it is asking for. Drawn as a glyph inside the hexagon,
+## Heart only: the shape it is asking for. Drawn as a glyph inside the heart,
 ## which is the entire teaching mechanism for Forges — the Heart visibly wants a
 ## triangle, and the only thing on the board that makes triangles is the triangle
 ## node. No text, no tutorial, no red-triangle mystery.
@@ -212,6 +228,7 @@ func _ready() -> void:
 		Kind.FORGE: reserve = FORGE_YIELD
 		Kind.LOOM: reserve = LOOM_YIELD
 		Kind.KILN: reserve = KILN_YIELD
+		Kind.CRUCIBLE: reserve = CRUCIBLE_YIELD
 	Beat.beat.connect(_on_beat)
 
 
@@ -242,7 +259,7 @@ func _process(delta: float) -> void:
 		if _emit_accum >= period:
 			_emit_accum -= period
 			_emit()
-	elif kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN:
+	elif kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN or kind == Kind.CRUCIBLE:
 		_smelt()
 
 	if corrupted:
@@ -283,7 +300,7 @@ func wither_ratio() -> float:
 
 
 func _emit() -> void:
-	if buffer.size() >= BUFFER_CAP:
+	if buffer.size() >= buffer_cap():
 		return
 	if corrupted:
 		buffer.append(Res.VOID)
@@ -292,10 +309,17 @@ func _emit() -> void:
 	buffer.append(produces)
 	pulse = 1.0
 	# Reserve is only spent on an item that actually left, so a Well backed up
-	# behind a full buffer is not quietly bleeding out.
-	reserve -= 1.0
-	if reserve <= 0.0:
-		corrupt()
+	# behind a full buffer is not quietly bleeding out. It is ALSO only spent
+	# while actually connected to the Heart (depth >= 0) — a Well feeding a
+	# not-yet-connected stockpile (see feed_depth) is staging supply for
+	# later, not spending it. Charging reserve for that defeated the entire
+	# point of pre-building a reserve before you need it: "I start filling
+	# disconnected shapes to have reserve... but before I use them they get
+	# poisonous."
+	if depth >= 0:
+		reserve -= 1.0
+		if reserve <= 0.0:
+			corrupt()
 
 
 func corrupt() -> void:
@@ -303,6 +327,7 @@ func corrupt() -> void:
 		return
 	corrupted = true
 	reserve = 0.0
+	_corrupt_tint = Palette.of_res(produces)
 	produces = Res.VOID
 	# A tool's corpse is nastier than a circle's — its poison hits the Heart
 	# harder per dot (see game._deliver). Set at the moment of turning so it
@@ -323,6 +348,7 @@ func reserve_ratio() -> float:
 		Kind.FORGE: cap = FORGE_YIELD
 		Kind.LOOM: cap = LOOM_YIELD
 		Kind.KILN: cap = KILN_YIELD
+		Kind.CRUCIBLE: cap = CRUCIBLE_YIELD
 		_: return 0.0
 	return clampf(reserve / cap, 0.0, 1.0)
 
@@ -340,14 +366,15 @@ func can_accept(kind_in: int) -> bool:
 		return true
 	if _accepts_tool_input(kind_in):
 		return true
-	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN) and kind_in != Res.VOID:
+	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN or kind == Kind.CRUCIBLE) \
+			and kind_in != Res.VOID:
 		return false
-	return buffer.size() < BUFFER_CAP
+	return buffer.size() < buffer_cap()
 
 
 func take(kind_in: int) -> bool:
 	if _accepts_tool_input(kind_in):
-		if intake.size() >= BUFFER_CAP:
+		if intake.size() >= buffer_cap():
 			return false
 		intake.append(kind_in)
 		return true
@@ -357,9 +384,10 @@ func take(kind_in: int) -> bool:
 	# reaches the Heart still mislabeled, which read as "I built the chain and
 	# died anyway." VOID is the one deliberate exception: tools cannot launder
 	# rot into food, so poison still passes straight through to the Heart.
-	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN) and kind_in != Res.VOID:
+	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN or kind == Kind.CRUCIBLE) \
+			and kind_in != Res.VOID:
 		return false
-	if buffer.size() >= BUFFER_CAP:
+	if buffer.size() >= buffer_cap():
 		return false
 	buffer.append(kind_in)
 	pulse = maxf(pulse, 0.6)
@@ -389,7 +417,7 @@ func _accepts_tool_input(kind_in: int) -> bool:
 ## the item count carrying the same run of fuel, which is why a tool is the
 ## answer to a bursting trunk and not just a fuel multiplier.
 func _smelt() -> void:
-	if recipe.is_empty() or intake.size() < recipe.size() or buffer.size() >= BUFFER_CAP:
+	if recipe.is_empty() or intake.size() < recipe.size() or buffer.size() >= buffer_cap():
 		return
 	intake.clear()
 	buffer.append(produces)
@@ -401,10 +429,14 @@ func _smelt() -> void:
 	Audio.play("refined", -20.0, 1.35)
 	# A tool spends itself as it works: milk it and it dies sooner, then goes
 	# necrotic like a spent Well but with nastier poison (see corrupt()). The
-	# rate itself ramps with the run — see depletion_rate.
-	reserve -= depletion_rate
-	if reserve <= 0.0:
-		corrupt()
+	# rate itself ramps with the run — see depletion_rate. Same stockpiling
+	# exemption as a Well's _emit(): only while actually connected to the
+	# Heart (depth >= 0) — smelting into a pre-staged, not-yet-connected
+	# buffer must not be able to kill the tool before that buffer is ever used.
+	if depth >= 0:
+		reserve -= depletion_rate
+		if reserve <= 0.0:
+			corrupt()
 
 
 ## Round-robin so a node with two downhill veins splits its output between them
@@ -427,41 +459,152 @@ func _draw() -> void:
 		return
 
 	match kind:
-		Kind.HEART: _draw_hex(r, col)
+		Kind.HEART: _draw_heart_shape(r, col)
 		Kind.FORGE: _draw_tri(r, col)
 		Kind.LOOM: _draw_square(r, col)
 		Kind.KILN: _draw_pentagon(r, col)
+		Kind.CRUCIBLE: _draw_hexagon(r, col)
 		_: _draw_ring(r, col)
 
 	_draw_buffer(r, col)
 
 
-func _draw_hex(r: float, col: Color) -> void:
-	var hex := PackedVector2Array()
-	for i in 6:
-		var a := TAU * (float(i) / 6.0) - PI * 0.5
-		hex.append(Vector2(cos(a), sin(a)) * r)
+## Fifth design for this shape. A literal smooth heart curve (too ornate,
+## first pass) -> a hand-picked straight-edge polygon to "match the other
+## shapes" (lost the heart, then read as thin, then still read as ugly even
+## fixed) -> a low-facet sample of the curve (still not right) -> this: back
+## to a genuinely smooth curve, at real resolution — "let's see a normal
+## heart." Same proven formula throughout (x = 16 sin^3 t, y = 13 cos t -
+## 5 cos 2t - 2 cos 3t - cos 4t); only the sample count changed, from a
+## deliberately low facet count down to enough points that draw_polyline's
+## straight segments are imperceptible and it reads as an actual curve.
+const HEART_SAMPLES := 48
+
+## Rounds one sharp vertex into a soft bezier arc — the bottom tip, and each
+## lobe's own top peak. Replaces the points within `spread` of `corner_i`
+## with a quadratic bezier from one outer neighbor to the other, control
+## point pulled partway (by `roundness`, 0=untouched..1=fully flat) toward
+## the original corner — that partial pull is what makes it blunt rather
+## than flat. A bezier between 3 points can never self-cross; an earlier
+## version of this blended points toward a straight chord by index instead,
+## which could and did — it put a small inverted notch at the bottom, a
+## real regression, not just "still pointy."
+static func _round_corner(pts: PackedVector2Array, corner_i: int, roundness: float) -> PackedVector2Array:
+	var n := pts.size()
+	var spread := maxi(2, n / 10)
+	var outer_a: Vector2 = pts[(corner_i - spread + n) % n]
+	var outer_b: Vector2 = pts[(corner_i + spread) % n]
+	var control: Vector2 = outer_a.lerp(outer_b, 0.5).lerp(pts[corner_i], roundness)
+	var out := pts.duplicate()
+	for k in range(-spread, spread + 1):
+		var idx := (corner_i + k + n) % n
+		var s := float(k + spread) / float(2 * spread)
+		var q0 := outer_a.lerp(control, s)
+		var q1 := control.lerp(outer_b, s)
+		out[idx] = q0.lerp(q1, s)
+	return out
+
+
+## Builds the unit heart polygon fresh each call: even at HEART_SAMPLES
+## points this is free (a few trig calls), and computing it live means the
+## shape and its centering can never drift out of sync with each other the
+## way a hand-copied constant list could. Bounding-box normalized to fit
+## `r`, THEN re-centered on its own AREA CENTROID (shoelace
+## formula) so local origin — where _draw_demand draws the requested-shape
+## glyph — sits at the shape's actual visual middle, not its bounding box's:
+## a heart's mass concentrates in the lobes, so those aren't the same point,
+## and drawing the glyph at the wrong one read as "not spread equally."
+func _heart_points(r: float) -> PackedVector2Array:
+	var raw := PackedVector2Array()
+	var min_p := Vector2(INF, INF)
+	var max_p := Vector2(-INF, -INF)
+	for i in HEART_SAMPLES:
+		var t := TAU * float(i) / float(HEART_SAMPLES)
+		var x := 16.0 * pow(sin(t), 3.0)
+		var yf := -(13.0 * cos(t) - 5.0 * cos(2.0 * t) - 2.0 * cos(3.0 * t) - cos(4.0 * t))
+		var p := Vector2(x, yf)
+		raw.append(p)
+		min_p.x = minf(min_p.x, p.x)
+		min_p.y = minf(min_p.y, p.y)
+		max_p.x = maxf(max_p.x, p.x)
+		max_p.y = maxf(max_p.y, p.y)
+	var scale := (r * 2.0) / maxf(max_p.x - min_p.x, max_p.y - min_p.y)
+	var mid := (min_p + max_p) * 0.5
+	var scaled := PackedVector2Array()
+	for p in raw:
+		scaled.append((p - mid) * scale)
+
+	# Round the sharp corners — bottom tip, then the notch BETWEEN the two
+	# lobes at top-center (not the lobes' own outer peaks — those stay as
+	# sampled). The formula's natural cusps are authentic to the reference
+	# curve but read as too sharp for this game's soft register. See
+	# _round_corner.
+	var tip_i := 0
+	var tip_y := -INF
+	for i in scaled.size():
+		if scaled[i].y > tip_y:
+			tip_y = scaled[i].y
+			tip_i = i
+	scaled = _round_corner(scaled, tip_i, 0.45)
+
+	# The notch sits at t=0 in the sampling loop above — i=0 exactly — the
+	# one point on the curve with x=0 in the upper half, between the two
+	# lobes. Neither rounding call above touches index 0 (tip_i sits near
+	# the middle of the array, far from it), so it's still the true notch.
+	scaled = _round_corner(scaled, 0, 0.5)
+
+	var area2 := 0.0
+	var cx := 0.0
+	var cy := 0.0
+	for i in scaled.size():
+		var p0 := scaled[i]
+		var p1 := scaled[(i + 1) % scaled.size()]
+		var cross := p0.x * p1.y - p1.x * p0.y
+		area2 += cross
+		cx += (p0.x + p1.x) * cross
+		cy += (p0.y + p1.y) * cross
+	var centroid := Vector2.ZERO
+	if absf(area2) > 0.0001:
+		centroid = Vector2(cx, cy) / (3.0 * area2)
+
+	var final := PackedVector2Array()
+	for p in scaled:
+		final.append(p - centroid)
+	return final
+
+
+const HEART_EDGES := HEART_SAMPLES
+
+func _draw_heart_shape(r: float, col: Color) -> void:
+	var heart := _heart_points(r)
 
 	# A dim wash so an empty Heart is still a shape, not a hole.
 	var base := col
 	base.a = 0.07 + pulse * 0.10
-	draw_colored_polygon(hex, base)
+	draw_colored_polygon(heart, base)
 
-	# The level itself: clip the hexagon to everything below the fuel line. A
-	# falling waterline is read instantly and without instruction; a bar or a
-	# number would be neither.
+	# The level itself: clip to everything below the fuel line. A falling
+	# waterline is read instantly and without instruction; a bar or a number
+	# would be neither. Bounds come from the heart's own extent (it isn't
+	# symmetric top/bottom — the tip reaches further than the lobes rise).
 	if fuel_ratio > 0.001:
-		var line_y := r - 2.0 * r * clampf(fuel_ratio, 0.0, 1.0)
+		var min_y := INF
+		var max_y := -INF
+		for p in heart:
+			min_y = minf(min_y, p.y)
+			max_y = maxf(max_y, p.y)
+		var line_y := max_y - (max_y - min_y) * clampf(fuel_ratio, 0.0, 1.0)
 		var below := PackedVector2Array([
-			Vector2(-r, line_y), Vector2(r, line_y), Vector2(r, r), Vector2(-r, r),
+			Vector2(-r * 2.0, line_y), Vector2(r * 2.0, line_y),
+			Vector2(r * 2.0, max_y), Vector2(-r * 2.0, max_y),
 		])
 		var fill := col
 		fill.a = 0.34 + pulse * 0.34
-		for poly in Geometry2D.intersect_polygons(hex, below):
+		for poly in Geometry2D.intersect_polygons(heart, below):
 			draw_colored_polygon(poly, fill)
 
-	var outline := hex.duplicate()
-	outline.append(hex[0])
+	var outline := heart.duplicate()
+	outline.append(heart[0])
 	draw_polyline(outline, col, 3.0, true)
 
 	_draw_demand(r)
@@ -471,9 +614,9 @@ func _draw_hex(r: float, col: Color) -> void:
 ## around the perimeter for `ratio` of its total length, then stops — the
 ## polygon equivalent of a circle's eroding reserve arc (see _draw_ring),
 ## so a tool's own body outline IS its remaining-charge gauge, not a
-## separate ring floating outside the shape. Feedback: the earlier separate
-## outer ring read as clutter; this folds the same information into the one
-## border the shape already has.
+## separate ring floating outside the shape. "Reserve" in feedback always
+## meant _draw_buffer's dots, never this border — this stays the plain
+## continuous eroding outline.
 func _draw_partial_outline(pts: PackedVector2Array, ratio: float, col: Color, width: float) -> void:
 	if ratio <= 0.0:
 		return
@@ -527,6 +670,13 @@ func _draw_demand(r: float) -> void:
 				pent.append(Vector2(cos(a), sin(a)) * s * 1.15)
 			pent.append(pent[0])
 			draw_polyline(pent, c, 2.4, true)
+		Res.HEXAGON:
+			var hex := PackedVector2Array()
+			for i in 6:
+				var a := TAU * (float(i) / 6.0) - PI * 0.5
+				hex.append(Vector2(cos(a), sin(a)) * s * 1.1)
+			hex.append(hex[0])
+			draw_polyline(hex, c, 2.4, true)
 		_:
 			draw_arc(Vector2.ZERO, s * 0.85, 0.0, TAU, 22, c, 2.4, true)
 
@@ -556,11 +706,18 @@ func _draw_ring(r: float, col: Color) -> void:
 		draw_arc(Vector2.ZERO, r, start, start + TAU * left, 32, col, 1.7, true)
 
 
-## A spent Well, gone necrotic — and WRONG in a way nothing healthy ever is:
+## A spent node, gone necrotic — and WRONG in a way nothing healthy ever is:
 ## it glitches. The shape stutters off its own centre, splits into offset
 ## ghost copies, grows unstable spikes, and gets sliced by scanline tears.
 ## Everything healthy in VEIN moves smoothly; this is the one thing on the
 ## board that moves BROKEN, which is exactly the alarm it should be.
+##
+## Tinted with the object's OWN colour (see _corrupt_tint, captured the
+## instant it turned), darkened and pulled partway toward VOID — a corrupted
+## Well glitches in dead gold, a corrupted Loom in dead stone, not every
+## corpse on the board wearing the identical violet. The violet pull keeps
+## "this is rot" legible at a glance even for a resource whose colour reads
+## close to it already.
 func _draw_necrotic(r: float) -> void:
 	var ms := Time.get_ticks_msec()
 	# Coarse time buckets so the glitch STUTTERS between held poses instead
@@ -572,14 +729,16 @@ func _draw_necrotic(r: float) -> void:
 	if g > 0.62:
 		jit = Vector2(_noise01(frame * 13 + 5) - 0.5, _noise01(frame * 17 + 9) - 0.5) * r * 0.55
 
-	var fill := Palette.VOID_DIM
+	var tint := _corrupt_tint.lerp(Palette.VOID, 0.3).darkened(0.35)
+	var tint_dim := tint.darkened(0.4)
+
+	var fill := tint_dim
 	fill.a = 0.55 + pulse * 0.35
 	draw_circle(jit, r * (0.9 + pulse * 0.15), fill)
 
-	# Split ghost copies: the same corpse, displaced, in the only cold colour
-	# on the board.
+	# Split ghost copies: the same corpse, displaced.
 	if g > 0.45:
-		var ghost := Palette.VOID
+		var ghost := tint
 		ghost.a = 0.22
 		var off := Vector2(r * (0.28 + g * 0.3), 0.0).rotated(g * TAU)
 		draw_arc(jit + off, r * 0.9, 0.0, TAU, 20, ghost, 1.6, true)
@@ -592,7 +751,7 @@ func _draw_necrotic(r: float) -> void:
 		var rr := r * ((1.05 + wob * 0.45) if i % 2 == 0 else (0.6 + wob * 0.2))
 		spikes.append(jit + Vector2(cos(a), sin(a)) * rr)
 	spikes.append(spikes[0])
-	draw_polyline(spikes, Palette.VOID, 2.0 + g * 1.4, true)
+	draw_polyline(spikes, tint, 2.0 + g * 1.4, true)
 
 	# Scanline tears: horizontal slices through the node, the visual language
 	# of a corrupted signal rather than a living thing.
@@ -600,7 +759,7 @@ func _draw_necrotic(r: float) -> void:
 		for i in 3:
 			var y := (_noise01(frame * 5 + i * 23) - 0.5) * r * 1.7
 			var wl := r * (0.7 + _noise01(frame * 9 + i * 31) * 0.9)
-			var tear := Palette.VOID
+			var tear := tint
 			tear.a = 0.35 + g * 0.3
 			draw_line(jit + Vector2(-wl, y), jit + Vector2(wl * 0.6, y), tear, 1.4, true)
 
@@ -731,6 +890,48 @@ func _draw_pentagon(r: float, col: Color) -> void:
 		draw_polyline(pts, halo, 2.0 + smelt_flash * 2.0, true)
 
 
+## A Crucible. The fifth tool and rarest by far — VEIN.md always promised it:
+## "the Heart demands hexagons, which only a rare Crucible can make." Same
+## ladder logic as every silhouette before it (one more side than the shape
+## before), so a hexagon reads as "one step past the pentagon" the instant
+## you see it, no new visual language needed even at the deepest tier.
+func _draw_hexagon(r: float, col: Color) -> void:
+	var s := r * (1.28 + smelt_flash * 0.12)
+	var hex := PackedVector2Array()
+	for i in 6:
+		var a := TAU * (float(i) / 6.0) - PI * 0.5
+		hex.append(Vector2(cos(a), sin(a)) * s)
+
+	var fill := col
+	fill.a = 0.07 + pulse * 0.20 + smelt_flash * 0.42
+	draw_colored_polygon(hex, fill)
+
+	var ghost := col
+	ghost.a = 0.14
+	var full := hex.duplicate()
+	full.append(hex[0])
+	draw_polyline(full, ghost, 1.3, true)
+
+	var edge := col
+	edge.a = 0.88 + pulse * 0.12 + smelt_flash * 0.12
+	_draw_partial_outline(hex, reserve_ratio(), edge, 2.6 + smelt_flash * 1.8)
+
+	_draw_recipe_slots(r)
+	if teach:
+		_draw_teach_demo(r)
+
+	if smelt_flash > 0.0:
+		var halo := Palette.HEXAGON
+		halo.a = smelt_flash * 0.68
+		var pts := PackedVector2Array()
+		var hs := s * (1.25 + (1.0 - smelt_flash) * 0.9)
+		for i in 6:
+			var a := TAU * (float(i) / 6.0) - PI * 0.5
+			pts.append(Vector2(cos(a), sin(a)) * hs)
+		pts.append(pts[0])
+		draw_polyline(pts, halo, 2.0 + smelt_flash * 2.0, true)
+
+
 ## Loops a few times on this tool's first-ever appearance: ghost dots of the
 ## recipe's inputs fall in from outside, the node flashes, one ghost dot of
 ## `produces` (the output) leaves. This is the exact motion a real feed will
@@ -786,59 +987,117 @@ func _draw_recipe_slots(r: float) -> void:
 			filled = true
 			have.remove_at(hi)
 		# Feedback: the unfilled state read as too pale/washed-out to register
-		# as "a shape" at all. Sharper on both counts now, while keeping a
-		# clear filled/unfilled contrast (still the whole point of the gauge).
+		# as "a shape" at all, and even the filled one was thinner than it
+		# needed to be against the body fill. Sharper on both counts again —
+		# unfilled 0.58 -> 0.8, filled 0.95 -> 1.0 — while keeping a clear
+		# filled/unfilled contrast (still the whole point of the gauge).
 		var col := Palette.of_res(res)
-		col.a = (0.95 if filled else 0.58) + smelt_flash * 0.1
-		var w := 2.4 if filled else 2.0
+		col.a = (1.0 if filled else 0.8) + smelt_flash * 0.1
+		var w := 2.9 if filled else 2.4
 		match res:
 			Res.REFINED:
-				_draw_mini_tri(p, s, col, w)
+				_draw_mini_tri(p, s, col, w, filled)
 			Res.CLOTH:
-				_draw_mini_square(p, s * 0.85, col, w)
+				_draw_mini_square(p, s * 0.85, col, w, filled)
 			Res.PRISM:
-				_draw_mini_pentagon(p, s, col, w)
+				_draw_mini_pentagon(p, s, col, w, filled)
+			Res.HEXAGON:
+				_draw_mini_hexagon(p, s, col, w, filled)
 			_:
 				draw_arc(p, s * 0.8, 0.0, TAU, 20, col, w, true)
 				if filled:
 					var fill := col
-					fill.a = 0.25
+					fill.a *= 0.75
 					draw_circle(p, s * 0.8, fill)
 
 
-func _draw_mini_tri(center: Vector2, size: float, col: Color, width: float) -> void:
+## `filled` (a slot an intake item has actually reached) gets a solid, sharp
+## fill on top of the outline, not just a brighter line — "when blood comes
+## inside a shape... make it sharper and filled, that way it's more
+## visible." An empty slot stays outline-only, still legible as "this is
+## what's needed" without reading as already satisfied.
+func _draw_mini_tri(center: Vector2, size: float, col: Color, width: float, filled: bool) -> void:
 	var tri := PackedVector2Array()
 	for i in 3:
 		var a := TAU * (float(i) / 3.0) - PI * 0.5
 		tri.append(center + Vector2(cos(a), sin(a)) * size)
+	if filled:
+		var fill_c := col
+		fill_c.a *= 0.75
+		draw_colored_polygon(tri, fill_c)
 	tri.append(tri[0])
 	draw_polyline(tri, col, width, true)
 
 
-func _draw_mini_square(center: Vector2, half: float, col: Color, width: float) -> void:
-	draw_rect(Rect2(center - Vector2(half, half), Vector2(half * 2.0, half * 2.0)),
-		col, false, width)
+func _draw_mini_square(center: Vector2, half: float, col: Color, width: float, filled: bool) -> void:
+	var rect := Rect2(center - Vector2(half, half), Vector2(half * 2.0, half * 2.0))
+	if filled:
+		var fill_c := col
+		fill_c.a *= 0.75
+		draw_rect(rect, fill_c, true)
+	draw_rect(rect, col, false, width)
 
 
-func _draw_mini_pentagon(center: Vector2, size: float, col: Color, width: float) -> void:
+func _draw_mini_pentagon(center: Vector2, size: float, col: Color, width: float, filled: bool) -> void:
 	var pent := PackedVector2Array()
 	for i in 5:
 		var a := TAU * (float(i) / 5.0) - PI * 0.5
 		pent.append(center + Vector2(cos(a), sin(a)) * size)
+	if filled:
+		var fill_c := col
+		fill_c.a *= 0.75
+		draw_colored_polygon(pent, fill_c)
 	pent.append(pent[0])
 	draw_polyline(pent, col, width, true)
 
 
-## Buffered items orbit the node as pips. A backed-up Well wears its
-## congestion — kept small and slightly soft so a full buffer reads as texture,
-## not a second bold ring around every node.
+func _draw_mini_hexagon(center: Vector2, size: float, col: Color, width: float, filled: bool) -> void:
+	var hex := PackedVector2Array()
+	for i in 6:
+		var a := TAU * (float(i) / 6.0) - PI * 0.5
+		hex.append(center + Vector2(cos(a), sin(a)) * size)
+	if filled:
+		var fill_c := col
+		fill_c.a *= 0.75
+		draw_colored_polygon(hex, fill_c)
+	hex.append(hex[0])
+	draw_polyline(hex, col, width, true)
+
+
+## How many items this node's buffer/intake can hold, AND how many pip slots
+## it has to show them in — explicit direction: "the reserved capacity of
+## each shape is equal to the number of their edges." One function serves
+## both, so capacity and layout can never drift apart: the shape's own
+## vertex count for a tool (triangle -> 3, square -> 4, pentagon -> 5,
+## hexagon -> 6), a reasonable circular subdivision for a Well/Heart
+## (neither has real edges to align to).
+func buffer_cap() -> int:
+	match kind:
+		Kind.FORGE: return 3
+		Kind.LOOM: return 4
+		Kind.KILN: return 5
+		Kind.CRUCIBLE: return 6
+		Kind.HEART: return HEART_EDGES
+		_: return 6
+
+
+## Buffered items orbit the node as pips, ONE SLOT PER EDGE — the count of
+## slots is the shape's own edge count (triangle -> 3, square -> 4, and so
+## on), and each pip centers on an edge's own bearing rather than a vertex's,
+## so a full buffer visibly maps one item per side. A backed-up node wears
+## its congestion — kept small and slightly soft so it reads as texture, not
+## a second bold ring. Past one lap around (buffer.size() > slot count), the
+## next lap's pips sit a little further out on the same bearings rather than
+## inventing a new ring pattern.
 func _draw_buffer(r: float, col: Color) -> void:
 	if buffer.is_empty():
 		return
-	var n := buffer.size()
-	for i in n:
-		var a := TAU * (float(i) / float(BUFFER_CAP)) - PI * 0.5
-		var p := Vector2(cos(a), sin(a)) * (r + 8.0)
+	var slots := buffer_cap()
+	for i in buffer.size():
+		var edge_i := i % slots
+		var lap := i / slots
+		var a := TAU * (float(edge_i) / float(slots)) - PI * 0.5 + (TAU / float(slots)) * 0.5
+		var p := Vector2(cos(a), sin(a)) * (r + 8.0 + float(lap) * 7.0)
 		var pc := Palette.of_res(buffer[i])
 		pc.a = 0.9
 		draw_circle(p, 2.1, pc)

@@ -15,6 +15,7 @@ const VNodeScene := preload("res://scripts/vnode.gd")
 const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
+const BloodScene := preload("res://scripts/blood.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
@@ -46,6 +47,7 @@ const FUEL_BY_RES := {
 	VNode.Res.REFINED: 3.0,
 	VNode.Res.CLOTH: 7.0,
 	VNode.Res.PRISM: 15.0,
+	VNode.Res.HEXAGON: 31.0,   # continues the 2^(n+1)-1 ladder: 1, 3, 7, 15, 31
 	VNode.Res.VOID: -2.5,
 }
 
@@ -81,6 +83,14 @@ const LOOM_GAP := 36.0
 ## player is still mid-scramble re-plumbing for it.
 const FIRST_KILN_TIME := 40.0
 const KILN_GAP := 50.0
+## The Crucible — VEIN.md's own promised fifth tool, "only a rare Crucible
+## can make" a hexagon. Needs the WHOLE Well->Forge->Loom->Kiln chain already
+## standing before it is worth anything at all, one tier deeper than a Kiln
+## needed, so its lead time is longer still — comfortably ahead of the
+## HEXAGON flip in DEMAND_TIERS below, not a surprise dropped right as the
+## Heart starts asking for one.
+const FIRST_CRUCIBLE_TIME := 95.0
+const CRUCIBLE_GAP := 70.0
 
 ## What the Heart DEMANDS, by run-second. This is the game.
 ##
@@ -100,16 +110,20 @@ const KILN_GAP := 50.0
 ## triangle, and only the triangle node makes triangles.
 ##
 ## This is the TEACHING schedule, walked once, in order — RAW, then REFINED,
-## then CLOTH, then PRISM. What happens after the last entry is a different
-## system entirely; see ROTATE_GAP_START below. Playtest: "we get to square
-## and it never changes at all" — holding at the final tier forever made the
-## whole second half of a long run static. A PRISM tier here, and the
-## rotation phase that follows it, are both direct answers to that.
+## then CLOTH, then PRISM, then HEXAGON. What happens after the last entry is
+## a different system entirely; see ROTATE_GAP_START below. Playtest: "we get
+## to square and it never changes at all" — holding at the final tier forever
+## made the whole second half of a long run static. A PRISM tier here, and
+## the rotation phase that follows it, were the direct answer to that; the
+## HEXAGON entry is the actual fifth tier the doc always promised, landing
+## comfortably inside the EXERTION_SPAN=200 window (see pressure()) rather
+## than past the point anyone survives to feel it.
 const DEMAND_TIERS := [
 	{"at": 0.0, "res": VNode.Res.RAW},
 	{"at": 14.0, "res": VNode.Res.REFINED},
 	{"at": 37.0, "res": VNode.Res.CLOTH},
 	{"at": 100.0, "res": VNode.Res.PRISM},
+	{"at": 200.0, "res": VNode.Res.HEXAGON},
 ]
 
 ## Once every tier above has been introduced, demand stops marching forward
@@ -120,22 +134,22 @@ const DEMAND_TIERS := [
 ## gets less predictable, via _jitter) as intensity climbs, so the opening of
 ## this phase still gives time to react and the tail end genuinely doesn't.
 const ROTATE_GAP_START := 26.0
-## Physical floor under the tuned one below: the longest possible PRISM
-## lineage — Well->Forge->Loom->Kiln->Heart, four hops all at the single
-## uniform Vein.MAX_LEN now that every pair shares one reach ceiling (see
-## in_reach) — takes this long for a single item to physically cross, full
-## stop. By the time rotation starts, PRISM is always among the unlocked pool
-## (see _tick_escalation), so this is the real worst case the floor has to
-## clear, not a hypothetical one.
-const WORST_CASE_PRISM_TRAVEL := (Vein.MAX_LEN * 4.0) / Vein.SPEED   # ~8.10s
+## Physical floor under the tuned one below: the longest possible HEXAGON
+## lineage — Well->Forge->Loom->Kiln->Crucible->Heart, five hops all at the
+## single uniform Vein.MAX_LEN now that every pair shares one reach ceiling
+## (see in_reach) — takes this long for a single item to physically cross,
+## full stop. By the time rotation starts, HEXAGON (the deepest tier, added
+## after PRISM) is always among the unlocked pool (see _tick_escalation), so
+## this is the real worst case the floor has to clear, not a hypothetical one.
+const WORST_CASE_HEXAGON_TRAVEL := (Vein.MAX_LEN * 5.0) / Vein.SPEED   # ~10.12s
 ## Absolute floor the rotation gap keeps creeping toward past EXERTION_SPAN
 ## (see pressure()) — below this a flip can't be answered at all, even in
 ## principle, and impossible stops being interesting. The 25% margin over
-## WORST_CASE_PRISM_TRAVEL covers dot-spacing queueing and an unbalanced
+## WORST_CASE_HEXAGON_TRAVEL covers dot-spacing queueing and an unbalanced
 ## branch's assembly stall on top of pure travel.
-const ROTATE_GAP_FLOOR := WORST_CASE_PRISM_TRAVEL * 1.25   # ~10.13s
+const ROTATE_GAP_FLOOR := WORST_CASE_HEXAGON_TRAVEL * 1.25   # ~12.65s
 ## The lerp target intensity climbs toward — was a flat 8.0 from before the
-## reach unification raised WORST_CASE_PRISM_TRAVEL (see MAX_LEN in vein.gd),
+## reach unification raised the physical floor (see MAX_LEN in vein.gd),
 ## which left it BELOW ROTATE_GAP_FLOOR: the hard clamp always overrode it and
 ## the lerp's own floor was dead code. Pinned to the real floor so the curve
 ## actually bottoms out where the clamp does, instead of asymptoting toward a
@@ -294,6 +308,9 @@ const TOOL_IDEAL_HEART_DIST := 195.0
 const MAX_LIVE_FORGES := 3
 const MAX_LIVE_LOOMS := 2
 const MAX_LIVE_KILNS := 2
+## Truly rare, per VEIN.md — "only a rare Crucible can make" a hexagon, so
+## unlike every tier below it, the board never holds more than one at a time.
+const MAX_LIVE_CRUCIBLES := 1
 
 ## Rot that is never cut does not get to sit there forever as free clutter,
 ## poisoning at your leisure — it collapses outright, taking the asset with it.
@@ -353,8 +370,10 @@ const DRAG_SLOP := 12.0
 @onready var drag_layer: Node2D = $DragLayer
 @onready var drain: ColorRect = $Fx/Drain
 @onready var death_ui: Control = $Ui/Death
+@onready var headline_label: Label = $Ui/Death/Headline
 @onready var score_label: Label = $Ui/Death/Score
 @onready var best_label: Label = $Ui/Death/Best
+@onready var ui_layer: CanvasLayer = $Ui
 @onready var budget_hint: Node2D = $BudgetHint
 @onready var score_hud: Node2D = $ScoreHud
 @onready var tutorial: Node2D = $Tutorial
@@ -402,11 +421,12 @@ var best := 0
 var lifetime_beats := 0
 var beat_best_this_run := false
 ## Persisted across runs (see _load_save/_store_save) — drives VNode.teach so
-## the recipe demonstration plays on the first Forge/Loom/Kiln the player EVER
-## sees, not every run once they already understand it.
+## the recipe demonstration plays on the first Forge/Loom/Kiln/Crucible the
+## player EVER sees, not every run once they already understand it.
 var seen_forge := false
 var seen_loom := false
 var seen_kiln := false
+var seen_crucible := false
 ## The Cut-the-Rope-style first-run tutorial (see tutorial.gd). Each lesson
 ## persists separately so dying mid-tutorial never re-teaches a verb already
 ## performed; tutorial_done is the aggregate that switches the whole system
@@ -443,7 +463,7 @@ var wasted := 0
 ## play is not just topology, it is surgery in rhythm.
 var combo := 0
 
-## The shape the Heart wants right now. Drawn inside it — see VNode._draw_hex.
+## The shape the Heart wants right now. Drawn inside it — see VNode._draw_demand.
 var demand: int = VNode.Res.RAW
 ## Every resource DEMAND_TIERS has introduced so far this run — the pool the
 ## post-teaching rotation phase draws from (see _tick_escalation).
@@ -472,6 +492,7 @@ var _next_well_time := FIRST_WELL_TIME
 var _next_forge_time := FIRST_FORGE_TIME
 var _next_loom_time := FIRST_LOOM_TIME
 var _next_kiln_time := FIRST_KILN_TIME
+var _next_crucible_time := FIRST_CRUCIBLE_TIME
 var _well_gap := WELL_GAP_START
 var _next_budget_time := FIRST_BUDGET_TIME
 var _budget_gap := BUDGET_GAP_START
@@ -492,6 +513,13 @@ var _press_vein: Vein = null
 
 var _rescue := 0.0
 var _drain_amt := 0.0
+## Ramps 0->1 once the run ends — the blood-red wash layered on top of the
+## grayscale drain, see drain.gdshader's `death` uniform.
+var _death_amt := 0.0
+## The dripping-blood death overlay, tracked so start_run() can tear it down
+## on Replay (see there) — this game.gd instance and its scene persist
+## across a run, there is no reload to do that for us.
+var _blood: Node2D = null
 var _sync_flash := 0.0
 var _bad_tempo_flash := 0.0
 ## Time scale to restore when the panic-pinch ends. Captured on engage so the
@@ -510,6 +538,7 @@ func _ready() -> void:
 	_fit_desktop_window()
 	drag_layer.draw.connect(_draw_drag)
 	death_ui.hide()
+	headline_label.hide()
 	# Death-screen buttons. A real Button consumes its own tap before
 	# _unhandled_input sees it, so each does its own thing while a tap anywhere
 	# ELSE on the death screen still does the default retry. The primary
@@ -551,6 +580,7 @@ func _load_save() -> void:
 	seen_forge = bool(cfg.get_value("run", "seen_forge", false))
 	seen_loom = bool(cfg.get_value("run", "seen_loom", false))
 	seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
+	seen_crucible = bool(cfg.get_value("run", "seen_crucible", false))
 	tut_connect = bool(cfg.get_value("run", "tut_connect", false))
 	tut_chain = bool(cfg.get_value("run", "tut_chain", false))
 	tut_forge = bool(cfg.get_value("run", "tut_forge", false))
@@ -568,6 +598,7 @@ func _store_save() -> void:
 	cfg.set_value("run", "seen_forge", seen_forge)
 	cfg.set_value("run", "seen_loom", seen_loom)
 	cfg.set_value("run", "seen_kiln", seen_kiln)
+	cfg.set_value("run", "seen_crucible", seen_crucible)
 	cfg.set_value("run", "tut_connect", tut_connect)
 	cfg.set_value("run", "tut_chain", tut_chain)
 	cfg.set_value("run", "tut_forge", tut_forge)
@@ -710,6 +741,7 @@ func start_run(run_seed: int) -> void:
 	rescues = 0
 	_rescue = 0.0
 	_drain_amt = 0.0
+	_death_amt = 0.0
 	_sync_flash = 0.0
 	_bad_tempo_flash = 0.0
 	_appetite_clock = 0.0
@@ -718,6 +750,7 @@ func start_run(run_seed: int) -> void:
 	_next_forge_time = FIRST_FORGE_TIME
 	_next_loom_time = FIRST_LOOM_TIME
 	_next_kiln_time = FIRST_KILN_TIME
+	_next_crucible_time = FIRST_CRUCIBLE_TIME
 	_well_gap = WELL_GAP_START
 	_next_budget_time = FIRST_BUDGET_TIME
 	_budget_gap = BUDGET_GAP_START
@@ -741,6 +774,13 @@ func start_run(run_seed: int) -> void:
 	_make_node(VNode.Kind.WELL, heart.position + Vector2(146, 122))
 
 	death_ui.hide()
+	# The Death screen persists across a Replay (no scene reload — see the
+	# ReplayBtn wiring), so the dripping blood from the last run has to be
+	# torn down explicitly or it just keeps accumulating, one more streaky
+	# layer per death.
+	if _blood != null:
+		_blood.queue_free()
+		_blood = null
 	alive = true
 	if tutorial != null:
 		tutorial.reset()
@@ -776,6 +816,8 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 			n.produces = VNode.Res.CLOTH
 		VNode.Kind.KILN:
 			n.produces = VNode.Res.PRISM
+		VNode.Kind.CRUCIBLE:
+			n.produces = VNode.Res.HEXAGON
 		_:
 			n.produces = VNode.Res.RAW
 	node_layer.add_child(n)
@@ -809,6 +851,10 @@ func _on_stopped(total: int) -> void:
 		best_label.text = "Best  %s" % _commas(best)
 	death_ui.show()
 
+	_blood = BloodScene.new()
+	ui_layer.add_child(_blood)
+	_blood.start(heart.position, rng.randi())
+
 
 func _commas(n: int) -> String:
 	var s := str(n)
@@ -835,6 +881,11 @@ func _on_beat(index: int) -> void:
 		misses += 1
 	elif misses > 0:
 		misses -= 1
+
+	# Committed here, synchronously, before Beat.stop() can fire — see
+	# health_ratio(). The fatal beat must land with the Heart already
+	# reading exactly empty, not one frame of _process behind it.
+	heart.fuel_ratio = health_ratio()
 
 	if misses >= MISSES_FATAL:
 		Beat.stop()
@@ -925,6 +976,21 @@ func appetite() -> float:
 
 func fuel_cap() -> float:
 	return FUEL_CAP
+
+
+## What the Heart actually SHOWS, 0..1 — folds the miss-grace buffer into the
+## same number as the fuel line so the bar never lies in either direction.
+## Raw fuel/fuel_cap() alone could sit at a full, honest-looking 0.0 for up
+## to MISSES_FATAL beats before death actually landed — the Heart LOOKED
+## dead long before it was, which is its own kind of dishonest bar. Grace
+## shrinks this multiplicatively as misses accumulate, so it keeps draining
+## even through a partial fuel recovery between misses, and lands at exactly
+## 0.0 on the exact beat MISSES_FATAL stops the Heart for good — never a
+## separate invisible counter still running under a bar that already reads
+## empty, and never a bar showing life the Heart doesn't have left.
+func health_ratio() -> float:
+	var grace := 1.0 - float(misses) / float(MISSES_FATAL)
+	return clampf(fuel / fuel_cap(), 0.0, 1.0) * clampf(grace, 0.0, 1.0)
 
 
 ## Every spawn cadence used to be a flat interval — the exact same gap, every
@@ -1031,6 +1097,11 @@ func _tick_escalation(delta: float) -> void:
 			if _count_healthy_kind(VNode.Kind.KILN) < MAX_LIVE_KILNS:
 				_spawn_node(VNode.Kind.KILN)
 			_next_kiln_time += _jitter(KILN_GAP, 0.2)
+
+		if run_time >= _next_crucible_time:
+			if _count_healthy_kind(VNode.Kind.CRUCIBLE) < MAX_LIVE_CRUCIBLES:
+				_spawn_node(VNode.Kind.CRUCIBLE)
+			_next_crucible_time += _jitter(CRUCIBLE_GAP, 0.2)
 
 	if run_time >= _next_budget_time:
 		budget += 1
@@ -1157,7 +1228,8 @@ func _spawn_node(kind: int) -> void:
 				anchors.append(n)
 				break
 
-	var is_tool := kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM or kind == VNode.Kind.KILN
+	var is_tool := kind == VNode.Kind.FORGE or kind == VNode.Kind.LOOM \
+			or kind == VNode.Kind.KILN or kind == VNode.Kind.CRUCIBLE
 
 	# A tool is USELESS unless BOTH its feeder and its delivery target can reach
 	# it — playtest: "the triangle spawned where no circle could reach it,
@@ -1177,8 +1249,10 @@ func _spawn_node(kind: int) -> void:
 			feeder = _nearest_node_of_kind(VNode.Kind.WELL, heart.position)
 		elif kind == VNode.Kind.LOOM:
 			feeder = _nearest_node_of_kind(VNode.Kind.FORGE, heart.position)
-		else:
+		elif kind == VNode.Kind.KILN:
 			feeder = _nearest_node_of_kind(VNode.Kind.LOOM, heart.position)
+		else:
+			feeder = _nearest_node_of_kind(VNode.Kind.KILN, heart.position)
 		# A tool anchors to its FEEDER, not the feeder<->Heart midpoint: it
 		# lives out in the field next to its supply and reaches the Heart
 		# across the same single Vein.MAX_LEN every other pair gets now. That
@@ -1277,6 +1351,10 @@ func _spawn_node(kind: int) -> void:
 		seen_kiln = true
 		n.teach = true
 		_store_save()
+	elif kind == VNode.Kind.CRUCIBLE and not seen_crucible:
+		seen_crucible = true
+		n.teach = true
+		_store_save()
 	_rebuild_graph()
 
 
@@ -1289,9 +1367,10 @@ const CANONICAL_RECIPE := {
 	VNode.Kind.FORGE: [VNode.Res.RAW, VNode.Res.RAW],
 	VNode.Kind.LOOM: [VNode.Res.REFINED, VNode.Res.REFINED],
 	VNode.Kind.KILN: [VNode.Res.CLOTH, VNode.Res.CLOTH],
+	VNode.Kind.CRUCIBLE: [VNode.Res.PRISM, VNode.Res.PRISM],
 }
 ## Chance a tool rolls exotic, growing with run pressure — the opening stays
-## the learnable classic chain, the late game goes strange.
+## the learnable classic chain, the late game asks for more.
 const EXOTIC_CHANCE_BASE := 0.25
 const EXOTIC_CHANCE_MAX := 0.75
 
@@ -1300,7 +1379,17 @@ const EXOTIC_CHANCE_MAX := 0.75
 ## the board — and any tool spawned while no plain-recipe sibling of its
 ## kind is alive — is always canonical, so every demand tier is always
 ## answerable through the classic Well->Forge->Loom->Kiln chain no matter
-## how weird the extras get.
+## how heavy the extras get.
+##
+## Exotic used to mean MIXED types, drawn from anything unlocked so far — a
+## Forge could roll "1 circle and 1 square." Real playtest: "the flow always
+## wants to go from triangle to square, [mixing them] breaks" — a square is
+## already PAST a Forge in the downhill chain (it flows onward to a Loom/
+## Kiln/Crucible/Heart), so asking a Forge to eat one back the wrong way
+## fights the game's own flow model instead of just being harder. Exotic
+## variance is COUNT only now: the same canonical ingredient, just more of
+## it (3, sometimes 4, instead of 2) — harder without asking for something
+## the flow direction can never actually deliver.
 func _roll_recipe(kind: int) -> Array[int]:
 	var canonical: Array[int] = []
 	canonical.assign(CANONICAL_RECIPE[kind])
@@ -1317,23 +1406,12 @@ func _roll_recipe(kind: int) -> Array[int]:
 	if rng.randf() > chance:
 		return canonical
 
-	var produces: int = VNode.Res.REFINED
-	match kind:
-		VNode.Kind.LOOM: produces = VNode.Res.CLOTH
-		VNode.Kind.KILN: produces = VNode.Res.PRISM
-	var pool: Array[int] = []
-	for res in _unlocked_res:
-		if res != produces and res != VNode.Res.VOID:
-			pool.append(res)
-	if pool.is_empty():
-		return canonical
-
-	var out: Array[int] = []
-	var slots := 2 + (1 if rng.randf() < 0.3 else 0)
-	for _i in slots:
-		out.append(pool[rng.randi() % pool.size()])
-	out.sort()
-	return out
+	var extra := 1 + (1 if rng.randf() < 0.3 else 0)
+	var heavy: Array[int] = []
+	for _i in canonical.size() + extra:
+		heavy.append(canonical[0])
+	heavy.sort()
+	return heavy
 
 
 func _random_node_of_kind(kind: int) -> VNode:
@@ -1454,7 +1532,7 @@ func _rescue_anchor() -> Vector2:
 	if demand == VNode.Res.RAW:
 		return heart.position
 	var goal := heart.position
-	if demand == VNode.Res.CLOTH or demand == VNode.Res.PRISM:
+	if demand == VNode.Res.CLOTH or demand == VNode.Res.PRISM or demand == VNode.Res.HEXAGON:
 		var loom := _nearest_node_of_kind(VNode.Kind.LOOM, heart.position)
 		if loom != null:
 			goal = loom.position
@@ -1641,9 +1719,11 @@ func _tick_tool_chain(delta: float) -> void:
 	_ensure_canonical_alive(VNode.Kind.FORGE, VNode.Res.REFINED, delta)
 	_ensure_canonical_alive(VNode.Kind.LOOM, VNode.Res.CLOTH, delta)
 	_ensure_canonical_alive(VNode.Kind.KILN, VNode.Res.PRISM, delta)
+	_ensure_canonical_alive(VNode.Kind.CRUCIBLE, VNode.Res.HEXAGON, delta)
 	_ensure_chain_link(VNode.Kind.FORGE, VNode.Kind.WELL, VNode.Res.REFINED, delta)
 	_ensure_chain_link(VNode.Kind.LOOM, VNode.Kind.FORGE, VNode.Res.CLOTH, delta)
 	_ensure_chain_link(VNode.Kind.KILN, VNode.Kind.LOOM, VNode.Res.PRISM, delta)
+	_ensure_chain_link(VNode.Kind.CRUCIBLE, VNode.Kind.KILN, VNode.Res.HEXAGON, delta)
 
 
 ## Emergency placement for a feeder a live, stranded `target` needs RIGHT NOW.
@@ -1663,6 +1743,8 @@ func _spawn_rescue_feeder(feeder_kind: int, target: VNode) -> void:
 			sub_feeder = _nearest_node_of_kind(VNode.Kind.WELL, target.position)
 		VNode.Kind.LOOM:
 			sub_feeder = _nearest_node_of_kind(VNode.Kind.FORGE, target.position)
+		VNode.Kind.KILN:
+			sub_feeder = _nearest_node_of_kind(VNode.Kind.LOOM, target.position)
 
 	var anchor := target.position
 	var min_dist := 60.0
@@ -1710,6 +1792,10 @@ func _spawn_rescue_feeder(feeder_kind: int, target: VNode) -> void:
 		_store_save()
 	elif feeder_kind == VNode.Kind.LOOM and not seen_loom:
 		seen_loom = true
+		n.teach = true
+		_store_save()
+	elif feeder_kind == VNode.Kind.KILN and not seen_kiln:
+		seen_kiln = true
 		n.teach = true
 		_store_save()
 	_rebuild_graph()
@@ -1851,6 +1937,7 @@ func _achievable_rate() -> float:
 	match demand:
 		VNode.Res.CLOTH: kind = VNode.Kind.LOOM
 		VNode.Res.PRISM: kind = VNode.Kind.KILN
+		VNode.Res.HEXAGON: kind = VNode.Kind.CRUCIBLE
 	var best := 0.0
 	for n in nodes:
 		if n.kind != kind or n.corrupted or not in_reach(n, heart):
@@ -1979,22 +2066,6 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	if a == b or _find_vein(a, b) != null or not in_reach(a, b):
 		return
 
-	# Crossing BLOCKS the connection — it does not destroy the crossed vein.
-	#
-	# Playtest: "when the heart changes to square and I connect square to it, I
-	# die." Root cause: the Heart is where the most veins converge, so the
-	# rescue connection you most need to complete is also the one geometrically
-	# likeliest to cross something. The old behaviour silently failed to create
-	# the new vein AND bled fuel AND ruptured a different, unrelated vein — from
-	# the player's side the drag visually snapped, nothing looked wrong, and the
-	# game had actually destroyed a load-bearing connection and cost fuel while
-	# never delivering the CLOTH that would have saved them. Spaghetti-avoidance
-	# is still a real constraint (the drag preview still warns in red and the
-	# connection is refused), it just no longer punishes you for a geometry
-	# mistake with more than "try a different angle."
-	if _crossing_vein(a, b) != null:
-		return
-
 	if not can_afford():
 		return
 
@@ -2059,9 +2130,12 @@ func _remove_node(n: VNode) -> void:
 	_rebuild_graph()
 
 
-## A trunk carried more than it could bear. The dots in flight scatter and die,
-## the vein is destroyed, and the budget point comes back — so a rupture is a
-## loss of throughput and position, never of resources you can't rebuild.
+## A trunk carried more than it could bear. The dots in flight scatter and
+## die — a real cost, whatever was in transit is gone — but the vein itself
+## survives. Explicit direction: lines never die on their own, only a
+## player's own cut removes one. A rupture is now a pure congestion event:
+## it clears the vein back to empty and resets its strain, same jump-scare
+## burst/haptic as before, just without deleting the connection you built.
 func _on_ruptured(v: Vein) -> void:
 	ruptures += 1
 	var pts: Array[Vector2] = []
@@ -2079,7 +2153,7 @@ func _on_ruptured(v: Vein) -> void:
 	if OS.has_feature("mobile"):
 		Input.vibrate_handheld(180)
 
-	_remove_vein(v)
+	v.dots.clear()
 
 
 func _remove_vein(v: Vein, surgical := false) -> void:
@@ -2120,26 +2194,6 @@ func _remove_vein(v: Vein, surgical := false) -> void:
 	_rebuild_graph()
 
 
-func _crossing_vein(a: VNode, b: VNode) -> Vein:
-	for v in veins:
-		if v.a == a or v.a == b or v.b == a or v.b == b:
-			continue
-		if _segments_cross(a.position, b.position, v.a.position, v.b.position):
-			return v
-	return null
-
-
-func _segments_cross(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> bool:
-	var r := a1 - a0
-	var s := b1 - b0
-	var den := r.cross(s)
-	if absf(den) < 0.001:
-		return false
-	var t := (b0 - a0).cross(s) / den
-	var u := (b0 - a0).cross(r) / den
-	return t > 0.04 and t < 0.96 and u > 0.04 and u < 0.96
-
-
 # --- Sim --------------------------------------------------------------------
 
 func _process(delta: float) -> void:
@@ -2157,8 +2211,10 @@ func _process(delta: float) -> void:
 	elif Beat.state == Beat.State.STRAINED:
 		target_drain = 0.2
 	_drain_amt = Vein._smooth(_drain_amt, target_drain, 1.6, delta)
+	_death_amt = Vein._smooth(_death_amt, 1.0 if not alive else 0.0, 1.1, delta)
 	drain.material.set_shader_parameter("drain", _drain_amt)
 	drain.material.set_shader_parameter("warm", _rescue)
+	drain.material.set_shader_parameter("death", _death_amt)
 
 	if _touching and not _moved and not _dilating:
 		_touch_time += delta
@@ -2173,7 +2229,7 @@ func _process(delta: float) -> void:
 	_tick_escalation(delta)
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
-	heart.fuel_ratio = fuel / fuel_cap()
+	heart.fuel_ratio = health_ratio()
 	# Same escalation shape as corruption spread/airborne blight/demand
 	# rotation: near-zero at the open, ramping to full bite by EXERTION_SPAN,
 	# and still climbing past it (see pressure()) — a tool's per-smelt reserve
@@ -2181,10 +2237,23 @@ func _process(delta: float) -> void:
 	var tool_depletion := lerpf(TOOL_DEPLETION_EARLY, 1.0, intensity()) \
 		+ maxf(pressure() - 1.0, 0.0) * TOOL_DEPLETION_POST_EXTRA
 	for n in nodes:
-		if n.kind == VNode.Kind.FORGE or n.kind == VNode.Kind.LOOM or n.kind == VNode.Kind.KILN:
+		if n.kind == VNode.Kind.FORGE or n.kind == VNode.Kind.LOOM or n.kind == VNode.Kind.KILN \
+				or n.kind == VNode.Kind.CRUCIBLE:
 			n.depletion_rate = tool_depletion
 	_push_from_nodes()
 	for v in veins:
+		# The line itself should show it's wrong, not just the pop once it
+		# lands — see Vein.wrong_flow/_wrong_jiggle. Only a vein feeding the
+		# Heart directly can BE wrong (an intermediate Well->Forge link is
+		# never off-demand, it's just supply); VOID keeps its own established
+		# poison language rather than being folded into this one.
+		var wrong := false
+		if v.sink() == heart:
+			for d in v.dots:
+				if d.kind != demand and d.kind != VNode.Res.VOID:
+					wrong = true
+					break
+		v.wrong_flow = wrong
 		for item in v.advance(delta):
 			_deliver(item.kind, v, v.sink(), item.pot)
 
@@ -2331,7 +2400,7 @@ func _push_from_nodes() -> void:
 
 		# Sample the backlog BEFORE pushing: the push below removes an item, so
 		# checking afterwards always reads one short of full and never trips.
-		var was_full := n.buffer.size() >= VNode.BUFFER_CAP
+		var was_full := n.buffer.size() >= n.buffer_cap()
 
 		# Round-robin so a node with two downhill veins splits between them, but
 		# fall through to the others rather than stalling on a full one.
@@ -2459,20 +2528,31 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 	# would just look like a longer or shorter drift.
 	var jitter := out_dir.rotated(PI * 0.5) * rng.randf_range(-6.0, 6.0)
 	if off_demand:
-		var warn := Palette.VEIN_STRAINED.lerp(Palette.WARM, 0.4)
+		# Reads as WRONG now, not just off-key: closer to the bruised
+		# VEIN_STRAINED red than the rescue-flash WARM amber it used to lean
+		# toward (that blend read too close to "good news"), a wider scatter
+		# radius so the burst is an actual particle event instead of a
+		# 5px ring nobody's eye catches, and a real intensity so the bits
+		# fly instead of just sitting there fading.
+		var warn := Palette.VEIN_STRAINED.lerp(Palette.WARM, 0.15)
 		var ring: Array[Vector2] = []
 		var kinds: Array[int] = []
-		for i in 8:
-			var a := TAU * float(i) / 8.0
-			ring.append(at + Vector2(cos(a), sin(a)) * 5.0)
+		for i in 12:
+			var a := TAU * float(i) / 12.0
+			ring.append(at + Vector2(cos(a), sin(a)) * 14.0)
 			kinds.append(0)
 		var burst: Node2D = BurstScene.new()
 		vein_layer.add_child(burst)
-		burst.spawn(ring, kinds, rng.randi(), warn)
+		burst.spawn(ring, kinds, rng.randi(), warn, 0.55)
 
+		# "!" read as a caution note, then "X" read as a rejection mark, not
+		# what actually happened — a vector cross now, drawn (not a font
+		# glyph) so it can't come out as a missing-character box. Sized up
+		# alongside the stronger burst so the whole event competes on equal
+		# footing with a real score pop.
 		var mark: Node2D = FloatTextScene.new()
 		vein_layer.add_child(mark)
-		mark.spawn("!", at + jitter, warn, 20, out_dir)
+		mark.spawn_cross(at + jitter, warn, 28, out_dir)
 		return
 	if absf(gain) < 0.5:
 		return
@@ -2491,11 +2571,11 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 		col = Palette.VOID
 		text = "%d" % rounded
 	else:
-		col = Palette.HEART
+		col = Palette.SCORE
 		text = "+%d" % rounded
 	var pop: Node2D = FloatTextScene.new()
 	vein_layer.add_child(pop)
-	pop.spawn(text, at + jitter, col, 16, out_dir)
+	pop.spawn(text, at + jitter, col, 26, out_dir)
 
 
 # --- Input: one thumb, one verb ---------------------------------------------
@@ -2604,16 +2684,15 @@ func _draw_drag() -> void:
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
 	var stretched := _drag_from.position.distance_to(end) > Vein.MAX_LEN
-	var crossing := to != null and to != _drag_from and _crossing_vein(_drag_from, to) != null
 
-	var col := Palette.VEIN_STRAINED if stretched or crossing else Palette.VEIN_LIVE
+	var col := Palette.VEIN_STRAINED if stretched else Palette.VEIN_LIVE
 	col.a = 0.75
 	drag_layer.draw_line(_drag_from.position, end, col, 3.0, true)
 
 	if to == null:
 		return
 	var ok := to != _drag_from and can_afford() and _find_vein(_drag_from, to) == null \
-		and in_reach(_drag_from, to) and not crossing
+		and in_reach(_drag_from, to)
 	var ring := Palette.WARM if ok else Palette.VEIN_STRAINED
 	ring.a = 0.85
 	drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU, 28, ring, 2.0, true)

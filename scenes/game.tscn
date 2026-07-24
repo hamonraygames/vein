@@ -11,6 +11,7 @@
 shader = ExtResource("3")
 shader_parameter/drain = 0.0
 shader_parameter/warm = 0.0
+shader_parameter/death = 0.0
 
 [sub_resource type="StyleBoxFlat" id="BtnPrimaryNormal"]
 bg_color = Color(0.906, 0.878, 0.816, 0.9)
@@ -112,6 +113,20 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("4")
+
+[node name="Headline" type="Label" parent="Ui/Death"]
+anchor_left = 0.0
+anchor_top = 0.36
+anchor_right = 1.0
+anchor_bottom = 0.52
+theme_override_colors/font_color = Color(0.78, 0.10, 0.09, 1)
+theme_override_colors/font_outline_color = Color(0.0, 0.0, 0.0, 1)
+theme_override_constants/outline_size = 3
+theme_override_font_sizes/font_size = 68
+text = "DEAD"
+horizontal_alignment = 1
+vertical_alignment = 1
+mouse_filter = 2
 
 [node name="Score" type="Label" parent="Ui/Death"]
 anchor_left = 0.0

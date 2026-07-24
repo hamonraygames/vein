@@ -12,21 +12,30 @@ const BG := Color("0d0d10")
 ## everywhere it appears — as a node's body, as the demand glyph inside the
 ## Heart, as a requirement glyph inside a tool, as a dot on a vein, as a
 ## buffer pip — all routed through of_res() so there is exactly one source of
-## truth. Red is deliberately absent from every object: it reads as HAZARD
-## (the old "red triangle" confusion), and the only thing allowed to alarm is
-## VOID. REFINED was coral e4572e and is now teal-green, well clear of red.
-## Muted, not garish. Playtest: "the circles are very bold and dominant, both
-## border width and colour; everything except the Heart is not good." The
-## Heart's soft ivory is the reference for the whole family — every resource
-## is now a DESATURATED tint in that same register (bright saturated amber/
-## teal/rose read as loud stickers against the dark, fighting the Heart for
-## the eye). Lower saturation, similar softness, so the board reads as one
-## quiet organism with the Heart clearly its brightest point.
+## truth. Red used to be deliberately absent from every object (it read as
+## HAZARD, the old "red triangle" confusion, and the only thing allowed to
+## alarm was VOID) — reversed per explicit direction: the Heart is now a red
+## heart, on purpose, the one object allowed to own the color everything
+## else still avoids. REFINED was coral e4572e and is now teal-green, well
+## clear of red. Everything but the Heart stays muted, not garish. Playtest:
+## "the circles are very bold and dominant, both border width and colour;
+## everything except the Heart is not good." Every resource is a DESATURATED
+## tint in a soft register (bright saturated amber/teal/rose read as loud
+## stickers against the dark, fighting the Heart for the eye) — the Heart's
+## red is the one deliberate exception, brighter and warmer than the family
+## on purpose, so the board still reads as one quiet organism with the Heart
+## clearly its brightest, most alive point.
 const RAW := Color("bb9a6b")      # circle   — soft sand-gold (was bright amber)
 const REFINED := Color("7ea394")  # triangle — muted sage (was saturated teal)
 const CLOTH := Color("b8b09a")    # square   — warm stone (was near-white bone, read as washed-out)
 const PRISM := Color("b0879b")    # pentagon — dusty mauve (was hot rose)
-const HEART := Color("f5f2ea")    # hexagon  — ivory (kept: the one bright point)
+const HEART := Color("e6483f")    # heart    — a real red (was ivory f5f2ea, was hexagon-shaped)
+## The fifth resource, deepest of the ladder — VEIN.md always promised it
+## ("the Heart demands hexagons, which only a rare Crucible can make").
+## Continues the same soft/desaturated register as RAW..PRISM, one step
+## further: a cool, quiet slate — the family's coldest member short of VOID,
+## fitting for the rarest, hardest-won tier.
+const HEXAGON := Color("8f97a8")  # hexagon  — pale slate
 
 ## Corruption. The one COLD colour in a warm-on-dark palette, and the only thing
 ## on screen that does not belong — a spent Well gone necrotic, and the poison it
@@ -46,6 +55,13 @@ const VEIN_STRAINED := Color("6b2230")
 
 const WARM := Color("ffb765")     # the rescue flash
 
+## Score readout (the "+x" delivery pop and the running total) — deliberately
+## NOT Palette.HEART. Real feedback: red on the score reads as danger/damage,
+## the opposite of what a gain should feel like, now that the Heart itself
+## owns red as its identity color. A near-white keeps score legible and
+## clearly its own channel, not a second meaning piggybacking on the Heart's.
+const SCORE := Color("ede8dc")
+
 
 static func of_res(kind: int) -> Color:
 	match kind:
@@ -54,4 +70,5 @@ static func of_res(kind: int) -> Color:
 		2: return CLOTH
 		3: return PRISM
 		4: return VOID
+		5: return HEXAGON
 	return HEART
