@@ -1,9 +1,9 @@
 extends Node2D
 ## The death screen's blood burst, spawned once from game.gd's _on_stopped.
 ##
-## Droplets erupt outward from where the Heart sat, arc under a light pull
-## back down, and fade — "a particle effect that the heart blows blood out
-## of it," not rain falling from the top of the screen with no source.
+## Droplets erupt outward from where the Heart sat in a straight radial line
+## and fade — no gravity pulling them down, so the spread stays even in
+## every direction instead of drooping toward the bottom of the screen.
 ## Bursts repeat on a very short interval — close enough together that they
 ## read as one continuous fountain rather than separate periodic spurts —
 ## and each burst is big enough to fling shards clear to the screen edges
@@ -16,7 +16,6 @@ const COL := Color(0.56, 0.04, 0.06)
 
 const BURST_INTERVAL := 0.1
 const BURST_COUNT := 18
-const GRAVITY := 90.0
 
 var _origin := Vector2(270.0, 515.0)
 var _rng := RandomNumberGenerator.new()
@@ -27,7 +26,10 @@ var _burst_t := 0.0
 
 func start(heart_pos: Vector2, run_seed: int) -> void:
 	_origin = heart_pos
-	z_index = 60
+	# Behind the death screen's UI (headline/score/buttons all sit at the
+	# default z_index 0) — the fountain reads as a backdrop, not something
+	# blocking the controls.
+	z_index = -1
 	_rng.seed = run_seed
 	_burst_t = BURST_INTERVAL   # fire the first burst immediately
 
@@ -36,20 +38,19 @@ func start(heart_pos: Vector2, run_seed: int) -> void:
 ## complaint, and a soft-glow circle drifting on a graceful arc IS cartoon
 ## particle language. A few sharp, irregular points per shard, generated
 ## once at spawn (not regenerated every frame — that would flicker instead
-## of reading as a solid fragment), snappier lifetimes and harder gravity
-## so the whole burst feels sudden and violent rather than a lazy spray.
+## of reading as a solid fragment).
 func _spawn_burst() -> void:
 	for i in BURST_COUNT:
 		var a := _rng.randf() * TAU
 		# Slower than the shard size suggests — big, heavy chunks that drift
-		# rather than shoot, but live long enough to still drift clear to the
+		# rather than shoot, but live long enough to still drift well past the
 		# screen edges from the Heart's position.
-		var speed := _rng.randf_range(90.0, 260.0)
+		var speed := _rng.randf_range(90.0, 220.0)
 		var n := _rng.randi_range(3, 5)
 		var shard := PackedVector2Array()
 		for j in n:
 			var sa := TAU * float(j) / float(n) + _rng.randf_range(-0.35, 0.35)
-			var sr := _rng.randf_range(16.0, 34.0)
+			var sr := _rng.randf_range(32.0, 56.0)
 			shard.append(Vector2(cos(sa), sin(sa)) * sr)
 		_drops.append({
 			"p": _origin,
@@ -58,7 +59,7 @@ func _spawn_burst() -> void:
 			"rot": _rng.randf() * TAU,
 			"spin": _rng.randf_range(-9.0, 9.0),
 			"life": 0.0,
-			"max_life": _rng.randf_range(1.4, 2.4),
+			"max_life": _rng.randf_range(3.2, 4.8),
 		})
 
 
@@ -73,7 +74,6 @@ func _process(delta: float) -> void:
 		d.life += delta
 		if d.life >= d.max_life:
 			continue
-		d.v.y += GRAVITY * delta
 		d.p += d.v * delta
 		d.rot += d.spin * delta
 		kept_drops.append(d)
@@ -86,7 +86,7 @@ func _draw() -> void:
 	for d in _drops:
 		var fade: float = 1.0 - d.life / d.max_life
 		var c := COL
-		c.a = 0.9 * fade
+		c.a = 0.16 * fade
 		var pts := PackedVector2Array()
 		for p in d.shard:
 			pts.append(d.p + p.rotated(d.rot))
