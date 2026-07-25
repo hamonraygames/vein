@@ -469,111 +469,44 @@ func _draw() -> void:
 	_draw_buffer(r, col)
 
 
-## Fifth design for this shape. A literal smooth heart curve (too ornate,
-## first pass) -> a hand-picked straight-edge polygon to "match the other
-## shapes" (lost the heart, then read as thin, then still read as ugly even
-## fixed) -> a low-facet sample of the curve (still not right) -> this: back
-## to a genuinely smooth curve, at real resolution — "let's see a normal
-## heart." Same proven formula throughout (x = 16 sin^3 t, y = 13 cos t -
-## 5 cos 2t - 2 cos 3t - cos 4t); only the sample count changed, from a
-## deliberately low facet count down to enough points that draw_polyline's
-## straight segments are imperceptible and it reads as an actual curve.
-const HEART_SAMPLES := 48
+## Eighth design for this shape. Smooth heart curves are gone per explicit
+## direction: straight lines only, sharp geometric edges, no curves at all —
+## the same vector language every other node already uses (a triangle, a
+## square, a hexagon are all hand-placed vertices, not sampled arcs). The
+## very first straight-edge pass (ten vertices) read as a diamond/arrow
+## rather than a heart; eighteen read as a heart but busier than this shape
+## needs. Fourteen — three straight segments per lobe instead of four — is
+## the settled middle: still unmistakably a heart, still every edge a
+## straight line. Hand-placed and left-right symmetric by construction, so
+## the origin already sits at the shape's visual centre without needing a
+## computed area centroid the way an asymmetric sampled curve would.
+## HEART_WIDTH_MULT stretches the whole silhouette horizontally afterward —
+## kept as its own factor rather than baked into the points so "wider" stays
+## a one-number knob independent of the vertex count/placement above it.
+const HEART_POINTS: Array[Vector2] = [
+	Vector2(0.00, -0.48), Vector2(0.22, -0.82), Vector2(0.55, -0.85), Vector2(0.88, -0.55),
+	Vector2(1.00, -0.15), Vector2(0.75, 0.43), Vector2(0.46, 0.72), Vector2(0.00, 1.05),
+	Vector2(-0.46, 0.72), Vector2(-0.75, 0.43), Vector2(-1.00, -0.15), Vector2(-0.88, -0.55),
+	Vector2(-0.55, -0.85), Vector2(-0.22, -0.82),
+]
+const HEART_WIDTH_MULT := 1.18
 
-## Rounds one sharp vertex into a soft bezier arc — the bottom tip, and each
-## lobe's own top peak. Replaces the points within `spread` of `corner_i`
-## with a quadratic bezier from one outer neighbor to the other, control
-## point pulled partway (by `roundness`, 0=untouched..1=fully flat) toward
-## the original corner — that partial pull is what makes it blunt rather
-## than flat. A bezier between 3 points can never self-cross; an earlier
-## version of this blended points toward a straight chord by index instead,
-## which could and did — it put a small inverted notch at the bottom, a
-## real regression, not just "still pointy."
-static func _round_corner(pts: PackedVector2Array, corner_i: int, roundness: float) -> PackedVector2Array:
-	var n := pts.size()
-	var spread := maxi(2, n / 10)
-	var outer_a: Vector2 = pts[(corner_i - spread + n) % n]
-	var outer_b: Vector2 = pts[(corner_i + spread) % n]
-	var control: Vector2 = outer_a.lerp(outer_b, 0.5).lerp(pts[corner_i], roundness)
-	var out := pts.duplicate()
-	for k in range(-spread, spread + 1):
-		var idx := (corner_i + k + n) % n
-		var s := float(k + spread) / float(2 * spread)
-		var q0 := outer_a.lerp(control, s)
-		var q1 := control.lerp(outer_b, s)
-		out[idx] = q0.lerp(q1, s)
-	return out
-
-
-## Builds the unit heart polygon fresh each call: even at HEART_SAMPLES
-## points this is free (a few trig calls), and computing it live means the
-## shape and its centering can never drift out of sync with each other the
-## way a hand-copied constant list could. Bounding-box normalized to fit
-## `r`, THEN re-centered on its own AREA CENTROID (shoelace
-## formula) so local origin — where _draw_demand draws the requested-shape
-## glyph — sits at the shape's actual visual middle, not its bounding box's:
-## a heart's mass concentrates in the lobes, so those aren't the same point,
-## and drawing the glyph at the wrong one read as "not spread equally."
 func _heart_points(r: float) -> PackedVector2Array:
-	var raw := PackedVector2Array()
-	var min_p := Vector2(INF, INF)
-	var max_p := Vector2(-INF, -INF)
-	for i in HEART_SAMPLES:
-		var t := TAU * float(i) / float(HEART_SAMPLES)
-		var x := 16.0 * pow(sin(t), 3.0)
-		var yf := -(13.0 * cos(t) - 5.0 * cos(2.0 * t) - 2.0 * cos(3.0 * t) - cos(4.0 * t))
-		var p := Vector2(x, yf)
-		raw.append(p)
-		min_p.x = minf(min_p.x, p.x)
-		min_p.y = minf(min_p.y, p.y)
-		max_p.x = maxf(max_p.x, p.x)
-		max_p.y = maxf(max_p.y, p.y)
-	var scale := (r * 2.0) / maxf(max_p.x - min_p.x, max_p.y - min_p.y)
-	var mid := (min_p + max_p) * 0.5
-	var scaled := PackedVector2Array()
-	for p in raw:
-		scaled.append((p - mid) * scale)
-
-	# Round the sharp corners — bottom tip, then the notch BETWEEN the two
-	# lobes at top-center (not the lobes' own outer peaks — those stay as
-	# sampled). The formula's natural cusps are authentic to the reference
-	# curve but read as too sharp for this game's soft register. See
-	# _round_corner.
-	var tip_i := 0
-	var tip_y := -INF
-	for i in scaled.size():
-		if scaled[i].y > tip_y:
-			tip_y = scaled[i].y
-			tip_i = i
-	scaled = _round_corner(scaled, tip_i, 0.45)
-
-	# The notch sits at t=0 in the sampling loop above — i=0 exactly — the
-	# one point on the curve with x=0 in the upper half, between the two
-	# lobes. Neither rounding call above touches index 0 (tip_i sits near
-	# the middle of the array, far from it), so it's still the true notch.
-	scaled = _round_corner(scaled, 0, 0.5)
-
-	var area2 := 0.0
-	var cx := 0.0
-	var cy := 0.0
-	for i in scaled.size():
-		var p0 := scaled[i]
-		var p1 := scaled[(i + 1) % scaled.size()]
-		var cross := p0.x * p1.y - p1.x * p0.y
-		area2 += cross
-		cx += (p0.x + p1.x) * cross
-		cy += (p0.y + p1.y) * cross
-	var centroid := Vector2.ZERO
-	if absf(area2) > 0.0001:
-		centroid = Vector2(cx, cy) / (3.0 * area2)
-
-	var final := PackedVector2Array()
-	for p in scaled:
-		final.append(p - centroid)
-	return final
+	var pts := PackedVector2Array()
+	for p in HEART_POINTS:
+		pts.append(Vector2(p.x * HEART_WIDTH_MULT, p.y) * r)
+	return pts
 
 
-const HEART_EDGES := HEART_SAMPLES
+## The Heart's buffer-pip slot count (see buffer_cap()/_draw_buffer below) —
+## deliberately its OWN constant, not HEART_POINTS.size(). Pips are placed on
+## a plain circular ring by angle, never aligned to the Heart's actual
+## vertices the way a triangle/square/pentagon/hexagon's are (see
+## _draw_buffer's own comment), so this was always just "a reasonably large
+## capacity," borrowed from the old curve's sample count — decoupling it here
+## keeps the ten-vertex silhouette purely cosmetic and leaves the Heart's
+## actual buffer capacity, a real balance number, untouched by it.
+const HEART_EDGES := 48
 
 func _draw_heart_shape(r: float, col: Color) -> void:
 	var heart := _heart_points(r)

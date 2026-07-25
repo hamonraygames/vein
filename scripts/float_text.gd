@@ -38,9 +38,10 @@ func spawn(text: String, at: Vector2, col: Color, size := 16, dir := Vector2.UP)
 	z_index = 25
 
 
-## A wrong-delivery mark: "X read as a rejection, not the right shape — it
-## should be a cross." Same pop/rise/fade timing as a text mark, just a
-## drawn "+" instead of a string.
+## A wrong-delivery mark: a drawn vector X, not a font glyph — matches the
+## rest of the game's vector language (every in-world mark is a shape, and a
+## glyph could come out as a missing-character box if the fallback font
+## lacks it). Same pop/rise/fade timing as a text mark.
 func spawn_cross(at: Vector2, col: Color, size := 16, dir := Vector2.UP) -> void:
 	_col = col
 	_size = size
@@ -69,8 +70,12 @@ func _draw() -> void:
 	if _cross:
 		var half := float(_size) * 0.32
 		var w := maxf(2.2, float(_size) * 0.16)
-		draw_line(offset - Vector2(half, 0.0), offset + Vector2(half, 0.0), col, w, true)
-		draw_line(offset - Vector2(0.0, half), offset + Vector2(0.0, half), col, w, true)
+		# Same two perpendicular arms as a "+", just rotated 45° — an X reads
+		# as "wrong" at a glance where an upright cross could pass for a plus.
+		var arm := Vector2(half, 0.0).rotated(PI * 0.25)
+		var arm2 := Vector2(half, 0.0).rotated(-PI * 0.25)
+		draw_line(offset - arm, offset + arm, col, w, true)
+		draw_line(offset - arm2, offset + arm2, col, w, true)
 		return
 
 	if _font == null:

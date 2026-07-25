@@ -15,7 +15,7 @@ const VNodeScene := preload("res://scripts/vnode.gd")
 const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
-const BloodScene := preload("res://scripts/blood.gd")
+const ShatterScene := preload("res://scripts/shatter.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
@@ -379,6 +379,7 @@ const DRAG_SLOP := 12.0
 @onready var tutorial: Node2D = $Tutorial
 @onready var replay_btn: Button = $Ui/Death/ReplayBtn
 @onready var tutorial_btn: Button = $Ui/Death/TutorialBtn
+@onready var share_btn: Button = $Ui/Death/ShareBtn
 
 var rng := RandomNumberGenerator.new()
 var seed_used := 0
@@ -516,10 +517,10 @@ var _drain_amt := 0.0
 ## Ramps 0->1 once the run ends — the blood-red wash layered on top of the
 ## grayscale drain, see drain.gdshader's `death` uniform.
 var _death_amt := 0.0
-## The dripping-blood death overlay, tracked so start_run() can tear it down
+## The death-screen wreckage field, tracked so start_run() can tear it down
 ## on Replay (see there) — this game.gd instance and its scene persist
 ## across a run, there is no reload to do that for us.
-var _blood: Node2D = null
+var _shatter: Node2D = null
 var _sync_flash := 0.0
 var _bad_tempo_flash := 0.0
 ## Time scale to restore when the panic-pinch ends. Captured on engage so the
@@ -546,6 +547,7 @@ func _ready() -> void:
 	# and did nothing, which read as "the replay button is broken".
 	replay_btn.pressed.connect(func() -> void: start_run(0))
 	tutorial_btn.pressed.connect(_on_replay_tutorial)
+	share_btn.pressed.connect(_on_share_score)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
@@ -775,12 +777,12 @@ func start_run(run_seed: int) -> void:
 
 	death_ui.hide()
 	# The Death screen persists across a Replay (no scene reload — see the
-	# ReplayBtn wiring), so the dripping blood from the last run has to be
-	# torn down explicitly or it just keeps accumulating, one more streaky
-	# layer per death.
-	if _blood != null:
-		_blood.queue_free()
-		_blood = null
+	# ReplayBtn wiring), so the last run's wreckage has to be torn down
+	# explicitly or it just keeps accumulating, one more shattered layer per
+	# death.
+	if _shatter != null:
+		_shatter.queue_free()
+		_shatter = null
 	alive = true
 	if tutorial != null:
 		tutorial.reset()
@@ -850,10 +852,63 @@ func _on_stopped(total: int) -> void:
 	else:
 		best_label.text = "Best  %s" % _commas(best)
 	death_ui.show()
+	# The leaderboard only exists inside the Telegram Mini App (see
+	# _on_share_score) — Serverless has no public endpoint a plain web build
+	# could poll, so there is nothing this button could do there. Hidden by
+	# default in the scene; only ever shown once we know Telegram is present.
+	share_btn.visible = _in_telegram()
 
-	_blood = BloodScene.new()
-	ui_layer.add_child(_blood)
-	_blood.start(heart.position, rng.randi())
+	# The board itself shatters, not an abstract fountain — snapshot every
+	# still-alive node's shape/colour/position before hiding it, then let
+	# ShatterScene break each one into pieces of its own silhouette. Hiding
+	# the real VNodes (rather than freeing them) keeps everything else that
+	# reads `nodes` — the probe, a future Replay — untouched; start_run()
+	# frees them for real when the next run begins.
+	var snapshots: Array[Dictionary] = []
+	for n in nodes:
+		n.hide()
+		var col: Color = Palette.VOID if n.corrupted else \
+				(Palette.HEART if n.kind == VNode.Kind.HEART else Palette.of_res(n.produces))
+		snapshots.append({
+			"pos": n.position,
+			"color": col,
+			"radius": n.radius(),
+			"kind": n.kind,
+		})
+	_shatter = ShatterScene.new()
+	ui_layer.add_child(_shatter)
+	_shatter.start(snapshots, rng.randi())
+
+
+## True only inside the Telegram Mini App shell (see web/telegram_shell.html,
+## which loads telegram-web-app.js unconditionally — it's a documented
+## no-op stub outside Telegram, so this check is what actually tells the two
+## apart). `initData` specifically, not just `WebApp` existing: the SDK
+## script can load standalone too, but only a real Telegram-hosted session
+## carries `initData`. Native/editor builds have no JavaScriptBridge at all,
+## hence the has_feature("web") guard before ever touching it.
+func _in_telegram() -> bool:
+	if not OS.has_feature("web"):
+		return false
+	var has: Variant = JavaScriptBridge.eval(
+		"!!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData)")
+	return has == true
+
+
+## Sends this run's result to the leaderboard bot and closes the Mini App —
+## Telegram.WebApp.sendData() does both in one call, there is no way to send
+## without closing (see server/leaderboard/handlers/message.js, which
+## receives this as message.web_app_data and replies in the chat with the
+## top 10, this player's rank, and the global totals). Only ever reachable
+## when _in_telegram() already gated share_btn visible, but the guard stays
+## here too since nothing stops a native/editor test build from calling this
+## directly.
+func _on_share_score() -> void:
+	if not _in_telegram():
+		return
+	var payload := JSON.stringify({"score": score, "beats": beats})
+	JavaScriptBridge.eval(
+		"window.Telegram.WebApp.sendData(%s)" % JSON.stringify(payload))
 
 
 func _commas(n: int) -> String:
@@ -1082,25 +1137,23 @@ func _tick_escalation(delta: float) -> void:
 		# Tools keep arriving on their cadence but the BOARD stays capped —
 		# playtest: "after a while the screen is full of triangles and squares."
 		# At cap the timer still advances, so a slot freed later (a collapse)
-		# refills on the next tick rather than never.
+		# refills on the next tick rather than never. Which KIND fills a given
+		# slot can still lean toward the Heart's current craving — see
+		# _spawn_tool_slot.
 		if run_time >= _next_forge_time:
-			if _count_healthy_kind(VNode.Kind.FORGE) < MAX_LIVE_FORGES:
-				_spawn_node(VNode.Kind.FORGE)
+			_spawn_tool_slot(VNode.Kind.FORGE)
 			_next_forge_time += _jitter(FORGE_GAP, 0.25)
 
 		if run_time >= _next_loom_time:
-			if _count_healthy_kind(VNode.Kind.LOOM) < MAX_LIVE_LOOMS:
-				_spawn_node(VNode.Kind.LOOM)
+			_spawn_tool_slot(VNode.Kind.LOOM)
 			_next_loom_time += _jitter(LOOM_GAP, 0.2)
 
 		if run_time >= _next_kiln_time:
-			if _count_healthy_kind(VNode.Kind.KILN) < MAX_LIVE_KILNS:
-				_spawn_node(VNode.Kind.KILN)
+			_spawn_tool_slot(VNode.Kind.KILN)
 			_next_kiln_time += _jitter(KILN_GAP, 0.2)
 
 		if run_time >= _next_crucible_time:
-			if _count_healthy_kind(VNode.Kind.CRUCIBLE) < MAX_LIVE_CRUCIBLES:
-				_spawn_node(VNode.Kind.CRUCIBLE)
+			_spawn_tool_slot(VNode.Kind.CRUCIBLE)
 			_next_crucible_time += _jitter(CRUCIBLE_GAP, 0.2)
 
 	if run_time >= _next_budget_time:
@@ -1108,6 +1161,63 @@ func _tick_escalation(delta: float) -> void:
 		_next_budget_time += _jitter(_budget_gap, 0.15)
 		_budget_gap += BUDGET_GAP_GROWTH
 		budget_hint.queue_redraw()
+
+
+## The tool tier that directly produces what the Heart is CURRENTLY asking
+## for — -1 if there is no such tool (RAW is eaten straight from a Well) or
+## the run hasn't reached the post-teaching rotation phase yet
+## (_next_rotate_time == INF). Scoped to rotation on purpose: during the
+## teaching schedule every tool's own FIRST_*_TIME is already hand-tuned to
+## land ahead of its matching demand flip (see the const block up top), and
+## letting this override that lead-time reveal would just be a second system
+## fighting the first. Rotation is where it's actually needed — that's the
+## phase where demand jumps randomly among every unlocked tier and a tool's
+## fixed cadence has no way to know that just happened.
+func _critical_tool_kind() -> int:
+	if _next_rotate_time == INF:
+		return -1
+	match demand:
+		VNode.Res.REFINED: return VNode.Kind.FORGE
+		VNode.Res.CLOTH: return VNode.Kind.LOOM
+		VNode.Res.PRISM: return VNode.Kind.KILN
+		VNode.Res.HEXAGON: return VNode.Kind.CRUCIBLE
+	return -1
+
+
+func _max_live_for(kind: int) -> int:
+	match kind:
+		VNode.Kind.FORGE: return MAX_LIVE_FORGES
+		VNode.Kind.LOOM: return MAX_LIVE_LOOMS
+		VNode.Kind.KILN: return MAX_LIVE_KILNS
+		VNode.Kind.CRUCIBLE: return MAX_LIVE_CRUCIBLES
+	return 0
+
+
+## True if `kind` is the critical tier (see _critical_tool_kind) and could use
+## another live instance: fewer than two healthy already — plain existence is
+## _tick_tool_chain's job (see _ensure_canonical_alive), this is about not
+## being down to a single, un-backed-up instance of the one thing the Heart
+## is actually asking for right now — with room left under its own cap.
+func _wants_reinforcement(kind: int) -> bool:
+	if kind != _critical_tool_kind():
+		return false
+	return _count_healthy_kind(kind) < mini(2, _max_live_for(kind))
+
+
+## Fills one periodic tool-spawn slot. Ordinarily that is `kind`, the tier
+## whose own timer just fired — but if some OTHER tier is critical right now
+## and wants_reinforcement, this already-scheduled slot goes to that tier
+## instead. Every GAP constant, and how often a slot fires at all, stays
+## exactly as tuned; only WHICH kind fills a given slot can change, so a
+## demand flip to a thin tier gets reinforced by the very next tool spawn
+## instead of waiting out that tier's own independent cadence.
+func _spawn_tool_slot(kind: int) -> void:
+	var critical := _critical_tool_kind()
+	var spawn_kind := kind
+	if critical != -1 and critical != kind and _wants_reinforcement(critical):
+		spawn_kind = critical
+	if _count_healthy_kind(spawn_kind) < _max_live_for(spawn_kind):
+		_spawn_node(spawn_kind)
 
 
 ## New Wells displace the most-neglected old one once the board is full, so the
