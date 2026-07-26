@@ -66,7 +66,14 @@ func start(vp: Vector2) -> void:
 	btn.pressed.connect(_confirm)
 	add_child(btn)
 
-	_edit.grab_focus()
+	# Deliberately NOT auto-focusing the LineEdit here. Mobile browsers
+	# (including Telegram's in-app WebView) only pop the on-screen keyboard
+	# when a text field is focused synchronously INSIDE a real touch/click
+	# handler — a grab_focus() called from setup code, with no tap behind
+	# it, silently fails to raise the keyboard even though the field visibly
+	# shows a focus outline. The player's own tap on the field focuses it
+	# through Control's normal click-to-focus behaviour, which IS a real
+	# gesture and does trigger the keyboard correctly.
 
 
 func _confirm() -> void:
