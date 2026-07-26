@@ -1,45 +1,75 @@
-# VEIN leaderboard bot
+# VEIN leaderboard backend
 
-Runs on [Telegram Serverless](https://core.telegram.org/bots/serverless) — no
-server of our own, the code and the SQLite database both live on Telegram's
-infrastructure. See [schema.js](schema.js) (one `players` table: best score,
-when it was set, total runs) and [handlers/message.js](handlers/message.js)
-(receives a score, replies with the top 10 + your rank + totals).
+An AWS Lambda behind an API Gateway HTTP API, fronting two DynamoDB tables —
+plain aws-cli provisioning (see [deploy.sh](deploy.sh)), no CDK/Terraform/SAM,
+matching how the rest of this project ships infra (see `../../deploy_web.sh`).
 
-## Why a chat reply, not an in-game panel
+- `vein-leaderboard-players` — one item per Telegram user: `player_id`,
+  `name`, `best_score`, `best_score_at`, `total_runs`.
+- `vein-leaderboard-meta` — a single `totals` item: `total_players`,
+  `total_plays`, both plain counters incremented atomically per submission.
 
-Serverless only reacts to Bot API updates — there's no public HTTP endpoint
-the Mini App's own canvas can call while it's still open. The death screen's
-"Post to leaderboard" button calls `Telegram.WebApp.sendData()`, which sends
-the score and **closes the Mini App** in the same call (see
-`_on_share_score` in `scripts/game.gd`); the bot receives that as a
-`message.web_app_data` update and posts the leaderboard back into the chat.
-That's a hard platform constraint, not a choice — see the conversation that
-built this for the alternatives that were considered.
+## Why this replaced the Telegram Serverless bot
 
-## Going live (not done yet — needs your BotFather access)
+The first pass ran on [Telegram Serverless](https://core.telegram.org/bots/serverless)
+and worked by chat reply: "Post to leaderboard" called
+`Telegram.WebApp.sendData()`, which sends the score and **closes the Mini
+App** in the same call, and a bot handler replied with the board back into
+the chat. That was a workaround for a real constraint — Serverless only
+reacts to Bot API updates, there's no public HTTP endpoint the Mini App's
+own canvas could call while still open — but the actual ask was an in-game
+panel, not a chat message. This backend exists so the death screen can call
+a real endpoint and render the result itself without closing the app (see
+`_on_share_score` in `scripts/game.gd`).
 
-This was scaffolded and written against the public SDK docs, but never
-pushed to a real bot — that needs a credential only you can generate:
+## Endpoint
 
-1. In **@BotFather**: your bot → **Serverless** → turn it on → **CLI Access**
-   → grab the **access token** (`app<id>:<secret>` — separate from the
-   bot's API token already in `.env`).
-2. `cd server/leaderboard && npx tgcloud login` — paste that token.
-3. `npx tgcloud push` — deploys `schema.js`, `handlers/message.js`.
-4. `npx tgcloud migrate` — creates the `players` table (interactive; review
-   before confirming).
-5. Sanity-check without a real Telegram round trip:
-   `npx tgcloud run handlers/message '{ chat: { id: 1 }, from: { id: 1, first_name: "Test" }, web_app_data: { data: "{\"score\":42,\"beats\":100}" } }'`
+`POST /score` — submit-and-fetch in one call, so the panel never needs a
+second round trip after posting.
 
-Commands to know afterward: `npx tgcloud status` (local vs. deployed),
-`npx tgcloud pull` (bring local in line with the cloud), `npx tgcloud webhook`
-(check the bot's webhook matches the deployed handlers).
+Request body:
+```json
+{ "initData": "<Telegram.WebApp.initData, verbatim>", "score": 1234, "beats": 5678 }
+```
 
-## Player-facing commands
+`initData` is verified server-side against the bot token (see
+[lib/verify_telegram.js](lib/verify_telegram.js)) — without that check,
+anyone who found the URL could POST an arbitrary score for an arbitrary
+player. `beats` is accepted but not currently stored; the board ranks by
+`score`, same number the death screen shows.
 
-- Death screen → **Post to leaderboard**: submits the run, closes the Mini
-  App, bot replies with the board.
-- `/top` or `/leaderboard` in the chat: same reply, on demand.
-- `/name <text>`: sets the display name (defaults to your Telegram username
-  or first name on first submission).
+Response body:
+```json
+{
+  "top": [{ "name": "...", "score": 1234, "at": "2026-07-25T12:00:00.000Z" }, "...up to 10"],
+  "you": { "rank": 3, "score": 1234, "isBest": true },
+  "totalPlayers": 512,
+  "totalPlays": 2871
+}
+```
+
+## Deploying
+
+Needs `TELEGRAM_BOT_TOKEN` in the repo root's `.env` (gitignored — same
+token the bot already uses for its API calls) and AWS credentials for the
+same account/region `deploy_web.sh` already deploys the game to.
+
+```bash
+./deploy.sh
+```
+
+Creates or updates, in order: the two DynamoDB tables, an IAM role scoped to
+just those tables, the Lambda function, and an HTTP API with a `POST /score`
+route and CORS open to any origin (there's no cookie-based auth to protect —
+`initData` verification is what actually gates writes). Safe to re-run;
+every step checks before creating. Prints the endpoint URL at the end —
+paste it into `scripts/game.gd`'s `LEADERBOARD_URL` constant.
+
+## Scale note
+
+`submit.js` answers a rank by scanning the whole `players` table and sorting
+in memory. VEIN.md's own scope is a single-screen, run-based mobile game,
+not a leaderboard built to survive tens of thousands of concurrent
+players — a scan is the simplest correct thing at the size this is likely
+to ever be. If the player count ever makes that slow, the fix is a GSI on a
+bucketed `best_score`, not before.

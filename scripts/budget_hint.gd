@@ -17,7 +17,6 @@ extends Node2D
 const STROKE_W := 5.0
 const STROKE_H := 16.0
 const GAP := 8.0
-const MARGIN_BOTTOM := 30.0
 
 var _flash := 0.0
 ## The stroke index that just changed, so the flash can pop that one hardest
@@ -57,7 +56,11 @@ func _draw() -> void:
 	var vp: Vector2 = game.design_size()
 	var span := float(total) * STROKE_W + float(total - 1) * GAP
 	var x := (vp.x - span) * 0.5
-	var y := vp.y - MARGIN_BOTTOM
+	# The has_method check above already proves `game` is the real game.gd
+	# instance, so its EDGE_MARGIN_Y constant is always there too. Explicit
+	# `: float` (not `:=`) because a dynamic member read off `game` (typed
+	# only as Node2D here) has no static type for the analyzer to infer.
+	var y: float = vp.y - game.EDGE_MARGIN_Y
 
 	var tapped_out := used >= total
 	var throb := 0.0

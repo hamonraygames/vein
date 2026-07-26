@@ -16,8 +16,13 @@ const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
+const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 
 const SAVE_PATH := "user://vein.cfg"
+
+## POST /score on server/leaderboard's AWS backend (Lambda + API Gateway,
+## see there) — printed by server/leaderboard/deploy.sh on each deploy.
+const LEADERBOARD_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/score"
 
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
@@ -280,6 +285,20 @@ const BUDGET_GAP_START := 12.0
 ## once (this pass), the player needs veins to keep pace for longer, not have
 ## budget growth taper off early.
 const BUDGET_GAP_GROWTH := 2.5  # ...while veins arrive slower and slower
+
+## How close a node (or its fallback/clamped position) may sit to the
+## screen's edge, in design_size() units. X stays modest — the sides are
+## never covered by device chrome in portrait. Y is deliberately wider:
+## real phones cover both the top (status bar / camera notch / Dynamic
+## Island) and bottom (home indicator) with a few dozen points of
+## non-interactive, often non-VISIBLE-either chrome, especially inside the
+## Telegram Mini App's own header — a shape or the live score sitting at the
+## old 70.0 margin could land right under it. Every node-placement site
+## (_spawn_node, _least_crowded_spot, and every rescue/corruption placement
+## below) and score_hud.gd's live score share these two numbers so "clear of
+## the edges" means the same thing everywhere on the board.
+const EDGE_MARGIN_X := 56.0
+const EDGE_MARGIN_Y := 96.0
 
 ## Nothing spawns inside this radius of the Heart. Playtest: "don't spawn
 ## objects too close to the Heart, it makes around the Heart very messy." Tools
@@ -852,10 +871,10 @@ func _on_stopped(total: int) -> void:
 	else:
 		best_label.text = "Best  %s" % _commas(best)
 	death_ui.show()
-	# The leaderboard only exists inside the Telegram Mini App (see
-	# _on_share_score) — Serverless has no public endpoint a plain web build
-	# could poll, so there is nothing this button could do there. Hidden by
-	# default in the scene; only ever shown once we know Telegram is present.
+	# The leaderboard needs a real Telegram session to authenticate a score
+	# submission with (see _on_share_score) — a plain web build has no
+	# initData to prove who's posting. Hidden by default in the scene; only
+	# ever shown once we know Telegram is present.
 	share_btn.visible = _in_telegram()
 
 	# The board itself shatters, not an abstract fountain — snapshot every
@@ -895,20 +914,31 @@ func _in_telegram() -> bool:
 	return has == true
 
 
-## Sends this run's result to the leaderboard bot and closes the Mini App —
-## Telegram.WebApp.sendData() does both in one call, there is no way to send
-## without closing (see server/leaderboard/handlers/message.js, which
-## receives this as message.web_app_data and replies in the chat with the
-## top 10, this player's rank, and the global totals). Only ever reachable
-## when _in_telegram() already gated share_btn visible, but the guard stays
-## here too since nothing stops a native/editor test build from calling this
-## directly.
+## Raw Telegram.WebApp.initData, verbatim — the leaderboard backend verifies
+## this itself (see server/leaderboard/lib/verify_telegram.js) against the
+## bot token to prove a submission really came from the Telegram user it
+## claims to, so it has to travel whole, not just the fields this client
+## happens to read out of it.
+func _telegram_init_data() -> String:
+	var v: Variant = JavaScriptBridge.eval("window.Telegram.WebApp.initData")
+	return v if v is String else ""
+
+
+## Opens the in-game leaderboard panel, which submits this run's score and
+## renders the result as a modal over the death screen (see
+## leaderboard_panel.gd) — replaces the earlier Telegram-Serverless design,
+## which had to reply in the chat and close the Mini App because Serverless
+## has no public endpoint the canvas could call while still open (see
+## server/leaderboard/README.md). Only ever reachable when _in_telegram()
+## already gated share_btn visible, but the guard stays here too since
+## nothing stops a native/editor test build from calling this directly.
 func _on_share_score() -> void:
 	if not _in_telegram():
 		return
-	var payload := JSON.stringify({"score": score, "beats": beats})
-	JavaScriptBridge.eval(
-		"window.Telegram.WebApp.sendData(%s)" % JSON.stringify(payload))
+	share_btn.visible = false
+	var panel := LeaderboardPanelScene.new()
+	ui_layer.add_child(panel)
+	panel.start(LEADERBOARD_URL, _telegram_init_data(), score, beats, design_size())
 
 
 func _commas(n: int) -> String:
@@ -1246,6 +1276,19 @@ func _spawn_well() -> void:
 	_spawn_node(VNode.Kind.WELL)
 
 
+## What kind hands `kind` its raw material — a Forge eats from a Well, a Loom
+## from a Forge, a Kiln from a Loom, a Crucible from a Kiln. Shared by
+## _spawn_node's anchor choice and its redundancy scoring below (see there)
+## so the two can never name a different feeder tier for the same tool.
+func _feeder_kind_for(kind: int) -> int:
+	match kind:
+		VNode.Kind.FORGE: return VNode.Kind.WELL
+		VNode.Kind.LOOM: return VNode.Kind.FORGE
+		VNode.Kind.KILN: return VNode.Kind.LOOM
+		VNode.Kind.CRUCIBLE: return VNode.Kind.KILN
+	return -1
+
+
 ## New nodes spawn in awkward places, forcing rerouting. Bias to the lower two
 ## thirds so everything stays in one-thumb reach.
 ##
@@ -1352,17 +1395,11 @@ func _spawn_node(kind: int) -> void:
 	# candidate below, so an off-midpoint pick can never sneak out of range.
 	var anchor_point := heart.position
 	var feeder: VNode = null
+	var feeder_kind := _feeder_kind_for(kind)
 	var min_dist := 40.0
 	var max_dist := Vein.MAX_LEN * 0.9
 	if is_tool:
-		if kind == VNode.Kind.FORGE:
-			feeder = _nearest_node_of_kind(VNode.Kind.WELL, heart.position)
-		elif kind == VNode.Kind.LOOM:
-			feeder = _nearest_node_of_kind(VNode.Kind.FORGE, heart.position)
-		elif kind == VNode.Kind.KILN:
-			feeder = _nearest_node_of_kind(VNode.Kind.LOOM, heart.position)
-		else:
-			feeder = _nearest_node_of_kind(VNode.Kind.KILN, heart.position)
+		feeder = _nearest_node_of_kind(feeder_kind, heart.position)
 		# A tool anchors to its FEEDER, not the feeder<->Heart midpoint: it
 		# lives out in the field next to its supply and reaches the Heart
 		# across the same single Vein.MAX_LEN every other pair gets now. That
@@ -1392,7 +1429,7 @@ func _spawn_node(kind: int) -> void:
 			var bearing := rng.randf() * TAU
 			var dist := rng.randf_range(90.0, Vein.MAX_LEN * 0.95)
 			p = anchor.position + Vector2(cos(bearing), sin(bearing)) * dist
-		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+		if p.x < EDGE_MARGIN_X or p.x > vp.x - EDGE_MARGIN_X or p.y < EDGE_MARGIN_Y or p.y > vp.y - EDGE_MARGIN_Y:
 			continue
 
 		var to_heart := p.distance_to(heart.position)
@@ -1420,6 +1457,21 @@ func _spawn_node(kind: int) -> void:
 			# band — not piled on the Heart. Reward elbow room and sitting near
 			# the ideal ring distance, so tools scatter across the mid-field.
 			s = near - absf(to_heart - TOOL_IDEAL_HEART_DIST) * 0.6
+			# Reward a spot that can also reach OTHER healthy feeders, not just
+			# the one it anchored to — "there should be multiple options, some
+			# might get poisoned." A single-feeder tool is one corruption away
+			# from being stranded; this never REQUIRES a backup (the no-move
+			# guarantee above already covers that with just the one feeder),
+			# it only prefers a candidate that happens to have one over one
+			# that doesn't, so the board naturally grows some slack instead of
+			# every tool being a lone point of failure.
+			if feeder_kind != -1:
+				var backups := 0
+				for n in nodes:
+					if n.kind == feeder_kind and not n.corrupted \
+							and p.distance_to(n.position) <= Vein.MAX_LEN:
+						backups += 1
+				s += minf(float(backups - 1), 2.0) * 40.0
 		else:
 			# Prefer awkward — elbow room from neighbours — WITHOUT preferring a
 			# compass direction. Distance from the Heart is deliberately not a
@@ -1431,16 +1483,24 @@ func _spawn_node(kind: int) -> void:
 
 	if best_score == -INF:
 		# NOTHING is allowed to silently fail to spawn. For a tool the fallback
-		# must STILL be reachable, so it goes at the feeder<->Heart midpoint
-		# (which is within one reach of both by construction) nudged to the
-		# least-crowded nearby bearing; a Well falls back to a spot off any
-		# anchor.
+		# must STILL be reachable — this used to sample far out along the
+		# FEEDER's own ring (up to max_dist, ~0.82x MAX_LEN from it), which on
+		# a crowded board could and did land a tool beyond Vein.MAX_LEN of the
+		# HEART: exactly the "spawned somewhere I can never connect it" state
+		# this whole function exists to prevent, and worse for a tool than a
+		# Well, since a Well can still chain in through another Well but a
+		# stranded tool has no such backup. The feeder<->Heart MIDPOINT sits
+		# within MAX_LEN-24 of both by construction (feeder is gated to that
+		# above), so nudging only a modest distance off it can never push the
+		# result out of reach of either — the two limit_length calls after are
+		# a second, explicit guarantee of that, not just a hope the geometry
+		# works out.
 		if is_tool:
 			if feeder != null:
-				# Sample the full allowed ring, not a tight 40px stub: the
-				# least-crowded spot is also the one farthest from the Heart, so
-				# a fallback tool spreads outward rather than piling on the Heart.
-				best = _least_crowded_spot(anchor_point, max_dist)
+				var mid := (feeder.position + heart.position) * 0.5
+				best = _least_crowded_spot(mid, Vein.MAX_LEN * 0.35)
+				best = heart.position + (best - heart.position).limit_length(Vein.MAX_LEN - 4.0)
+				best = feeder.position + (best - feeder.position).limit_length(Vein.MAX_LEN - 4.0)
 			else:
 				best = _least_crowded_spot(anchor_point, Vein.MAX_LEN * 0.6)
 		else:
@@ -1565,8 +1625,8 @@ func _least_crowded_spot(center: Vector2, dist: float) -> Vector2:
 	for i in 24:
 		var a := TAU * float(i) / 24.0
 		var p := center + Vector2(cos(a), sin(a)) * dist
-		p.x = clampf(p.x, 56.0, vp.x - 56.0)
-		p.y = clampf(p.y, 70.0, vp.y - 70.0)
+		p.x = clampf(p.x, EDGE_MARGIN_X, vp.x - EDGE_MARGIN_X)
+		p.y = clampf(p.y, EDGE_MARGIN_Y, vp.y - EDGE_MARGIN_Y)
 		var near := INF
 		for n in nodes:
 			near = minf(near, p.distance_to(n.position))
@@ -1687,7 +1747,7 @@ func _spawn_rescue_well() -> void:
 		var bearing := rng.randf() * TAU
 		var dist := rng.randf_range(112.0, Vein.MAX_LEN * 0.85)
 		var p := center + Vector2(cos(bearing), sin(bearing)) * dist
-		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+		if p.x < EDGE_MARGIN_X or p.x > vp.x - EDGE_MARGIN_X or p.y < EDGE_MARGIN_Y or p.y > vp.y - EDGE_MARGIN_Y:
 			continue
 		if p.distance_to(heart.position) < MIN_HEART_CLEARANCE:
 			continue
@@ -1873,7 +1933,7 @@ func _spawn_rescue_feeder(feeder_kind: int, target: VNode) -> void:
 		var bearing := rng.randf() * TAU
 		var dist := rng.randf_range(min_dist, max_dist)
 		var p := anchor + Vector2(cos(bearing), sin(bearing)) * dist
-		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+		if p.x < EDGE_MARGIN_X or p.x > vp.x - EDGE_MARGIN_X or p.y < EDGE_MARGIN_Y or p.y > vp.y - EDGE_MARGIN_Y:
 			continue
 		if p.distance_to(target.position) > Vein.MAX_LEN:
 			continue
@@ -1923,7 +1983,7 @@ func _spawn_rescue_well_near(near: Vector2) -> void:
 		var bearing := rng.randf() * TAU
 		var dist := rng.randf_range(70.0, Vein.MAX_LEN * 0.85)
 		var p := near + Vector2(cos(bearing), sin(bearing)) * dist
-		if p.x < 56.0 or p.x > vp.x - 56.0 or p.y < 70.0 or p.y > vp.y - 70.0:
+		if p.x < EDGE_MARGIN_X or p.x > vp.x - EDGE_MARGIN_X or p.y < EDGE_MARGIN_Y or p.y > vp.y - EDGE_MARGIN_Y:
 			continue
 		if p.distance_to(heart.position) < MIN_HEART_CLEARANCE:
 			continue

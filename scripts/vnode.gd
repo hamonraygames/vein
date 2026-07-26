@@ -1026,10 +1026,18 @@ func _draw_buffer(r: float, col: Color) -> void:
 	if buffer.is_empty():
 		return
 	var slots := buffer_cap()
+	# Every trig-built shape (triangle/pentagon/hexagon, see _draw_tri etc.)
+	# has its first VERTEX at the top — a = TAU*i/n - PI/2 — so reaching an
+	# EDGE center needs the extra half-slot rotation below. The Loom's square
+	# is the one shape not built that way: _draw_square places flat corners
+	# at (±half, ±half), a top EDGE rather than a top vertex, so its real
+	# edge centers already sit at the un-rotated positions — adding the same
+	# half-slot offset there put every pip on a corner instead of a side.
+	var phase := 0.0 if kind == Kind.LOOM else (TAU / float(slots)) * 0.5
 	for i in buffer.size():
 		var edge_i := i % slots
 		var lap := i / slots
-		var a := TAU * (float(edge_i) / float(slots)) - PI * 0.5 + (TAU / float(slots)) * 0.5
+		var a := TAU * (float(edge_i) / float(slots)) - PI * 0.5 + phase
 		var p := Vector2(cos(a), sin(a)) * (r + 8.0 + float(lap) * 7.0)
 		var pc := Palette.of_res(buffer[i])
 		pc.a = 0.9

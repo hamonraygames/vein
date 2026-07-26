@@ -50,9 +50,13 @@ func _draw() -> void:
 		return
 
 	# Top-centre, clear of the Heart's traffic. Best is intentionally absent
-	# here — it lives only on the death screen now.
+	# here — it lives only on the death screen now. Y shares game.gd's
+	# EDGE_MARGIN_Y (see there) so the live score sits clear of a phone's
+	# status bar / notch / Telegram Mini App header the same way every
+	# spawned shape does — this was the one on-screen element still using
+	# its own hardcoded 70.0.
 	var vp: Vector2 = game.design_size()
-	var origin := Vector2(vp.x * 0.5, 70.0)
+	var origin := Vector2(vp.x * 0.5, game.EDGE_MARGIN_Y)
 
 	var col := Palette.SCORE
 	col.a = clampf(0.30 + _swell * 0.34 + _punch * 0.5, 0.0, 1.0)

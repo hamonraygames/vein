@@ -152,6 +152,52 @@ body {
 	tg.onEvent('viewportChanged', function () {
 		window.dispatchEvent(new Event('resize'));
 	});
+
+	// Silent on Telegram's MOBILE app (iOS/Android's native in-app WebView),
+	// fine on Telegram Desktop's own webview and on a plain browser tab.
+	// VEIN starts its background track the instant the scene is ready (see
+	// game.gd's start_run(), called from _ready(), which calls Audio.start())
+	// — before the player has touched anything. A strict mobile WebView's Web
+	// Audio autoplay policy is born-suspended until the PAGE has "user
+	// activation" from a real gesture, and normally Godot's own web runtime
+	// grabs that from the page's first click/touch/key automatically — but
+	// this game's one interaction verb is a DRAG (see VEIN.md), and
+	// disableVerticalSwipes() above already proves Telegram's native gesture
+	// recognizer intercepts that drag's early touch events on mobile before
+	// they behave like an ordinary page click, which is exactly the kind of
+	// thing that can make a WebView never count it as the trusted gesture
+	// autoplay-unlock is watching for. Priming (creating AND actually
+	// playing a silent buffer through) an AudioContext of our own on the
+	// EARLIEST raw touch/pointer/key event — capture phase, before Telegram
+	// or Godot can intercept or reinterpret it — grants the page that
+	// activation directly; per the Web Audio autoplay spec, any AudioContext
+	// created afterward (including Godot's own, already-suspended one)
+	// starts/resumes unsuspended too. Scoped to inside the Telegram guard
+	// only — the plain web build already works today and this must not
+	// change its audio init path.
+	var _audioPrimed = false;
+	function _primeAudio() {
+		if (_audioPrimed) {
+			return;
+		}
+		_audioPrimed = true;
+		var Ctx = window.AudioContext || window.webkitAudioContext;
+		if (!Ctx) {
+			return;
+		}
+		var ctx = new Ctx();
+		if (ctx.state === 'suspended') {
+			ctx.resume();
+		}
+		var buffer = ctx.createBuffer(1, 1, 22050);
+		var src = ctx.createBufferSource();
+		src.buffer = buffer;
+		src.connect(ctx.destination);
+		src.start(0);
+	}
+	['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(function (evt) {
+		document.addEventListener(evt, _primeAudio, { capture: true, passive: true });
+	});
 }());
 		</script>
 		<script src="$GODOT_URL"></script>
