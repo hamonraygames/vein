@@ -1,4 +1,4 @@
-[gd_scene load_steps=14 format=3]
+[gd_scene load_steps=15 format=3]
 
 [ext_resource type="Script" path="res://scripts/game.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/budget_hint.gd" id="2"]
@@ -6,6 +6,7 @@
 [ext_resource type="Shader" path="res://assets/shaders/drain.gdshader" id="3"]
 [ext_resource type="Script" path="res://scripts/reheart.gd" id="4"]
 [ext_resource type="Script" path="res://scripts/tutorial.gd" id="7"]
+[ext_resource type="Script" path="res://scripts/ranks_strip.gd" id="8"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
 shader = ExtResource("3")
@@ -87,6 +88,10 @@ script = ExtResource("2")
 z_index = 6
 script = ExtResource("5")
 
+[node name="RanksStrip" type="Node2D" parent="."]
+z_index = 6
+script = ExtResource("8")
+
 [node name="Tutorial" type="Node2D" parent="."]
 z_index = 18
 script = ExtResource("7")
@@ -153,7 +158,6 @@ vertical_alignment = 1
 mouse_filter = 2
 
 [node name="ShareBtn" type="Button" parent="Ui/Death"]
-visible = false
 anchor_left = 0.0
 anchor_top = 0.79
 anchor_right = 1.0
@@ -170,7 +174,7 @@ theme_override_styles/normal = SubResource("BtnSecondaryNormal")
 theme_override_styles/hover = SubResource("BtnSecondaryNormal")
 theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
 theme_override_styles/focus = SubResource("BtnFocusEmpty")
-text = "Post to leaderboard"
+text = "Leaderboard"
 
 [node name="ReplayBtn" type="Button" parent="Ui/Death"]
 anchor_left = 0.0
@@ -209,3 +213,8 @@ theme_override_styles/hover = SubResource("BtnSecondaryNormal")
 theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
 theme_override_styles/focus = SubResource("BtnFocusEmpty")
 text = "↻ Replay tutorial"
+
+[node name="Modal" type="Control" parent="Ui"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2

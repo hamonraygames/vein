@@ -17,6 +17,7 @@ const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
+const NamePromptScene := preload("res://scripts/name_prompt.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
@@ -160,6 +161,18 @@ const ROTATE_GAP_FLOOR := WORST_CASE_HEXAGON_TRAVEL * 1.25   # ~12.65s
 ## actually bottoms out where the clamp does, instead of asymptoting toward a
 ## number it can never reach.
 const ROTATE_GAP_MIN := ROTATE_GAP_FLOOR
+
+## How long before a rotation-phase flip lands the Heart starts telegraphing
+## it — see VNode.tell_res/tell_ratio. Reddit playtest: knowing the TEACHING
+## order (RAW->REFINED->CLOTH->PRISM->HEXAGON, fixed and learnable) but never
+## the rotation order read as "chaos rather than planned resource
+## management." A full advance queue would kill the point of rotation —
+## "nothing you built early is ever safe to walk away from" only works if
+## you can't see the whole schedule — so this gives exactly one step of
+## warning, diegetically, on the Heart itself, instead of a HUD readout.
+## Shorter than FIRST_FORGE_TIME-style lead times on purpose: this is a
+## last-second brace, not prep time to build a whole new chain.
+const DEMAND_TELL_LEAD := 3.0
 
 ## Feeding the Heart something it did not ask for: WASTED, never poison.
 ##
@@ -399,6 +412,13 @@ const DRAG_SLOP := 12.0
 @onready var replay_btn: Button = $Ui/Death/ReplayBtn
 @onready var tutorial_btn: Button = $Ui/Death/TutorialBtn
 @onready var share_btn: Button = $Ui/Death/ShareBtn
+## Full-rect Control, always correctly viewport-sized (declared in the
+## .tscn — see there for why: a same-shaped Control built purely in code and
+## parented straight under a CanvasLayer measured its own rect as (0, 0),
+## collapsing every anchored child inside it to one point). The one parent
+## every dynamically-spawned modal (the name prompt, the leaderboard panel)
+## uses instead of ui_layer directly.
+@onready var modal_layer: Control = $Ui/Modal
 
 var rng := RandomNumberGenerator.new()
 var seed_used := 0
@@ -440,6 +460,28 @@ var _score_carry := 0.0
 var best := 0
 var lifetime_beats := 0
 var beat_best_this_run := false
+## Arcade-style leaderboard identity (see server/leaderboard/README.md) — no
+## login, just a random ID generated once on first launch and a name typed
+## once at the very first launch (see name_prompt.gd, shown from _ready()),
+## both persisted the same way best/lifetime_beats are.
+var player_id := ""
+var player_name := ""
+
+## This run's leaderboard result — submitted automatically the moment the
+## Heart stops (see _submit_score, called from _on_stopped), not behind a
+## tap: "everyone chooses a name and that's it" was explicit direction, and
+## a manual post step is one more thing between the player and seeing where
+## they landed. "idle" before the first death this session, then
+## "loading"/"loaded"/"error". ranks_strip.gd (the death screen's compact
+## rank-2..rank+2 readout) and _on_open_leaderboard (the full top-10 panel)
+## both just read these rather than fetching anything themselves.
+var lb_state := "idle"
+var lb_top: Array = []
+var lb_nearby: Array = []
+var lb_you := {"rank": 0, "score": 0, "isBest": false}
+var lb_total_players := 0
+var lb_total_plays := 0
+var _lb_http: HTTPRequest
 ## Persisted across runs (see _load_save/_store_save) — drives VNode.teach so
 ## the recipe demonstration plays on the first Forge/Loom/Kiln/Crucible the
 ## player EVER sees, not every run once they already understand it.
@@ -489,6 +531,11 @@ var demand: int = VNode.Res.RAW
 ## post-teaching rotation phase draws from (see _tick_escalation).
 var _unlocked_res: Array[int] = [VNode.Res.RAW]
 var _next_rotate_time := INF
+## Pre-rolled outcome of the NEXT rotation flip, rolled DEMAND_TELL_LEAD
+## seconds early so the Heart can telegraph it (see _tick_escalation and
+## VNode.tell_res) instead of the flip rerolling silently at the last
+## instant. -1 means nothing rolled yet for the upcoming flip.
+var _next_rotate_demand := -1
 
 ## True from the instant the Heart has EVER received a delivery — any kind,
 ## even a wrong-shape one, since it only exists to prove the player has
@@ -566,10 +613,32 @@ func _ready() -> void:
 	# and did nothing, which read as "the replay button is broken".
 	replay_btn.pressed.connect(func() -> void: start_run(0))
 	tutorial_btn.pressed.connect(_on_replay_tutorial)
-	share_btn.pressed.connect(_on_share_score)
+	share_btn.pressed.connect(_on_open_leaderboard)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
+	# First launch ever (or a save from before names existed): get a name
+	# BEFORE any run starts, not behind a death-screen tap — "at the
+	# beginning game should get user's name for the first time and then
+	# proceed to game" was explicit direction. Every launch after this one
+	# has player_name already saved and skips straight to start_run.
+	# Skipped under any dev harness (probe/shot/chainstress/...): those are
+	# identified by the mere presence of cmdline args, which a real launch
+	# (Telegram, a browser tab, a bare double-click) never has, and none of
+	# them can type a name into a LineEdit.
+	if player_name.is_empty() and OS.get_cmdline_user_args().is_empty():
+		var prompt := NamePromptScene.new()
+		modal_layer.add_child(prompt)
+		prompt.confirmed.connect(_on_first_name_confirmed)
+		prompt.start(design_size())
+	else:
+		start_run(0)
+		_maybe_attach_harness()
+
+
+func _on_first_name_confirmed(name_text: String) -> void:
+	player_name = name_text
+	_store_save()
 	start_run(0)
 	_maybe_attach_harness()
 
@@ -607,6 +676,15 @@ func _load_save() -> void:
 	tut_forge = bool(cfg.get_value("run", "tut_forge", false))
 	tut_cut = bool(cfg.get_value("run", "tut_cut", false))
 	tutorial_done = bool(cfg.get_value("run", "tutorial_done", false))
+	player_id = str(cfg.get_value("run", "player_id", ""))
+	player_name = str(cfg.get_value("run", "player_name", ""))
+	# First launch ever, or a save from before the leaderboard existed —
+	# every player needs SOME id before they can post a score, and it has
+	# to be stable across runs, so it's generated once here rather than at
+	# the moment they first tap "Post to leaderboard."
+	if player_id.is_empty():
+		player_id = Crypto.new().generate_random_bytes(16).hex_encode()
+		_store_save()
 
 
 func _store_save() -> void:
@@ -625,6 +703,8 @@ func _store_save() -> void:
 	cfg.set_value("run", "tut_forge", tut_forge)
 	cfg.set_value("run", "tut_cut", tut_cut)
 	cfg.set_value("run", "tutorial_done", tutorial_done)
+	cfg.set_value("run", "player_id", player_id)
+	cfg.set_value("run", "player_name", player_name)
 	cfg.save(SAVE_PATH)
 
 
@@ -755,6 +835,7 @@ func start_run(run_seed: int) -> void:
 	demand = VNode.Res.RAW
 	_unlocked_res = [VNode.Res.RAW]
 	_next_rotate_time = INF
+	_next_rotate_demand = -1
 	_heart_fed_ever = false
 	_demand_clock = 0.0
 	_prism_unlocked_at = INF
@@ -871,11 +952,7 @@ func _on_stopped(total: int) -> void:
 	else:
 		best_label.text = "Best  %s" % _commas(best)
 	death_ui.show()
-	# The leaderboard needs a real Telegram session to authenticate a score
-	# submission with (see _on_share_score) — a plain web build has no
-	# initData to prove who's posting. Hidden by default in the scene; only
-	# ever shown once we know Telegram is present.
-	share_btn.visible = _in_telegram()
+	_submit_score()
 
 	# The board itself shatters, not an abstract fountain — snapshot every
 	# still-alive node's shape/colour/position before hiding it, then let
@@ -899,46 +976,55 @@ func _on_stopped(total: int) -> void:
 	_shatter.start(snapshots, rng.randi())
 
 
-## True only inside the Telegram Mini App shell (see web/telegram_shell.html,
-## which loads telegram-web-app.js unconditionally — it's a documented
-## no-op stub outside Telegram, so this check is what actually tells the two
-## apart). `initData` specifically, not just `WebApp` existing: the SDK
-## script can load standalone too, but only a real Telegram-hosted session
-## carries `initData`. Native/editor builds have no JavaScriptBridge at all,
-## hence the has_feature("web") guard before ever touching it.
-func _in_telegram() -> bool:
-	if not OS.has_feature("web"):
-		return false
-	var has: Variant = JavaScriptBridge.eval(
-		"!!(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData)")
-	return has == true
-
-
-## Raw Telegram.WebApp.initData, verbatim — the leaderboard backend verifies
-## this itself (see server/leaderboard/lib/verify_telegram.js) against the
-## bot token to prove a submission really came from the Telegram user it
-## claims to, so it has to travel whole, not just the fields this client
-## happens to read out of it.
-func _telegram_init_data() -> String:
-	var v: Variant = JavaScriptBridge.eval("window.Telegram.WebApp.initData")
-	return v if v is String else ""
-
-
-## Opens the in-game leaderboard panel, which submits this run's score and
-## renders the result as a modal over the death screen (see
-## leaderboard_panel.gd) — replaces the earlier Telegram-Serverless design,
-## which had to reply in the chat and close the Mini App because Serverless
-## has no public endpoint the canvas could call while still open (see
-## server/leaderboard/README.md). Only ever reachable when _in_telegram()
-## already gated share_btn visible, but the guard stays here too since
-## nothing stops a native/editor test build from calling this directly.
-func _on_share_score() -> void:
-	if not _in_telegram():
+## Arcade-style, works everywhere (Telegram, a plain browser tab, a local
+## build), no login (see server/leaderboard/README.md) — fired automatically
+## the instant the Heart stops (see _on_stopped), not from a button. Name is
+## already guaranteed set by now: _ready() gets one before the first run
+## ever starts (see name_prompt.gd).
+func _submit_score() -> void:
+	lb_state = "loading"
+	if LEADERBOARD_URL.is_empty():
+		lb_state = "error"
 		return
-	share_btn.visible = false
+	if _lb_http == null:
+		_lb_http = HTTPRequest.new()
+		add_child(_lb_http)
+		_lb_http.request_completed.connect(_on_lb_request_completed)
+	var body := JSON.stringify({
+		"player_id": player_id, "name": player_name, "score": score, "beats": beats,
+	})
+	var err := _lb_http.request(
+		LEADERBOARD_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+	if err != OK:
+		lb_state = "error"
+
+
+func _on_lb_request_completed(result: int, response_code: int, _headers: PackedStringArray,
+		body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		lb_state = "error"
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		lb_state = "error"
+		return
+	lb_top = parsed.get("top", [])
+	lb_nearby = parsed.get("nearby", [])
+	lb_you = parsed.get("you", lb_you)
+	lb_total_players = int(parsed.get("totalPlayers", 0))
+	lb_total_plays = int(parsed.get("totalPlays", 0))
+	lb_state = "loaded"
+
+
+## "Leaderboard" — opens the full top-10 panel over whatever _submit_score
+## already fetched (or is still fetching: leaderboard_panel.gd reads
+## lb_state live and updates itself once it lands). Never makes its own
+## request, so there is no second round trip just to look at data that's
+## already sitting here.
+func _on_open_leaderboard() -> void:
 	var panel := LeaderboardPanelScene.new()
-	ui_layer.add_child(panel)
-	panel.start(LEADERBOARD_URL, _telegram_init_data(), score, beats, design_size())
+	modal_layer.add_child(panel)
+	panel.start(self, design_size())
 
 
 func _commas(n: int) -> String:
@@ -1114,13 +1200,26 @@ func _tick_escalation(delta: float) -> void:
 	# they've learned to connect and chain.
 	if not _tut_holds_demand():
 		var want: int = demand
-		for t in DEMAND_TIERS:
-			if _demand_clock >= t.at:
-				want = t.res
-				if not _unlocked_res.has(t.res):
-					_unlocked_res.append(t.res)
-					if t.res == VNode.Res.PRISM:
-						_prism_unlocked_at = run_time
+		# Only walks the teaching schedule while it's still running. Once
+		# rotation has been armed (_next_rotate_time != INF, see below), every
+		# DEMAND_TIERS entry is already unlocked and its `at` has long since
+		# passed — so left unguarded, this loop always lands on the LAST
+		# tier's res every single frame, overwriting `want` back to it right
+		# after the rotation branch below picks something else. The bug that
+		# produced: a rotation flip would show for exactly one frame, then
+		# get stomped back to the final teaching tier on the very next frame
+		# — "rotation" was actually a one-frame flicker, not a held demand.
+		# Found chasing the Reddit "chaos, not planned management" feedback:
+		# turns out rotation barely ever held long enough to plan around in
+		# the first place.
+		if _next_rotate_time == INF:
+			for t in DEMAND_TIERS:
+				if _demand_clock >= t.at:
+					want = t.res
+					if not _unlocked_res.has(t.res):
+						_unlocked_res.append(t.res)
+						if t.res == VNode.Res.PRISM:
+							_prism_unlocked_at = run_time
 
 		# Teaching schedule is over once every DEMAND_TIERS entry has landed —
 		# from here, demand jumps randomly among everything unlocked instead of
@@ -1131,15 +1230,30 @@ func _tick_escalation(delta: float) -> void:
 		if _demand_clock >= DEMAND_TIERS[-1].at and _next_rotate_time == INF:
 			_next_rotate_time = _demand_clock + _jitter(ROTATE_GAP_START, 0.3)
 		elif _demand_clock >= _next_rotate_time:
-			var pool := _unlocked_res.duplicate()
-			pool.erase(want)
-			if not pool.is_empty():
-				want = pool[rng.randi() % pool.size()]
+			# Use the pre-rolled tell if one landed (the normal case — see the
+			# branch below); only reroll here if the flip somehow arrived
+			# without one, e.g. rotation just started this exact frame with
+			# less than DEMAND_TELL_LEAD of runway.
+			want = _next_rotate_demand if _next_rotate_demand != -1 else _roll_rotate_demand(want)
+			_next_rotate_demand = -1
 			# Keeps shrinking past pressure 1.0 (see pressure()) toward a hard
 			# floor, so deep-late demand flips genuinely never stop accelerating.
 			var gap := lerpf(ROTATE_GAP_START, ROTATE_GAP_MIN, intensity())
 			gap = maxf(ROTATE_GAP_FLOOR, gap - maxf(pressure() - 1.0, 0.0) * 2.0)
 			_next_rotate_time = _demand_clock + _jitter(gap, 0.35)
+		elif _next_rotate_time != INF and _next_rotate_demand == -1 \
+				and _demand_clock >= _next_rotate_time - DEMAND_TELL_LEAD:
+			_next_rotate_demand = _roll_rotate_demand(want)
+
+		# Mirror the pending tell onto the Heart every frame it's active (see
+		# VNode._draw_demand) — ramps 0->1 across DEMAND_TELL_LEAD, and snaps
+		# back to 0 the instant the flip above consumes it.
+		if _next_rotate_demand != -1:
+			heart.tell_res = _next_rotate_demand
+			heart.tell_ratio = clampf(
+				1.0 - (_next_rotate_time - _demand_clock) / DEMAND_TELL_LEAD, 0.0, 1.0)
+		else:
+			heart.tell_ratio = 0.0
 
 		if want != demand:
 			demand = want
@@ -1191,6 +1305,17 @@ func _tick_escalation(delta: float) -> void:
 		_next_budget_time += _jitter(_budget_gap, 0.15)
 		_budget_gap += BUDGET_GAP_GROWTH
 		budget_hint.queue_redraw()
+
+
+## Rolls a rotation-phase demand, excluding `current` — the pool both the
+## live flip and its pre-roll tell (see _tick_escalation) draw from. Pulled
+## into one function so those two call sites can't drift apart.
+func _roll_rotate_demand(current: int) -> int:
+	var pool := _unlocked_res.duplicate()
+	pool.erase(current)
+	if pool.is_empty():
+		return current
+	return pool[rng.randi() % pool.size()]
 
 
 ## The tool tier that directly produces what the Heart is CURRENTLY asking
@@ -2740,6 +2865,19 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 	if kind == VNode.Res.VOID:
 		col = Palette.VOID
 		text = "%d" % rounded
+		# A poison landing has to be FELT, not just read as a negative number
+		# sitting next to every positive one — the same small violent burst a
+		# rupture gets (see burst.gd), the one cold colour in the palette, so
+		# the impact reads as wrong by shape and motion, not the tint alone.
+		var ring: Array[Vector2] = []
+		var kinds: Array[int] = []
+		for i in 8:
+			var a := TAU * float(i) / 8.0
+			ring.append(at + Vector2(cos(a), sin(a)) * 10.0)
+			kinds.append(0)
+		var hit: Node2D = BurstScene.new()
+		vein_layer.add_child(hit)
+		hit.spawn(ring, kinds, rng.randi(), Palette.VOID, 0.75)
 	else:
 		col = Palette.SCORE
 		text = "+%d" % rounded

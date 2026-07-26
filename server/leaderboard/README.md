@@ -4,23 +4,25 @@ An AWS Lambda behind an API Gateway HTTP API, fronting two DynamoDB tables —
 plain aws-cli provisioning (see [deploy.sh](deploy.sh)), no CDK/Terraform/SAM,
 matching how the rest of this project ships infra (see `../../deploy_web.sh`).
 
-- `vein-leaderboard-players` — one item per Telegram user: `player_id`,
-  `name`, `best_score`, `best_score_at`, `total_runs`.
+- `vein-leaderboard-players` — one item per player: `player_id`, `name`,
+  `best_score`, `best_score_at`, `total_runs`.
 - `vein-leaderboard-meta` — a single `totals` item: `total_players`,
   `total_plays`, both plain counters incremented atomically per submission.
 
-## Why this replaced the Telegram Serverless bot
+## Arcade-style, on purpose
 
-The first pass ran on [Telegram Serverless](https://core.telegram.org/bots/serverless)
-and worked by chat reply: "Post to leaderboard" called
-`Telegram.WebApp.sendData()`, which sends the score and **closes the Mini
-App** in the same call, and a bot handler replied with the board back into
-the chat. That was a workaround for a real constraint — Serverless only
-reacts to Bot API updates, there's no public HTTP endpoint the Mini App's
-own canvas could call while still open — but the actual ask was an in-game
-panel, not a chat message. This backend exists so the death screen can call
-a real endpoint and render the result itself without closing the app (see
-`_on_share_score` in `scripts/game.gd`).
+There's no login and no proof of identity — a player is whatever
+`player_id` their client sends (a random ID generated once and saved
+locally, see `_load_save`/`_generate_player_id` in `scripts/game.gd`),
+under whatever name they typed once (see `scripts/leaderboard_panel.gd`'s
+name prompt). Anyone who found this URL could POST an arbitrary score under
+an arbitrary name — that's the accepted trade for a leaderboard that works
+everywhere (Telegram, a plain browser tab, a local build) with no sign-in
+step. `submit.js` still bounds score/name/ID to sane sizes so the data
+stays tidy, but it's not trying to stop a determined cheater; VEIN is a
+casual mobile game, not a competitive ranking with anything real riding on
+it. An earlier version required a signed Telegram session instead — see git
+history if that trade ever needs revisiting.
 
 ## Endpoint
 
@@ -29,14 +31,11 @@ second round trip after posting.
 
 Request body:
 ```json
-{ "initData": "<Telegram.WebApp.initData, verbatim>", "score": 1234, "beats": 5678 }
+{ "player_id": "<random ID, generated once and saved locally>", "name": "your name", "score": 1234, "beats": 5678 }
 ```
 
-`initData` is verified server-side against the bot token (see
-[lib/verify_telegram.js](lib/verify_telegram.js)) — without that check,
-anyone who found the URL could POST an arbitrary score for an arbitrary
-player. `beats` is accepted but not currently stored; the board ranks by
-`score`, same number the death screen shows.
+`beats` is accepted but not currently stored; the board ranks by `score`,
+same number the death screen shows.
 
 Response body:
 ```json
@@ -50,9 +49,8 @@ Response body:
 
 ## Deploying
 
-Needs `TELEGRAM_BOT_TOKEN` in the repo root's `.env` (gitignored — same
-token the bot already uses for its API calls) and AWS credentials for the
-same account/region `deploy_web.sh` already deploys the game to.
+Needs AWS credentials for the same account/region `deploy_web.sh` already
+deploys the game to — nothing else.
 
 ```bash
 ./deploy.sh
@@ -60,10 +58,9 @@ same account/region `deploy_web.sh` already deploys the game to.
 
 Creates or updates, in order: the two DynamoDB tables, an IAM role scoped to
 just those tables, the Lambda function, and an HTTP API with a `POST /score`
-route and CORS open to any origin (there's no cookie-based auth to protect —
-`initData` verification is what actually gates writes). Safe to re-run;
-every step checks before creating. Prints the endpoint URL at the end —
-paste it into `scripts/game.gd`'s `LEADERBOARD_URL` constant.
+route and open CORS. Safe to re-run; every step checks before creating.
+Prints the endpoint URL at the end — paste it into `scripts/game.gd`'s
+`LEADERBOARD_URL` constant.
 
 ## Scale note
 

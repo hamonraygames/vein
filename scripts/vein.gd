@@ -355,11 +355,41 @@ func _draw() -> void:
 
 	for d in dots:
 		var p := sample(d.t)
-		var c := Palette.of_res(d.kind)
-		var halo := c
-		halo.a = 0.16
-		draw_circle(p, 7.0, halo)
-		draw_circle(p, 3.4, c)
+		if d.kind == VNode.Res.VOID:
+			_draw_poison_dot(p, d)
+		else:
+			var c := Palette.of_res(d.kind)
+			var halo := c
+			halo.a = 0.16
+			draw_circle(p, 7.0, halo)
+			draw_circle(p, 3.4, c)
+
+
+## A poisoned item in flight. Every other dot is a calm halo+circle that
+## glides smoothly — VOID can't just be "the violet one," since colour alone
+## would break the game's own colourblind-safe rule (see palette.gd: "never
+## add a mechanic that only colour tells"). This one visibly writhes — a
+## small erratic jitter breaks the smooth glide, and short thorns pulsing
+## off a darker halo read as hazard by shape, not tint — something to cut
+## before it reaches the Heart, not just cargo that happens to be violet.
+func _draw_poison_dot(p: Vector2, d: Dictionary) -> void:
+	var t := float(Time.get_ticks_msec()) * 0.001
+	# Per-dot phase offset so a vein carrying several poisoned items doesn't
+	# have them all writhe in lockstep — d.t drifts slowly as the dot
+	# travels, which is enough variation to desync them.
+	var ph := float(d.t) * 971.0
+	var jitter := Vector2(sin(t * 13.0 + ph), cos(t * 17.0 + ph * 1.3)) * 2.2
+	var jp := p + jitter
+	var pulse := 0.5 + 0.5 * sin(t * 9.0 + ph)
+	var c := Palette.VOID
+	var halo := c
+	halo.a = 0.12 + pulse * 0.18
+	draw_circle(jp, 9.0 + pulse * 2.0, halo)
+	for i in 5:
+		var a := TAU * float(i) / 5.0 + t * 1.4
+		var dir := Vector2(cos(a), sin(a))
+		draw_line(jp + dir * 3.6, jp + dir * (6.5 + pulse * 3.0), c, 1.5)
+	draw_circle(jp, 3.4, c)
 
 
 ## A visual-only jitter of `pts` for wrong_flow — the underlying path (and

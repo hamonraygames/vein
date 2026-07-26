@@ -16,22 +16,6 @@ ROLE_NAME="vein-leaderboard-lambda-role"
 FUNCTION_NAME="vein-leaderboard-submit"
 API_NAME="vein-leaderboard-api"
 
-# The bot token lives in the repo root's gitignored .env (see .gitignore),
-# same secret the leaderboard bot itself would use — Lambda needs it as a
-# plain env var to validate each submission's initData (see
-# lib/verify_telegram.js). Never printed, never committed.
-ENV_FILE="../../.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-	echo "Missing $ENV_FILE — expected a TELEGRAM_BOT_TOKEN=... line there." >&2
-	exit 1
-fi
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-	echo "TELEGRAM_BOT_TOKEN not set in $ENV_FILE" >&2
-	exit 1
-fi
-
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 echo "==> Account $ACCOUNT_ID, region $REGION"
 
@@ -118,9 +102,9 @@ sleep 10
 
 echo "==> Zipping Lambda code"
 rm -f /tmp/vein-leaderboard-submit.zip
-zip -q -r /tmp/vein-leaderboard-submit.zip submit.js lib/
+zip -q -r /tmp/vein-leaderboard-submit.zip submit.js
 
-ENV_VARS="Variables={PLAYERS_TABLE=$PLAYERS_TABLE,META_TABLE=$META_TABLE,BOT_TOKEN=$TELEGRAM_BOT_TOKEN}"
+ENV_VARS="Variables={PLAYERS_TABLE=$PLAYERS_TABLE,META_TABLE=$META_TABLE}"
 
 if aws lambda get-function --region "$REGION" --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
 	echo "==> Updating function $FUNCTION_NAME"

@@ -216,6 +216,16 @@ var fuel_ratio := 1.0
 ## node. No text, no tutorial, no red-triangle mystery.
 var demand: int = Res.RAW
 
+## Heart only, rotation phase only (see game._tick_escalation): the shape
+## `demand` is about to become, and how close that flip is (0..1, 1 = about
+## to land). -1/0 means nothing pending — the ordinary state outside the
+## last few seconds before a rotation flip. This is the ONLY forward
+## knowledge the Heart ever gives: not the shape after that, not a queue,
+## just "the next one is already decided and it's this." Turns a rotation
+## flip from a pure ambush into a warning you can read on the Heart itself.
+var tell_res: int = -1
+var tell_ratio := 0.0
+
 var _emit_accum := 0.0
 var _round_robin := 0
 
@@ -581,37 +591,57 @@ func _draw_partial_outline(pts: PackedVector2Array, ratio: float, col: Color, wi
 
 ## The shape the Heart is asking for, floating inside it. This is the only
 ## instruction VEIN ever gives, and it gives it wordlessly.
+##
+## When a rotation-phase flip is close (tell_ratio > 0, see game.gd's
+## DEMAND_TELL_LEAD), the current glyph destabilises — fading and wobbling —
+## while the next one fades in on top of it, so the Heart visibly changes
+## its mind a few seconds before it actually does. Outside that window
+## (always true during the teaching schedule) this draws exactly one glyph,
+## same as before.
 func _draw_demand(r: float) -> void:
-	var c: Color = Palette.of_res(demand)
-	c.a = 0.85 + pulse * 0.15
 	var s := r * 0.34
+	if tell_ratio > 0.0 and tell_res != -1 and tell_res != demand:
+		var wobble := sin(Time.get_ticks_msec() * 0.02) * s * 0.08 * tell_ratio
+		var cur: Color = Palette.of_res(demand)
+		cur.a = (0.85 + pulse * 0.15) * (1.0 - tell_ratio * 0.65)
+		_draw_demand_glyph(demand, s, cur, Vector2(wobble, 0.0))
 
-	match demand:
+		var nxt: Color = Palette.of_res(tell_res)
+		nxt.a = (0.85 + pulse * 0.15) * tell_ratio
+		_draw_demand_glyph(tell_res, s, nxt, Vector2.ZERO)
+	else:
+		var c: Color = Palette.of_res(demand)
+		c.a = 0.85 + pulse * 0.15
+		_draw_demand_glyph(demand, s, c, Vector2.ZERO)
+
+
+func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
+	match res:
 		Res.REFINED:
 			var tri := PackedVector2Array()
 			for i in 3:
 				var a := TAU * (float(i) / 3.0) - PI * 0.5
-				tri.append(Vector2(cos(a), sin(a)) * s * 1.2)
+				tri.append(Vector2(cos(a), sin(a)) * s * 1.2 + offset)
 			tri.append(tri[0])
 			draw_polyline(tri, c, 2.4, true)
 		Res.CLOTH:
-			draw_rect(Rect2(-s * 0.8, -s * 0.8, s * 1.6, s * 1.6), c, false, 2.4)
+			draw_rect(Rect2(-s * 0.8 + offset.x, -s * 0.8 + offset.y, s * 1.6, s * 1.6), c, false, 2.4)
 		Res.PRISM:
 			var pent := PackedVector2Array()
 			for i in 5:
 				var a := TAU * (float(i) / 5.0) - PI * 0.5
-				pent.append(Vector2(cos(a), sin(a)) * s * 1.15)
+				pent.append(Vector2(cos(a), sin(a)) * s * 1.15 + offset)
 			pent.append(pent[0])
 			draw_polyline(pent, c, 2.4, true)
 		Res.HEXAGON:
 			var hex := PackedVector2Array()
 			for i in 6:
 				var a := TAU * (float(i) / 6.0) - PI * 0.5
-				hex.append(Vector2(cos(a), sin(a)) * s * 1.1)
+				hex.append(Vector2(cos(a), sin(a)) * s * 1.1 + offset)
 			hex.append(hex[0])
 			draw_polyline(hex, c, 2.4, true)
 		_:
-			draw_arc(Vector2.ZERO, s * 0.85, 0.0, TAU, 22, c, 2.4, true)
+			draw_arc(offset, s * 0.85, 0.0, TAU, 22, c, 2.4, true)
 
 
 func _draw_ring(r: float, col: Color) -> void:

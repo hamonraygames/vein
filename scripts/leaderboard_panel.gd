@@ -1,65 +1,32 @@
 extends Node2D
-## The in-game leaderboard: submits this run's score to server/leaderboard
-## (an AWS Lambda, see there) and renders the top 10 + your rank + totals
-## as a modal over the death screen — spawned once from game.gd's
-## _on_share_score and self-freeing on tap, same "caller spawns it and
-## forgets it" pattern as ShatterScene/BurstScene/FloatText.
+## The in-game leaderboard: a read-only view over game.gd's lb_* state (see
+## there — _submit_score fires the moment the Heart stops, automatically,
+## not from here), opened by the death screen's "Leaderboard" button and
+## self-freeing on tap. Same "caller spawns it and forgets it" pattern as
+## ShatterScene/BurstScene/FloatText.
+##
+## Reads game's live state every frame rather than a frozen snapshot (same
+## pattern as ranks_strip.gd/score_hud.gd) so a submission still in flight
+## when this panel opens still updates it once it lands, instead of leaving
+## a stale "Submitting..." on screen.
 ##
 ## Custom-drawn like every other dynamic-content readout in this game
-## (score_hud.gd, budget_hint.gd) rather than built from Control/Label nodes —
-## there is no fixed number of rows to hand-place in the scene, and this
-## keeps the same vector-drawn language as everything else.
+## rather than built from Control/Label nodes — there is no fixed number of
+## rows to hand-place in the scene, and this keeps the same vector-drawn
+## language as everything else.
 
-enum State { LOADING, LOADED, ERROR }
-
-var _state := State.LOADING
-var _error_msg := ""
-var _top: Array = []
-var _you := {"rank": 0, "score": 0, "isBest": false}
-var _total_players := 0
-var _total_plays := 0
+var game: Node2D
 var _vp := Vector2(540.0, 1170.0)
-var _http: HTTPRequest
+var _font: Font
 
 
-func start(url: String, init_data: String, score: int, beats: int, vp: Vector2) -> void:
+func start(g: Node2D, vp: Vector2) -> void:
+	game = g
 	_vp = vp
 	z_index = 30
-	if url.is_empty():
-		_state = State.ERROR
-		_error_msg = "Leaderboard isn't live yet."
-		queue_redraw()
-		return
-
-	_http = HTTPRequest.new()
-	add_child(_http)
-	_http.request_completed.connect(_on_request_completed)
-	var body := JSON.stringify({"initData": init_data, "score": score, "beats": beats})
-	var err := _http.request(url, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
-	if err != OK:
-		_state = State.ERROR
-		_error_msg = "Couldn't reach the leaderboard."
-	queue_redraw()
 
 
-func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray,
-		body: PackedByteArray) -> void:
-	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
-		_state = State.ERROR
-		_error_msg = "Couldn't reach the leaderboard."
-		queue_redraw()
-		return
-	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
-	if typeof(parsed) != TYPE_DICTIONARY:
-		_state = State.ERROR
-		_error_msg = "Couldn't reach the leaderboard."
-		queue_redraw()
-		return
-	_top = parsed.get("top", [])
-	_you = parsed.get("you", _you)
-	_total_players = int(parsed.get("totalPlayers", 0))
-	_total_plays = int(parsed.get("totalPlays", 0))
-	_state = State.LOADED
+func _process(_delta: float) -> void:
 	queue_redraw()
 
 
@@ -82,6 +49,9 @@ func _input(event: InputEvent) -> void:
 
 
 func _draw() -> void:
+	if game == null:
+		return
+
 	var backdrop := Palette.BG
 	backdrop.a = 0.94
 	draw_rect(Rect2(Vector2.ZERO, _vp), backdrop)
@@ -90,15 +60,15 @@ func _draw() -> void:
 	title_col.a = 0.85
 	_centred("LEADERBOARD", Vector2(_vp.x * 0.5, 96.0), 26, title_col)
 
-	match _state:
-		State.LOADING:
+	match game.lb_state:
+		"loading", "idle":
 			var col := Palette.SCORE
 			col.a = 0.5
 			_centred("Submitting...", _vp * 0.5, 18, col)
-		State.ERROR:
+		"error":
 			var col := Palette.VOID
-			_centred(_error_msg, _vp * 0.5, 16, col)
-		State.LOADED:
+			_centred("Couldn't reach the leaderboard.", _vp * 0.5, 16, col)
+		"loaded":
 			_draw_rows()
 
 	var hint := Palette.SCORE
@@ -114,11 +84,13 @@ const COL_SCORE_R := 494.0
 
 
 func _draw_rows() -> void:
+	var top: Array = game.lb_top
+	var you: Dictionary = game.lb_you
 	var y := ROW_TOP
-	for i in _top.size():
-		var row: Dictionary = _top[i]
+	for i in top.size():
+		var row: Dictionary = top[i]
 		var rank := i + 1
-		var mine: bool = rank == _you.get("rank", 0)
+		var mine: bool = rank == you.get("rank", 0)
 		if mine:
 			var hi := Palette.HEART
 			hi.a = 0.12
@@ -138,17 +110,17 @@ func _draw_rows() -> void:
 
 	# "You" only needs its own line when it fell outside the top 10 — inside
 	# it, the highlighted row above already says the same thing.
-	var rank: int = _you.get("rank", 0)
+	var rank: int = you.get("rank", 0)
 	y += 14.0
-	if rank > _top.size():
+	if rank > top.size():
 		var col := Palette.HEART
 		col.a = 0.85
-		_centred("You  ·  #%d  ·  %s" % [rank, _commas(int(_you.get("score", 0)))], Vector2(_vp.x * 0.5, y), 16, col)
+		_centred("You  ·  #%d  ·  %s" % [rank, _commas(int(you.get("score", 0)))], Vector2(_vp.x * 0.5, y), 16, col)
 		y += 34.0
 
 	var foot := Palette.SCORE
 	foot.a = 0.38
-	_centred("%s players  ·  %s runs" % [_commas(_total_players), _commas(_total_plays)],
+	_centred("%s players  ·  %s runs" % [_commas(game.lb_total_players), _commas(game.lb_total_plays)],
 		Vector2(_vp.x * 0.5, y + 20.0), 13, foot)
 
 
@@ -189,9 +161,6 @@ func _commas(n: int) -> String:
 		if c % 3 == 0 and i > 0:
 			out = "," + out
 	return out
-
-
-var _font: Font
 
 
 func _left(text: String, at: Vector2, size: int, col: Color) -> void:
