@@ -97,32 +97,6 @@ body {
 	z-index: 1;
 }
 
-/* Real native text input for the one-time name prompt (see
-   scripts/name_prompt.gd) — a canvas has no DOM element for a mobile
-   browser to focus, so Godot's own canvas-drawn LineEdit can never reliably
-   raise the on-screen keyboard on a phone (a known, unfixed Godot web-export
-   limitation, not something fixable from GDScript alone). This is a real
-   <input>, positioned over the canvas by JS to match name_prompt.gd's own
-   layout fractions, so a tap on it is a genuine native focus event with a
-   real OS keyboard behind it — Godot only ever reads its final value. */
-#vein-name-input {
-	position: absolute;
-	display: none;
-	box-sizing: border-box;
-	background: #17171c;
-	color: #ede8dc;
-	border: 2px solid #9c9184;
-	border-radius: 6px;
-	text-align: center;
-	font-family: -apple-system, 'Noto Sans', 'Droid Sans', Arial, sans-serif;
-	outline: none;
-	touch-action: manipulation;
-	z-index: 10000;
-}
-
-#vein-name-input::placeholder {
-	color: #6a6a6a;
-}
 		</style>
 		$GODOT_HEAD_INCLUDE
 	</head>
@@ -130,9 +104,6 @@ body {
 		<canvas id="canvas">
 			Your browser does not support the canvas tag.
 		</canvas>
-
-		<input id="vein-name-input" type="text" maxlength="20" autocomplete="off"
-			autocapitalize="words" autocorrect="off" spellcheck="false">
 
 		<noscript>
 			Your browser does not support JavaScript.
@@ -227,124 +198,6 @@ body {
 	}
 	['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(function (evt) {
 		document.addEventListener(evt, _primeAudio, { capture: true, passive: true });
-	});
-}());
-		</script>
-		<script>
-// Real native <input> bridge for the one-time name prompt (see
-// scripts/name_prompt.gd — and the #vein-name-input CSS comment above for
-// WHY this exists instead of Godot's own web LineEdit). Unconditional, not
-// inside the Telegram guard above: the underlying problem — a canvas has no
-// DOM element for a mobile browser to focus, so Godot's web LineEdit can
-// never reliably raise the on-screen keyboard on a phone — is a plain
-// mobile-web limitation, not a Telegram-specific one.
-//
-// Fractions (0..1) are relative to the CANVAS's own on-screen CSS rect, the
-// same design-space fractions name_prompt.gd already lays its own Controls
-// out with, so the two stay visually aligned regardless of window size or
-// the project's stretch/letterbox mode.
-(function () {
-	var input = document.getElementById('vein-name-input');
-	var lastFracs = null;
-	// project.godot: window/stretch/mode="canvas_items", aspect="keep" — the
-	// <canvas> ELEMENT fills the whole browser viewport, but Godot only
-	// draws the actual 540x1170 design-space game into a scaled, CENTERED
-	// sub-rect of it (the rest is letterbox bars Godot paints itself, not
-	// empty canvas). Verified against a real build on a landscape desktop
-	// window: using the canvas's own getBoundingClientRect() directly, as a
-	// first pass here did, put the input off to one side by exactly the
-	// letterbox gap — harder to notice on a portrait phone close to this
-	// aspect ratio, but still wrong, and not something to leave wrong just
-	// because it happens to look close enough on one shape of screen.
-	var DESIGN_W = 540;
-	var DESIGN_H = 1170;
-
-	function gameRect() {
-		var canvas = document.getElementById('canvas');
-		var r = canvas.getBoundingClientRect();
-		var scale = Math.min(r.width / DESIGN_W, r.height / DESIGN_H);
-		var w = DESIGN_W * scale;
-		var h = DESIGN_H * scale;
-		return {
-			left: r.left + (r.width - w) / 2,
-			top: r.top + (r.height - h) / 2,
-			width: w,
-			height: h,
-		};
-	}
-
-	// Verified against a real build: the canvas is NOT guaranteed to have a
-	// real on-screen size at the exact moment GDScript's _ready() calls
-	// this — Godot's own runtime finishes sizing it slightly later on some
-	// load paths — and reading getBoundingClientRect() once, immediately,
-	// produced a genuine (0, 0) rect that made the input effectively
-	// invisible with no error anywhere. Retrying across animation frames
-	// until the canvas actually has a size fixes that instead of trusting
-	// the first read.
-	function positionInput() {
-		if (!lastFracs) {
-			return false;
-		}
-		var rect = gameRect();
-		if (rect.width === 0 || rect.height === 0) {
-			return false;
-		}
-		input.style.left = (rect.left + rect.width * lastFracs.x) + 'px';
-		input.style.top = (rect.top + rect.height * lastFracs.y) + 'px';
-		input.style.width = (rect.width * lastFracs.w) + 'px';
-		input.style.height = (rect.height * lastFracs.h) + 'px';
-		input.style.fontSize = Math.max(14, rect.height * lastFracs.h * 0.42) + 'px';
-		return true;
-	}
-
-	function positionWithRetry(attempts) {
-		if (positionInput() || attempts <= 0) {
-			return;
-		}
-		requestAnimationFrame(function () { positionWithRetry(attempts - 1); });
-	}
-
-	window.veinShowNameInput = function (xFrac, yFrac, wFrac, hFrac, placeholder) {
-		lastFracs = { x: xFrac, y: yFrac, w: wFrac, h: hFrac };
-		input.placeholder = placeholder || '';
-		input.value = '';
-		input.style.display = 'block';
-		positionWithRetry(90);
-	};
-
-	window.veinHideNameInput = function () {
-		lastFracs = null;
-		input.style.display = 'none';
-		input.blur();
-	};
-
-	window.veinGetNameInputValue = function () {
-		return input.value;
-	};
-
-	// The canvas can also resize AFTER the input is already showing
-	// (window resize, orientation change, Telegram's own viewportChanged
-	// dispatch above) — same reason the canvas itself listens for
-	// 'resize'; this keeps the overlay aligned with it.
-	window.addEventListener('resize', positionInput);
-
-	// Enter/"Go" on the mobile keyboard submits directly, same as tapping
-	// the in-game Continue button — worth having on top of that button, not
-	// just a nicety: an open mobile keyboard can be tall enough to cover
-	// the button entirely on a short screen. Blur first so the keyboard
-	// dismisses as part of the same action, then hand off; name_prompt.gd
-	// sets veinOnNameSubmit to a real callback via
-	// JavaScriptBridge.create_callback, so GDScript — not this shell — owns
-	// what "submit" actually does (saving the name, starting the run).
-	window.veinOnNameSubmit = null;
-	input.addEventListener('keydown', function (e) {
-		if (e.key === 'Enter') {
-			e.preventDefault();
-			input.blur();
-			if (window.veinOnNameSubmit) {
-				window.veinOnNameSubmit(input.value);
-			}
-		}
 	});
 }());
 		</script>

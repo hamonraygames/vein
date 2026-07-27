@@ -45,3 +45,15 @@ far from where it was recorded.
 | `audio/corrupt.ogg` | [10 Impact/Shield Blocks](https://opengameart.org/content/10-impactshield-blocks) (`impact.8`) | StarNinjas | CC0 | **in use** |
 | `audio/note_raw.ogg` | [4 Metal Dings/Rings](https://opengameart.org/content/4-metal-dingsrings) (`ding.1`) | StarNinjas | CC0 | unused |
 | `audio/note_refined.ogg` | [4 Metal Dings/Rings](https://opengameart.org/content/4-metal-dingsrings) (`ding.3`) | StarNinjas | CC0 | unused |
+
+## Fonts
+
+Monospace everywhere, by explicit direction. Wired project-wide via
+`assets/theme.tres` (`project.godot`'s `gui/theme/custom`) for every
+Label/Button, and directly via `Palette.MONO_FONT` for the custom-drawn
+readouts (score_hud.gd, leaderboard_panel.gd, ranks_strip.gd,
+float_text.gd) that draw_string outside the Control theme system.
+
+| File | Source | Author | License | Status |
+|---|---|---|---|---|
+| `fonts/SpaceMono-Regular.ttf` | [Space Mono](https://github.com/googlefonts/spacemono) | The Space Mono Project Authors | SIL OFL 1.1 (`fonts/OFL.txt`) | **in use** |

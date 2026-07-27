@@ -20,8 +20,7 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	if game != null and not game.alive:
-		queue_redraw()
+	queue_redraw()
 
 
 func _draw() -> void:
@@ -30,12 +29,18 @@ func _draw() -> void:
 	if game.lb_state != "loaded" or game.lb_nearby.is_empty():
 		return
 	if _font == null:
-		_font = ThemeDB.fallback_font
+		_font = Palette.MONO_FONT
 
 	var vp: Vector2 = game.design_size()
 	var col_rank := vp.x * 0.5 - 150.0
 	var col_name := vp.x * 0.5 - 110.0
 	var col_score_r := vp.x * 0.5 + 150.0
+	# Small rank-change chevron in the gap between score and plays.
+	var col_chevron := vp.x * 0.5 + 172.0
+	# Small dim mini-column past the score, inside the backdrop's own right
+	# edge (vp.x - 24) with margin to spare — matches leaderboard_panel.gd's
+	# "N plays" subtext, just compressed to fit this strip's single line.
+	var col_plays_r := vp.x * 0.5 + 220.0
 
 	# The death screen's shatter debris (see shatter.gd) keeps drifting
 	# through this whole region for a while after death — a first attempt at
@@ -44,20 +49,56 @@ func _draw() -> void:
 	# already behind it instead of properly covering it. leaderboard_panel.gd
 	# already proved 0.94 reliably blocks the same debris, so this matches
 	# that value instead of re-guessing.
+	# Fully opaque, not the 0.94 this used to share with leaderboard_panel.gd's
+	# full-screen version — playtest: "i can't see it well." That panel sits
+	# over nothing but its own dedicated backdrop; this one has to win
+	# against the death screen's own shatter debris still drifting behind it,
+	# which a hair of bleed-through was reading as visual noise.
 	var panel_h := float(game.lb_nearby.size()) * ROW_H + 14.0
 	var backdrop := Palette.BG
-	backdrop.a = 0.94
+	backdrop.a = 1.0
 	draw_rect(Rect2(Vector2(24.0, TOP - ROW_H * 0.5), Vector2(vp.x - 48.0, panel_h)), backdrop)
 
 	var y := TOP
 	for row in game.lb_nearby:
 		var mine: bool = int(row.get("rank", 0)) == int(game.lb_you.get("rank", 0))
 		var col := Palette.SCORE
-		col.a = 0.92 if mine else 0.5
-		_left("#%d" % int(row.get("rank", 0)), Vector2(col_rank, y), 15, col)
-		_left(_ellipsize(str(row.get("name", "?")), 14), Vector2(col_name, y), 15, col)
-		_right(_commas(int(row.get("score", 0))), Vector2(col_score_r, y), 15, col)
+		col.a = 0.95 if mine else 0.72
+		_left("#%d" % int(row.get("rank", 0)), Vector2(col_rank, y), 16, col)
+		_left(_ellipsize(str(row.get("name", "?")), 14), Vector2(col_name, y), 16, col)
+		_right(_commas(int(row.get("score", 0))), Vector2(col_score_r, y), 16, col)
+		_draw_chevron(Vector2(col_chevron, y - 3.0), int(row.get("rankChange", 0)))
+
+		var dim := Palette.SCORE
+		dim.a = 0.55 if mine else 0.4
+		_right("%d×" % int(row.get("plays", 0)), Vector2(col_plays_r, y), 12, dim)
+
 		y += ROW_H
+
+
+## Small filled triangle, green tip-up/red tip-down — see
+## leaderboard_panel.gd's own copy of this for the full rationale (silent at
+## 0, which covers both "unchanged" and "no prior run yet").
+const CHEVRON_W := 7.0
+const CHEVRON_H := 6.0
+
+func _draw_chevron(at: Vector2, change: int) -> void:
+	if change == 0:
+		return
+	var up := change > 0
+	var col := Palette.RANK_UP if up else Palette.RANK_DOWN
+	col.a = 0.9
+	var half_h := CHEVRON_H * 0.5
+	var tri: PackedVector2Array
+	if up:
+		tri = PackedVector2Array([
+			at + Vector2(0.0, -half_h), at + Vector2(-CHEVRON_W * 0.5, half_h), at + Vector2(CHEVRON_W * 0.5, half_h),
+		])
+	else:
+		tri = PackedVector2Array([
+			at + Vector2(0.0, half_h), at + Vector2(-CHEVRON_W * 0.5, -half_h), at + Vector2(CHEVRON_W * 0.5, -half_h),
+		])
+	draw_colored_polygon(tri, col)
 
 
 func _ellipsize(s: String, max_len: int) -> String:

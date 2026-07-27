@@ -31,7 +31,7 @@ var _last_score := 0
 
 func _ready() -> void:
 	z_index = 6
-	_font = ThemeDB.fallback_font
+	_font = Palette.MONO_FONT
 	Beat.beat.connect(func(_i: int) -> void: _swell = 1.0)
 
 

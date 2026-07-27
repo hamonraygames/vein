@@ -32,7 +32,7 @@ func spawn(text: String, at: Vector2, col: Color, size := 16, dir := Vector2.UP)
 	_col = col
 	_size = size
 	_dir = dir if dir != Vector2.ZERO else Vector2.UP
-	_font = ThemeDB.fallback_font
+	_font = Palette.MONO_FONT
 	_cross = false
 	position = at
 	z_index = 25

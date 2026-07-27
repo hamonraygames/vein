@@ -151,13 +151,15 @@ if [[ -z "$INTEGRATION_ID" || "$INTEGRATION_ID" == "None" ]]; then
 		--payload-format-version "2.0" --query IntegrationId --output text)"
 fi
 
-ROUTE_EXISTS="$(aws apigatewayv2 get-routes --region "$REGION" --api-id "$API_ID" \
-	--query "Items[?RouteKey=='POST /score'].RouteId" --output text)"
-if [[ -z "$ROUTE_EXISTS" || "$ROUTE_EXISTS" == "None" ]]; then
-	echo "==> Creating route POST /score"
-	aws apigatewayv2 create-route --region "$REGION" --api-id "$API_ID" \
-		--route-key "POST /score" --target "integrations/$INTEGRATION_ID" >/dev/null
-fi
+for route in "POST /score" "POST /name" "POST /rank"; do
+	ROUTE_EXISTS="$(aws apigatewayv2 get-routes --region "$REGION" --api-id "$API_ID" \
+		--query "Items[?RouteKey=='$route'].RouteId" --output text)"
+	if [[ -z "$ROUTE_EXISTS" || "$ROUTE_EXISTS" == "None" ]]; then
+		echo "==> Creating route $route"
+		aws apigatewayv2 create-route --region "$REGION" --api-id "$API_ID" \
+			--route-key "$route" --target "integrations/$INTEGRATION_ID" >/dev/null
+	fi
+done
 
 # Idempotent: a statement-id collision means the permission is already
 # there, which is exactly the state we want.
@@ -167,6 +169,18 @@ aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
 	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/score" \
 	>/dev/null 2>&1 || true
 
+aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
+	--statement-id "vein-leaderboard-apigw-name" --action lambda:InvokeFunction \
+	--principal apigateway.amazonaws.com \
+	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/name" \
+	>/dev/null 2>&1 || true
+
+aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
+	--statement-id "vein-leaderboard-apigw-rank" --action lambda:InvokeFunction \
+	--principal apigateway.amazonaws.com \
+	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/rank" \
+	>/dev/null 2>&1 || true
+
 ENDPOINT="$(aws apigatewayv2 get-api --region "$REGION" --api-id "$API_ID" --query ApiEndpoint --output text)"
-echo "==> Done: POST $ENDPOINT/score"
-echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL constant."
+echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank"
+echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL constants."

@@ -216,6 +216,14 @@ var fuel_ratio := 1.0
 ## node. No text, no tutorial, no red-triangle mystery.
 var demand: int = Res.RAW
 
+## Heart only, decorative use only: main_menu.gd stands up a real Heart VNode
+## at its exact in-run spawn position so the menu and the game share one
+## silhouette, not a redrawn lookalike — but the menu Heart has no demand to
+## show yet (no run has started), so this skips _draw_demand entirely rather
+## than drawing a meaningless default glyph. False everywhere a real run
+## ever sees.
+var suppress_demand := false
+
 ## Heart only, rotation phase only (see game._tick_escalation): the shape
 ## `demand` is about to become, and how close that flip is (0..1, 1 = about
 ## to land). -1/0 means nothing pending — the ordinary state outside the
@@ -376,8 +384,15 @@ func can_accept(kind_in: int) -> bool:
 		return true
 	if _accepts_tool_input(kind_in):
 		return true
+	# Same-shape pass-through, generalized from Wells (which never had a
+	# recipe gate at all) to every tool kind: a Forge's OWN output arriving
+	# from another Forge is not a recipe ingredient, it's a relay — "the
+	# furthest-from-the-Heart node flows through the nearer one of the same
+	# kind" now applies uniformly, not just circle-to-circle. It rides
+	# straight into this tool's own outgoing buffer below, same as anything
+	# else that isn't a wrong ingredient.
 	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN or kind == Kind.CRUCIBLE) \
-			and kind_in != Res.VOID:
+			and kind_in != Res.VOID and kind_in != produces:
 		return false
 	return buffer.size() < buffer_cap()
 
@@ -394,8 +409,9 @@ func take(kind_in: int) -> bool:
 	# reaches the Heart still mislabeled, which read as "I built the chain and
 	# died anyway." VOID is the one deliberate exception: tools cannot launder
 	# rot into food, so poison still passes straight through to the Heart.
+	# Its OWN produce is a second, deliberate exception — see can_accept.
 	if (kind == Kind.FORGE or kind == Kind.LOOM or kind == Kind.KILN or kind == Kind.CRUCIBLE) \
-			and kind_in != Res.VOID:
+			and kind_in != Res.VOID and kind_in != produces:
 		return false
 	if buffer.size() >= buffer_cap():
 		return false
@@ -550,7 +566,8 @@ func _draw_heart_shape(r: float, col: Color) -> void:
 	outline.append(heart[0])
 	draw_polyline(outline, col, 3.0, true)
 
-	_draw_demand(r)
+	if not suppress_demand:
+		_draw_demand(r)
 
 
 ## Traces `pts` (an open, ordered polygon outline) from its first vertex

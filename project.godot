@@ -52,6 +52,17 @@ window/stretch/mode="canvas_items"
 window/stretch/aspect="keep"
 window/handheld/orientation=1
 
+[gui]
+
+; Monospace everywhere, by explicit direction — every Label/Button in the
+; project falls back to this theme's default_font (Space Mono, see
+; assets/theme.tres and assets/CREDITS.md) unless a node overrides its own
+; font, which none currently do. The custom-drawn readouts (score_hud.gd and
+; friends, which draw_string directly rather than going through a Control's
+; theme) reference the same font file via Palette.MONO_FONT instead, so the
+; two paths can never drift onto different typefaces.
+theme/custom="res://assets/theme.tres"
+
 [input_devices]
 
 pointing/emulate_touch_from_mouse=true

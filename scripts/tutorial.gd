@@ -449,6 +449,17 @@ func _demo_well(target: VNode) -> VNode:
 # --- Drawing -----------------------------------------------------------------
 
 func _draw() -> void:
+	# "Blink what the Heart wants with the shape the player is supposed to
+	# connect" — the exact same glyph-color the Heart already shows inside
+	# itself (see VNode._draw_demand/Palette.of_res) pulses on the Heart AND
+	# on every matching on-board node at once, so the two reads as one
+	# instruction instead of two separate things to notice. Circle during the
+	# opening CONNECT/FEED2 lesson, triangle once COMBINE begins (a Forge is
+	# the only thing that makes it) — same call either time, nothing here is
+	# hand-coded per shape, it just reads game.demand.
+	if step in [Step.CONNECT, Step.FEED2, Step.COMBINE_LINK, Step.COMBINE_FEED]:
+		_draw_demand_match_hint()
+
 	match step:
 		Step.CONNECT, Step.FEED2:
 			var well := _demo_well(game.heart)
@@ -476,6 +487,33 @@ func _draw() -> void:
 			var v := _rotten_vein()
 			if v != null:
 				_draw_cut_ghost(v)
+
+
+## Eased pulse period for the demand-match highlight below — slow enough to
+## read as a deliberate "look here," not a strobe.
+const DEMAND_BLINK_PERIOD := 1.1
+
+func _draw_demand_match_hint() -> void:
+	# _draw() can fire once before start_run() ever has (a window-resize
+	# during game.gd's own _ready(), e.g. _fit_desktop_window, forces a
+	# redraw pass before `visible=false` from this node's first _process()
+	# has had a chance to land) — game.heart is still null at that instant.
+	if game.heart == null:
+		return
+	var phase := fmod(_t, DEMAND_BLINK_PERIOD) / DEMAND_BLINK_PERIOD
+	var blink := sin(phase * TAU) * 0.5 + 0.5
+	var col: Color = Palette.of_res(game.demand)
+
+	var heart_col := col
+	heart_col.a = 0.35 + blink * 0.45
+	draw_arc(game.heart.position, game.heart.radius() * 1.35, 0.0, TAU, 40,
+		heart_col, 3.0 + blink * 2.0, true)
+
+	for n in game.nodes:
+		if n != game.heart and n.produces == game.demand and not n.corrupted:
+			var nc := col
+			nc.a = 0.3 + blink * 0.5
+			draw_arc(n.position, n.radius() * 1.5, 0.0, TAU, 28, nc, 2.5 + blink * 1.5, true)
 
 
 ## A faint ring at the Heart's reach, so "this Well is beyond it" is visible —

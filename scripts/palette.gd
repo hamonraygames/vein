@@ -8,6 +8,14 @@ class_name Palette
 
 const BG := Color("0d0d10")
 
+## Monospace everywhere, by explicit direction — one shared font resource for
+## every custom-drawn readout (score_hud.gd, leaderboard_panel.gd,
+## ranks_strip.gd, float_text.gd all draw_string against this instead of
+## ThemeDB.fallback_font) so they match the project-wide Theme set in
+## project.godot's gui/theme/custom, which every Label/Button already
+## inherits automatically. Space Mono, SIL OFL 1.1 — see assets/CREDITS.md.
+const MONO_FONT := preload("res://assets/fonts/SpaceMono-Regular.ttf")
+
 ## One fixed hue per shape, unchanged for a resource's whole life and IDENTICAL
 ## everywhere it appears — as a node's body, as the demand glyph inside the
 ## Heart, as a requirement glyph inside a tool, as a dot on a vein, as a
@@ -61,6 +69,15 @@ const WARM := Color("ffb765")     # the rescue flash
 ## owns red as its identity color. A near-white keeps score legible and
 ## clearly its own channel, not a second meaning piggybacking on the Heart's.
 const SCORE := Color("ede8dc")
+
+## Leaderboard rank-change chevrons (see leaderboard_panel.gd/ranks_strip.gd)
+## — a deliberate, one-off exception to "shape always encodes meaning,
+## colour is redundant" above: this is a meta UI indicator about the
+## LEADERBOARD, not a resource on the board, so plain up-good/down-bad
+## green/red is the clearer, more universally legible choice here than
+## inventing a third channel.
+const RANK_UP := Color("6fcf7a")
+const RANK_DOWN := Color("e0555a")
 
 
 static func of_res(kind: int) -> Color:

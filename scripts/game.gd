@@ -18,12 +18,16 @@ const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
+const MainMenuScene := preload("res://scripts/main_menu.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
-## POST /score on server/leaderboard's AWS backend (Lambda + API Gateway,
-## see there) — printed by server/leaderboard/deploy.sh on each deploy.
+## POST /score, POST /name, and POST /rank on server/leaderboard's AWS
+## backend (Lambda + API Gateway, see there) — printed by
+## server/leaderboard/deploy.sh on each deploy. Same host, three routes.
 const LEADERBOARD_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/score"
+const NAME_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/name"
+const RANK_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/rank"
 
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
@@ -229,9 +233,23 @@ const WRONG_SHAPE_FUEL := 0.05
 ## after also punished), while this only widens the OPENING buffer — the
 ## late-game slope (APPETITE_RATE, unchanged) is what still has to produce the
 ## skill gap, and it does (see probe numbers below). Slow start, hard finish.
-## Scaled up alongside FUEL_CAP above so the opening reserve is still the
-## same fraction of a full tank, not suddenly thin against a bigger cap.
-const START_FUEL := 4.5
+##
+## REVERSED AGAIN (the main menu's Heart, July 2026): the menu now shows a
+## calm, full Heart at rest — starting the actual run at a half-empty tank
+## read as a visual lie the instant Play was tapped, the one shape in the
+## game that's supposed to be the SAME object suddenly missing half its
+## fuel. Full tank on start, matching the menu.
+##
+## A time-windowed "burn off the extra half-tank fast, then drop back to the
+## old rate" catch-up was tried here and rejected: it drained visibly faster
+## for its first few seconds and then visibly slower the instant the window
+## ended — a kink in the rate, not a constant one, and it was felt
+## immediately in playtest ("it should be normal on all steps"). APPETITE_BASE
+## just below is bumped instead: one constant rate, from beat one to the end,
+## slightly higher everywhere so the extra buffer still burns down to an
+## equivalent "half tank, like before" over roughly the same span — see the
+## probe comparison there for how small "slightly" actually is.
+const START_FUEL := FUEL_CAP
 ## Real playtest (not the bot bisection this was previously tuned against):
 ## reaching PRISM landed right as the run was already nearly maxed out (see
 ## EXERTION_SPAN below — PRISM unlocks at run-second 100, EXERTION_SPAN used
@@ -239,7 +257,15 @@ const START_FUEL := 4.5
 ## the easy, generous one a first-time or non-expert player needs it to be.
 ## Both cut roughly in half: the long-run curve a couple gets good at is
 ## still there, it just takes longer to arrive.
-const APPETITE_BASE := 0.16
+##
+## Nudged 0.16 -> 0.17 for the full-tank START_FUEL above — verified against
+## the probe (20 seeds, FIRST_SEED/SEED_STRIDE): the old half-tank opening
+## (4.5 fuel, 0.16 base) gave min 140 / avg 183 / max 229 beats; full tank at
+## 0.17 gives min 140 / avg 180 / max 230 — same floor, same ceiling, average
+## within 2%. 0.19 was tried first and rejected: avg matched (175) but one
+## seed's min collapsed to 90 (was 140), the exact "steeper base quietly
+## guts an unlucky opening" failure this file already warned about above.
+const APPETITE_BASE := 0.17
 const APPETITE_RATE := 0.013    # per second
 
 ## Seconds of exertion before the heart is fully racing.
@@ -412,6 +438,11 @@ const DRAG_SLOP := 12.0
 @onready var replay_btn: Button = $Ui/Death/ReplayBtn
 @onready var tutorial_btn: Button = $Ui/Death/TutorialBtn
 @onready var share_btn: Button = $Ui/Death/ShareBtn
+@onready var menu_btn: Button = $Ui/Death/MenuBtn
+## Small top-left icon, visible only during a live run (see start_run()/
+## _on_stopped()/_on_quit_to_menu()) — the death screen already has its own
+## Menu button, this is the same escape hatch for mid-run.
+@onready var quit_btn: Button = $Ui/QuitBtn
 ## Full-rect Control, always correctly viewport-sized (declared in the
 ## .tscn — see there for why: a same-shaped Control built purely in code and
 ## parented straight under a CanvasLayer measured its own rect as (0, 0),
@@ -482,6 +513,24 @@ var lb_you := {"rank": 0, "score": 0, "isBest": false}
 var lb_total_players := 0
 var lb_total_plays := 0
 var _lb_http: HTTPRequest
+
+## Name-claim/rename result (see _claim_name, called from name_prompt.gd for
+## both first-launch claim and rename) — same live-state-read pattern as
+## lb_state above. "idle" until a claim is in flight, then
+## "checking"/"ok"/"taken"/"error". name_suggestions is only populated on
+## "taken", with a few guaranteed-free variations the server already checked.
+var name_state := "idle"
+var name_suggestions: Array = []
+var _name_http: HTTPRequest
+
+## Read-only leaderboard-rank lookup for the main menu (see _fetch_rank,
+## called from main_menu.gd's start()) — same live-state-read pattern as
+## lb_state/name_state above. "idle" until requested, then
+## "loading"/"loaded"/"error". rank_value is 0 (never played) until loaded.
+var rank_state := "idle"
+var rank_value := 0
+var rank_total_players := 0
+var _rank_http: HTTPRequest
 ## Persisted across runs (see _load_save/_store_save) — drives VNode.teach so
 ## the recipe demonstration plays on the first Forge/Loom/Kiln/Crucible the
 ## player EVER sees, not every run once they already understand it.
@@ -614,33 +663,40 @@ func _ready() -> void:
 	replay_btn.pressed.connect(func() -> void: start_run(0))
 	tutorial_btn.pressed.connect(_on_replay_tutorial)
 	share_btn.pressed.connect(_on_open_leaderboard)
+	menu_btn.pressed.connect(_on_open_main_menu)
+	quit_btn.pressed.connect(_on_quit_to_menu)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
+	# Under any dev harness (probe/shot/chainstress/...) skip straight into a
+	# run, same as always — those are identified by the mere presence of
+	# cmdline args, which a real launch (Telegram, a browser tab, a bare
+	# double-click) never has, and none of them can tap through a menu or a
+	# keyboard.
+	if not OS.get_cmdline_user_args().is_empty():
+		start_run(0)
+		_maybe_attach_harness()
+		return
 	# First launch ever (or a save from before names existed): get a name
-	# BEFORE any run starts, not behind a death-screen tap — "at the
+	# BEFORE anything else, not behind a death-screen tap — "at the
 	# beginning game should get user's name for the first time and then
 	# proceed to game" was explicit direction. Every launch after this one
-	# has player_name already saved and skips straight to start_run.
-	# Skipped under any dev harness (probe/shot/chainstress/...): those are
-	# identified by the mere presence of cmdline args, which a real launch
-	# (Telegram, a browser tab, a bare double-click) never has, and none of
-	# them can type a name into a LineEdit.
-	if player_name.is_empty() and OS.get_cmdline_user_args().is_empty():
+	# has player_name already saved and goes straight to the main menu
+	# instead — no more auto-starting a run for returning players now that
+	# there's a menu to land on.
+	if player_name.is_empty():
 		var prompt := NamePromptScene.new()
 		modal_layer.add_child(prompt)
 		prompt.confirmed.connect(_on_first_name_confirmed)
-		prompt.start(design_size())
+		prompt.start(self, design_size())
 	else:
-		start_run(0)
-		_maybe_attach_harness()
+		_on_open_main_menu()
 
 
 func _on_first_name_confirmed(name_text: String) -> void:
 	player_name = name_text
 	_store_save()
-	start_run(0)
-	_maybe_attach_harness()
+	_on_open_main_menu()
 
 
 ## Desktop windows launch at project.godot's fixed window_width/height_override,
@@ -861,8 +917,7 @@ func start_run(run_seed: int) -> void:
 	_throughput_stall = 0.0
 	throughput_rescues = 0
 
-	var vp := design_size()
-	heart = _make_node(VNode.Kind.HEART, Vector2(vp.x * 0.5, vp.y * 0.44))
+	heart = _make_node(VNode.Kind.HEART, heart_spawn_pos())
 
 	# Two wells to open with, placed relative to the Heart and inside its reach:
 	# the first connection must be obvious, so the player learns the verb by
@@ -876,6 +931,7 @@ func start_run(run_seed: int) -> void:
 	_make_node(VNode.Kind.WELL, heart.position + Vector2(146, 122))
 
 	death_ui.hide()
+	quit_btn.show()
 	# The Death screen persists across a Replay (no scene reload — see the
 	# ReplayBtn wiring), so the last run's wreckage has to be torn down
 	# explicitly or it just keeps accumulating, one more shattered layer per
@@ -905,6 +961,15 @@ func design_size() -> Vector2:
 	)
 
 
+## Single source of truth for where the Heart lives, in design space — used
+## by start_run() to place the real one and by main_menu.gd to place its
+## decorative stand-in at the exact same spot (see there), so the menu's
+## Heart and the run's Heart are never at risk of drifting apart.
+func heart_spawn_pos() -> Vector2:
+	var vp := design_size()
+	return Vector2(vp.x * 0.5, vp.y * 0.44)
+
+
 func _make_node(kind: int, pos: Vector2) -> VNode:
 	var n: VNode = VNodeScene.new()
 	n.kind = kind
@@ -929,6 +994,7 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 
 func _on_stopped(total: int) -> void:
 	alive = false
+	quit_btn.hide()
 	Audio.stop_all()
 	# The run can die mid panic-pinch; never leave the world dilated. Only undo
 	# our own dilation — blindly writing 1.0 here would stomp the time scale the
@@ -981,7 +1047,15 @@ func _on_stopped(total: int) -> void:
 ## the instant the Heart stops (see _on_stopped), not from a button. Name is
 ## already guaranteed set by now: _ready() gets one before the first run
 ## ever starts (see name_prompt.gd).
+##
+## Skipped under any dev harness, same reasoning as _store_save()'s own
+## _harness_active guard — a probe/shot/chainstress bot dying is not a real
+## player's run, and without this every balance-tuning batch was quietly
+## POSTing bot scores to the real production leaderboard under the dev's own
+## player_id.
 func _submit_score() -> void:
+	if _harness_active:
+		return
 	lb_state = "loading"
 	if LEADERBOARD_URL.is_empty():
 		lb_state = "error"
@@ -1025,6 +1099,120 @@ func _on_open_leaderboard() -> void:
 	var panel := LeaderboardPanelScene.new()
 	modal_layer.add_child(panel)
 	panel.start(self, design_size())
+
+
+## Landing screen: every real launch after the first-ever name claim lands
+## here instead of auto-starting a run (see _ready()), and the death
+## screen's Menu button returns here too without forcing a replay first.
+func _on_open_main_menu() -> void:
+	var menu := MainMenuScene.new()
+	modal_layer.add_child(menu)
+	menu.start(self, design_size())
+
+
+## The in-run escape hatch (quit_btn, top-left corner, visible only while
+## alive) — abandons the current run silently, NOT the same as dying: no
+## death screen, no shatter, no score submission. Beat.running is cleared
+## directly rather than through Beat.stop(), which emits `stopped` and
+## would otherwise route straight into _on_stopped()'s full death flow.
+func _on_quit_to_menu() -> void:
+	if not alive:
+		return
+	alive = false
+	quit_btn.hide()
+	Audio.stop_all()
+	_end_dilation()
+	Beat.running = false
+	_on_open_main_menu()
+
+
+## Rename — opens the same keyboard-driven prompt first launch uses, just
+## pre-filled with the current name (see name_prompt.gd's edit mode) and
+## wired to a different confirm handler: no run to start, just update and
+## persist the name the player is already mid-session with.
+func _on_open_rename() -> void:
+	var prompt := NamePromptScene.new()
+	modal_layer.add_child(prompt)
+	prompt.confirmed.connect(_on_rename_confirmed)
+	prompt.start(self, design_size(), player_name)
+
+
+func _on_rename_confirmed(name_text: String) -> void:
+	player_name = name_text
+	_store_save()
+
+
+## Claims or changes player_name against the leaderboard backend's uniqueness
+## check (see server/leaderboard/submit.js's /name route) — used by
+## name_prompt.gd for both the first-launch claim and rename. Same
+## live-state-read pattern as _submit_score/lb_state: name_prompt.gd polls
+## name_state itself rather than this returning a value directly.
+func _claim_name(name_text: String) -> void:
+	name_state = "checking"
+	name_suggestions = []
+	if NAME_URL.is_empty():
+		name_state = "error"
+		return
+	if _name_http == null:
+		_name_http = HTTPRequest.new()
+		add_child(_name_http)
+		_name_http.request_completed.connect(_on_name_request_completed)
+	var body := JSON.stringify({"player_id": player_id, "name": name_text})
+	var err := _name_http.request(
+		NAME_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+	if err != OK:
+		name_state = "error"
+
+
+func _on_name_request_completed(result: int, response_code: int, _headers: PackedStringArray,
+		body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS:
+		name_state = "error"
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		name_state = "error"
+		return
+	if response_code == 200:
+		name_state = "ok"
+	elif response_code == 409:
+		name_state = "taken"
+		name_suggestions = parsed.get("suggestions", [])
+	else:
+		name_state = "error"
+
+
+## Read-only "where do I stand" lookup (see server/leaderboard/submit.js's
+## /rank route) for the main menu — never writes anything, so opening the
+## menu can call this freely without it counting as a run.
+func _fetch_rank() -> void:
+	rank_state = "loading"
+	if RANK_URL.is_empty():
+		rank_state = "error"
+		return
+	if _rank_http == null:
+		_rank_http = HTTPRequest.new()
+		add_child(_rank_http)
+		_rank_http.request_completed.connect(_on_rank_request_completed)
+	var body := JSON.stringify({"player_id": player_id})
+	var err := _rank_http.request(
+		RANK_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+	if err != OK:
+		rank_state = "error"
+
+
+func _on_rank_request_completed(result: int, response_code: int, _headers: PackedStringArray,
+		body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		rank_state = "error"
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		rank_state = "error"
+		return
+	rank_value = int(parsed.get("rank", 0))
+	rank_total_players = int(parsed.get("totalPlayers", 0))
+	rank_state = "loaded"
 
 
 func _commas(n: int) -> String:
@@ -2910,6 +3098,22 @@ func _vein_at(p: Vector2) -> Vein:
 	return best
 
 
+## Cuts every vein the swipe segment `from`->`to` actually crosses, tested
+## against the vein's own sampled Bézier points (v.pts) — same shape
+## distance_to_point already reads for the stationary-tap cut — not the
+## straight a->b chord, since a bent vein's visible line is not that chord.
+## Duplicated so cutting mid-loop (which mutates `veins`) can't skip or
+## double-visit an entry.
+func _slice_check(from: Vector2, to: Vector2) -> void:
+	if from == to:
+		return
+	for v in veins.duplicate():
+		for i in v.pts.size() - 1:
+			if Geometry2D.segment_intersects_segment(from, to, v.pts[i], v.pts[i + 1]) != null:
+				_remove_vein(v, true)
+				break
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventScreenTouch:
 		if event.pressed:
@@ -2943,6 +3147,7 @@ func _on_press(p: Vector2) -> void:
 
 
 func _on_move(p: Vector2) -> void:
+	var prev := _drag_pos
 	_drag_pos = p
 	if not _moved and p.distance_to(_touch_start) > DRAG_SLOP:
 		_moved = true
@@ -2951,6 +3156,13 @@ func _on_move(p: Vector2) -> void:
 		# initial touch point — near the Heart that's the common case, not
 		# an edge case, since veins fan out from point-blank range.
 		_drag_from = _press_node
+		prev = _touch_start
+	# A drag that did NOT start on a node is never a connection — nothing
+	# else used that gesture, so it's free to mean "slice," Fruit-Ninja
+	# style: any vein the swipe path actually crosses gets cut, on top of
+	# (not instead of) the existing stationary-tap cut in _on_release.
+	if _moved and _drag_from == null:
+		_slice_check(prev, p)
 
 
 func _on_release(p: Vector2) -> void:

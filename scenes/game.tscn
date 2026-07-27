@@ -157,30 +157,11 @@ horizontal_alignment = 1
 vertical_alignment = 1
 mouse_filter = 2
 
-[node name="ShareBtn" type="Button" parent="Ui/Death"]
-anchor_left = 0.0
-anchor_top = 0.79
-anchor_right = 1.0
-anchor_bottom = 0.79
-offset_left = 40.0
-offset_top = 0.0
-offset_right = -40.0
-offset_bottom = 34.0
-theme_override_colors/font_color = Color(1, 0.718, 0.396, 0.8)
-theme_override_colors/font_hover_color = Color(1, 0.718, 0.396, 0.9)
-theme_override_colors/font_pressed_color = Color(1, 0.718, 0.396, 1)
-theme_override_font_sizes/font_size = 14
-theme_override_styles/normal = SubResource("BtnSecondaryNormal")
-theme_override_styles/hover = SubResource("BtnSecondaryNormal")
-theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
-theme_override_styles/focus = SubResource("BtnFocusEmpty")
-text = "Leaderboard"
-
 [node name="ReplayBtn" type="Button" parent="Ui/Death"]
 anchor_left = 0.0
-anchor_top = 0.83
+anchor_top = 0.78
 anchor_right = 1.0
-anchor_bottom = 0.83
+anchor_bottom = 0.78
 offset_left = 40.0
 offset_top = 0.0
 offset_right = -40.0
@@ -197,9 +178,9 @@ text = "Replay"
 
 [node name="TutorialBtn" type="Button" parent="Ui/Death"]
 anchor_left = 0.0
-anchor_top = 0.9
+anchor_top = 0.845
 anchor_right = 1.0
-anchor_bottom = 0.9
+anchor_bottom = 0.845
 offset_left = 40.0
 offset_top = 0.0
 offset_right = -40.0
@@ -212,7 +193,61 @@ theme_override_styles/normal = SubResource("BtnSecondaryNormal")
 theme_override_styles/hover = SubResource("BtnSecondaryNormal")
 theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
 theme_override_styles/focus = SubResource("BtnFocusEmpty")
-text = "↻ Replay tutorial"
+text = "Replay with tutorial"
+
+[node name="MenuBtn" type="Button" parent="Ui/Death"]
+anchor_left = 0.0
+anchor_top = 0.905
+anchor_right = 0.5
+anchor_bottom = 0.905
+offset_left = 40.0
+offset_top = 0.0
+offset_right = -6.0
+offset_bottom = 40.0
+theme_override_colors/font_color = Color(1, 0.718, 0.396, 0.8)
+theme_override_colors/font_hover_color = Color(1, 0.718, 0.396, 0.9)
+theme_override_colors/font_pressed_color = Color(1, 0.718, 0.396, 1)
+theme_override_font_sizes/font_size = 14
+theme_override_styles/normal = SubResource("BtnSecondaryNormal")
+theme_override_styles/hover = SubResource("BtnSecondaryNormal")
+theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
+theme_override_styles/focus = SubResource("BtnFocusEmpty")
+text = "Menu"
+
+[node name="ShareBtn" type="Button" parent="Ui/Death"]
+anchor_left = 0.5
+anchor_top = 0.905
+anchor_right = 1.0
+anchor_bottom = 0.905
+offset_left = 6.0
+offset_top = 0.0
+offset_right = -40.0
+offset_bottom = 40.0
+theme_override_colors/font_color = Color(1, 0.718, 0.396, 0.8)
+theme_override_colors/font_hover_color = Color(1, 0.718, 0.396, 0.9)
+theme_override_colors/font_pressed_color = Color(1, 0.718, 0.396, 1)
+theme_override_font_sizes/font_size = 14
+theme_override_styles/normal = SubResource("BtnSecondaryNormal")
+theme_override_styles/hover = SubResource("BtnSecondaryNormal")
+theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
+theme_override_styles/focus = SubResource("BtnFocusEmpty")
+text = "Board"
+
+[node name="QuitBtn" type="Button" parent="Ui"]
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 60.0
+offset_bottom = 60.0
+theme_override_colors/font_color = Color(1, 0.718, 0.396, 0.7)
+theme_override_colors/font_hover_color = Color(1, 0.718, 0.396, 0.85)
+theme_override_colors/font_pressed_color = Color(1, 0.718, 0.396, 1)
+theme_override_font_sizes/font_size = 20
+theme_override_styles/normal = SubResource("BtnSecondaryNormal")
+theme_override_styles/hover = SubResource("BtnSecondaryNormal")
+theme_override_styles/pressed = SubResource("BtnSecondaryPressed")
+theme_override_styles/focus = SubResource("BtnFocusEmpty")
+text = "×"
+visible = false
 
 [node name="Modal" type="Control" parent="Ui"]
 anchor_right = 1.0

@@ -1,14 +1,19 @@
 extends Node2D
 ## The in-game leaderboard: a read-only view over game.gd's lb_* state (see
 ## there — _submit_score fires the moment the Heart stops, automatically,
-## not from here), opened by the death screen's "Leaderboard" button and
-## self-freeing on tap. Same "caller spawns it and forgets it" pattern as
-## ShatterScene/BurstScene/FloatText.
+## not from here), opened by the death screen's "Leaderboard" button, the
+## main menu's "Leaderboard" entry, and self-freeing on tap. Same "caller
+## spawns it and forgets it" pattern as ShatterScene/BurstScene/FloatText.
 ##
 ## Reads game's live state every frame rather than a frozen snapshot (same
 ## pattern as ranks_strip.gd/score_hud.gd) so a submission still in flight
 ## when this panel opens still updates it once it lands, instead of leaving
 ## a stale "Submitting..." on screen.
+##
+## Shows the top 10 always; when you (game.lb_you) fall outside it, an
+## ellipsis and the nearby block (2 above, you, 2 below — game.lb_nearby,
+## already shaped this way server-side) follow, so "where do I actually
+## stand" never requires a separate screen.
 ##
 ## Custom-drawn like every other dynamic-content readout in this game
 ## rather than built from Control/Label nodes — there is no fixed number of
@@ -80,48 +85,93 @@ const ROW_H := 54.0
 const ROW_TOP := 160.0
 const COL_RANK := 46.0
 const COL_NAME := 84.0
-const COL_SCORE_R := 494.0
+const COL_SCORE_R := 478.0
+## Small rank-change chevron past the score — shrunk COL_SCORE_R above to
+## leave it room without crowding the backdrop's own right edge.
+const COL_CHEVRON := 496.0
 
 
 func _draw_rows() -> void:
 	var top: Array = game.lb_top
 	var you: Dictionary = game.lb_you
+	var rank: int = you.get("rank", 0)
+
 	var y := ROW_TOP
 	for i in top.size():
-		var row: Dictionary = top[i]
-		var rank := i + 1
-		var mine: bool = rank == you.get("rank", 0)
-		if mine:
-			var hi := Palette.HEART
-			hi.a = 0.12
-			draw_rect(Rect2(Vector2(30.0, y - ROW_H * 0.5 + 4.0), Vector2(_vp.x - 60.0, ROW_H - 8.0)), hi)
+		y = _draw_row(top[i], i + 1, y, i + 1 == rank)
 
-		var col := Palette.SCORE
-		col.a = 0.95 if mine else 0.7
-		_left("%d" % rank, Vector2(COL_RANK, y), 17, col)
-		_left(_ellipsize(str(row.get("name", "?")), 16), Vector2(COL_NAME, y), 17, col)
-		_right(_commas(int(row.get("score", 0))), Vector2(COL_SCORE_R, y), 17, col)
-
-		var dim := Palette.SCORE
-		dim.a = 0.32
-		_left(_relative_time(str(row.get("at", ""))), Vector2(COL_NAME, y + 20.0), 12, dim)
-
-		y += ROW_H
-
-	# "You" only needs its own line when it fell outside the top 10 — inside
-	# it, the highlighted row above already says the same thing.
-	var rank: int = you.get("rank", 0)
-	y += 14.0
+	# The nearby block (2 above, you, 2 below — see submit.js's `nearby`) only
+	# needs to show up when you fell outside the top 10 — inside it, the
+	# highlighted row above already says the same thing. Outside it, this is
+	# what turns "top 10" into "top 10 ... your actual neighborhood".
 	if rank > top.size():
-		var col := Palette.HEART
-		col.a = 0.85
-		_centred("You  ·  #%d  ·  %s" % [rank, _commas(int(you.get("score", 0)))], Vector2(_vp.x * 0.5, y), 16, col)
-		y += 34.0
+		y += 10.0
+		var dots := Palette.SCORE
+		dots.a = 0.3
+		_centred("···", Vector2(_vp.x * 0.5, y), 20, dots)
+		y += 30.0
+		for row in game.lb_nearby:
+			y = _draw_row(row, int(row.get("rank", 0)), y, int(row.get("rank", 0)) == rank)
 
 	var foot := Palette.SCORE
 	foot.a = 0.38
 	_centred("%s players  ·  %s runs" % [_commas(game.lb_total_players), _commas(game.lb_total_plays)],
 		Vector2(_vp.x * 0.5, y + 20.0), 13, foot)
+
+
+## Draws one rank/name/score row plus its dim plays/last-played subline, and
+## returns the y for the next row — shared by both the top-10 loop and the
+## outside-top-10 nearby block above, so "you" reads identically wherever it
+## actually lands.
+func _draw_row(row: Dictionary, rank: int, y: float, mine: bool) -> float:
+	if mine:
+		var hi := Palette.HEART
+		hi.a = 0.12
+		draw_rect(Rect2(Vector2(30.0, y - ROW_H * 0.5 + 4.0), Vector2(_vp.x - 60.0, ROW_H - 8.0)), hi)
+
+	var col := Palette.SCORE
+	col.a = 0.95 if mine else 0.7
+	_left("%d" % rank, Vector2(COL_RANK, y), 17, col)
+	_left(_ellipsize(str(row.get("name", "?")), 16), Vector2(COL_NAME, y), 17, col)
+	_right(_commas(int(row.get("score", 0))), Vector2(COL_SCORE_R, y), 17, col)
+	_draw_chevron(Vector2(COL_CHEVRON, y), int(row.get("rankChange", 0)))
+
+	var dim := Palette.SCORE
+	dim.a = 0.32
+	var plays := int(row.get("plays", 0))
+	var plays_text := "%d play%s" % [plays, "" if plays == 1 else "s"]
+	var at_text := _relative_time(str(row.get("at", "")))
+	_left(plays_text + ("  ·  " + at_text if not at_text.is_empty() else ""),
+		Vector2(COL_NAME, y + 20.0), 12, dim)
+
+	return y + ROW_H
+
+
+## A small filled triangle, green tip-up when this row's player climbed
+## since their own last run, red tip-down when they fell — see
+## submit.js's rankChangeFor. Silent (draws nothing) at 0, which covers
+## both "unchanged" and "no prior run to compare against" alike, so a
+## first-time row never shows a fabricated arrow.
+const CHEVRON_W := 9.0
+const CHEVRON_H := 8.0
+
+func _draw_chevron(at: Vector2, change: int) -> void:
+	if change == 0:
+		return
+	var up := change > 0
+	var col := Palette.RANK_UP if up else Palette.RANK_DOWN
+	col.a = 0.9
+	var half_h := CHEVRON_H * 0.5
+	var tri: PackedVector2Array
+	if up:
+		tri = PackedVector2Array([
+			at + Vector2(0.0, -half_h), at + Vector2(-CHEVRON_W * 0.5, half_h), at + Vector2(CHEVRON_W * 0.5, half_h),
+		])
+	else:
+		tri = PackedVector2Array([
+			at + Vector2(0.0, half_h), at + Vector2(-CHEVRON_W * 0.5, -half_h), at + Vector2(CHEVRON_W * 0.5, -half_h),
+		])
+	draw_colored_polygon(tri, col)
 
 
 func _ellipsize(s: String, max_len: int) -> String:
@@ -165,19 +215,19 @@ func _commas(n: int) -> String:
 
 func _left(text: String, at: Vector2, size: int, col: Color) -> void:
 	if _font == null:
-		_font = ThemeDB.fallback_font
+		_font = Palette.MONO_FONT
 	draw_string(_font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
 
 func _right(text: String, at: Vector2, size: int, col: Color) -> void:
 	if _font == null:
-		_font = ThemeDB.fallback_font
+		_font = Palette.MONO_FONT
 	var w := _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
 	draw_string(_font, at - Vector2(w, 0.0), text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
 
 func _centred(text: String, at: Vector2, size: int, col: Color) -> void:
 	if _font == null:
-		_font = ThemeDB.fallback_font
+		_font = Palette.MONO_FONT
 	var w := _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
 	draw_string(_font, at - Vector2(w * 0.5, 0.0), text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
