@@ -1842,10 +1842,10 @@ func _spawn_node(kind: int) -> void:
 
 
 ## What each tool kind makes never varies; what it EATS does. The plain
-## recipe is two of the tier below — the classic chain. Exotic recipes are
-## mixed multisets ("1 square and 1 circle", "2 x 1 y", up to three slots)
-## drawn from everything the run has unlocked so far, excluding VOID and the
-## tool's own product.
+## recipe is two of the tier below — the classic chain. "Exotic" is COUNT
+## only (see _roll_recipe's own header below for why mixed types were tried
+## and reverted) — the same canonical ingredient, just 3 or sometimes 4 of
+## it instead of 2.
 const CANONICAL_RECIPE := {
 	VNode.Kind.FORGE: [VNode.Res.RAW, VNode.Res.RAW],
 	VNode.Kind.LOOM: [VNode.Res.REFINED, VNode.Res.REFINED],
@@ -1856,6 +1856,15 @@ const CANONICAL_RECIPE := {
 ## the learnable classic chain, the late game asks for more.
 const EXOTIC_CHANCE_BASE := 0.25
 const EXOTIC_CHANCE_MAX := 0.75
+## Within an exotic roll, how often it's the 4-count variant rather than
+## 3-count — always the minority (caps under 0.5) so "you see 2 most often,
+## then 3, then 4" holds at every point in the run, but the split itself
+## still climbs with intensity like everything else: an early exotic roll is
+## almost always "just one more" (3), a late one increasingly often asks for
+## the full extra pair (4). Applies identically to every tool kind, same as
+## EXOTIC_CHANCE_BASE/MAX above, since they all share this one function.
+const EXOTIC_FOUR_CHANCE_BASE := 0.15
+const EXOTIC_FOUR_CHANCE_MAX := 0.42
 
 
 ## THE NO-MOVE GUARANTEE APPLIES HERE TOO: the first tool of each kind on
@@ -1889,7 +1898,8 @@ func _roll_recipe(kind: int) -> Array[int]:
 	if rng.randf() > chance:
 		return canonical
 
-	var extra := 1 + (1 if rng.randf() < 0.3 else 0)
+	var four_chance := lerpf(EXOTIC_FOUR_CHANCE_BASE, EXOTIC_FOUR_CHANCE_MAX, intensity())
+	var extra := 2 if rng.randf() < four_chance else 1
 	var heavy: Array[int] = []
 	for _i in canonical.size() + extra:
 		heavy.append(canonical[0])

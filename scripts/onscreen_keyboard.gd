@@ -30,7 +30,13 @@ const GAP := 4.0
 
 const ROW_LETTERS_1 := ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]
 const ROW_LETTERS_2 := ["a", "s", "d", "f", "g", "h", "j", "k", "l"]
-const ROW_LETTERS_3 := ["z", "x", "c", "v", "b", "n", "m", "⌫"]
+## "DEL", not the "⌫" glyph (U+232B) this used to be — Space Mono has no
+## glyph for it, and unlike a native build (which can pull in an OS-level
+## fallback font), a web export like Telegram's Mini App has no such
+## fallback: the key rendered completely blank there. Still tappable either
+## way (Button hit-testing doesn't care what the label renders as), but
+## invisible reads as "not working" when you can't see where to tap it.
+const ROW_LETTERS_3 := ["z", "x", "c", "v", "b", "n", "m", "DEL"]
 const ROW_DIGITS := ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
 const ROW_SPECIALS := ["_", "-", "."]
 
@@ -117,13 +123,15 @@ func _make_key(label: String) -> Button:
 	var btn := Button.new()
 	btn.text = label
 	btn.size = Vector2(KEY_W, KEY_H)
-	btn.add_theme_font_size_override("font_size", 18)
+	# "DEL" is 3 characters against everything else's 1 — shrink just that
+	# one label so it doesn't crowd the same 46px-wide key.
+	btn.add_theme_font_size_override("font_size", 13 if label == "DEL" else 18)
 	btn.add_theme_color_override("font_color", Palette.SCORE)
 	btn.add_theme_stylebox_override("normal", _key_style)
 	btn.add_theme_stylebox_override("hover", _key_style)
 	btn.add_theme_stylebox_override("pressed", _key_style_pressed)
 	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	if label == "⌫":
+	if label == "DEL":
 		btn.pressed.connect(_on_backspace)
 	else:
 		btn.pressed.connect(_on_char.bind(label))
