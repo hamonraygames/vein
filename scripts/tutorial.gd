@@ -493,6 +493,15 @@ func _draw() -> void:
 ## read as a deliberate "look here," not a strobe.
 const DEMAND_BLINK_PERIOD := 1.1
 
+## How far outside a shape's own reach the highlight halo sits, both as a
+## multiplier on the Heart's tiny inner glyph and on a matching node's own
+## full body — see _draw_shape_halo. A halo drawn at exactly the glyph/body's
+## own scale would trace right on top of it (unreadable against the shape's
+## own outline); this is just enough clearance to read as "a highlight around
+## it" without ballooning into a shape nobody would recognise as the same one.
+const HEART_HALO_S := 0.34 * 1.35
+const NODE_HALO_PAD := 1.3
+
 func _draw_demand_match_hint() -> void:
 	# _draw() can fire once before start_run() ever has (a window-resize
 	# during game.gd's own _ready(), e.g. _fit_desktop_window, forces a
@@ -504,16 +513,40 @@ func _draw_demand_match_hint() -> void:
 	var blink := sin(phase * TAU) * 0.5 + 0.5
 	var col: Color = Palette.of_res(game.demand)
 
+	# Traces the ACTUAL demand glyph's own silhouette (a triangle halo for a
+	# triangle glyph, a square halo for a square, and so on — see
+	# VNode.demand_glyph_points), not a generic circle around whatever shape
+	# happens to be asked for. Sized off the small inner glyph the Heart is
+	# drawing right now, not the Heart's own outer radius — the hint has to
+	# point at the one part of the Heart that changes, never its silhouette,
+	# which doesn't.
 	var heart_col := col
 	heart_col.a = 0.35 + blink * 0.45
-	draw_arc(game.heart.position, game.heart.radius() * 1.35, 0.0, TAU, 40,
-		heart_col, 3.0 + blink * 2.0, true)
+	_draw_shape_halo(game.heart.position, game.demand, game.heart.radius() * HEART_HALO_S,
+		heart_col, 3.0 + blink * 2.0)
 
 	for n in game.nodes:
 		if n != game.heart and n.produces == game.demand and not n.corrupted:
 			var nc := col
 			nc.a = 0.3 + blink * 0.5
-			draw_arc(n.position, n.radius() * 1.5, 0.0, TAU, 28, nc, 2.5 + blink * 1.5, true)
+			_draw_shape_halo(n.position, game.demand, n.radius() * NODE_HALO_PAD,
+				nc, 2.5 + blink * 1.5)
+
+
+## A halo tracing the same shape family as `res`'s own demand glyph (see
+## VNode.demand_glyph_points) at world position `center`, radius-ish scale
+## `s` — the polygon case just needs the origin-centred points shifted into
+## place; the circular RAW/VOID case (empty points) falls back to a plain
+## arc at the identical proportion VNode itself draws that circle at.
+func _draw_shape_halo(center: Vector2, res: int, s: float, col: Color, width: float) -> void:
+	var pts := VNode.demand_glyph_points(res, s)
+	if pts.is_empty():
+		draw_arc(center, s * VNode.DEMAND_GLYPH_CIRCLE_RATIO, 0.0, TAU, 28, col, width, true)
+		return
+	var world := PackedVector2Array()
+	for p in pts:
+		world.append(p + center)
+	draw_polyline(world, col, width, true)
 
 
 ## A faint ring at the Heart's reach, so "this Well is beyond it" is visible —

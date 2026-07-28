@@ -262,6 +262,16 @@ async function handleScore(payload) {
 // which is why this never writes anything: a menu visit is not a run, and
 // must not bump total_runs/totalPlayers the way an actual /score submission
 // does. Same scan-and-sort the other two routes already do.
+//
+// Also doubles as the read-only "just show me the board" query: the full
+// panel (scripts/leaderboard_panel.gd) reads game.lb_state, which starts
+// "idle" and only ever gets set by _submit_score — so opening the leaderboard
+// from the main menu, before this session has ever finished a run, had
+// nothing to show and sat on "Submitting..." forever even though nothing was
+// ever submitting. top/nearby/you/totalPlays below are the SAME shape
+// handleScore already returns (see game._on_lb_request_completed, which
+// treats /score's and /rank's responses identically), just computed from a
+// plain read instead of a write.
 async function handleRank(payload) {
 	const playerId = String(payload.player_id || '').trim();
 	if (!playerId || playerId.length > MAX_ID_LEN) {
@@ -273,12 +283,47 @@ async function handleRank(payload) {
 	const rank = sorted.findIndex((p) => p.player_id === playerId) + 1;
 	const you = rank > 0 ? sorted[rank - 1] : null;
 
+	const top = sorted.slice(0, TOP_N).map((p, i) => ({
+		name: p.name,
+		score: p.best_score,
+		at: p.best_score_at,
+		plays: p.total_runs || 0,
+		rankChange: rankChangeFor(p, i + 1),
+	}));
+
+	// Same window as handleScore's own nearby block, only needed once you fall
+	// outside the top 10 — see the comment there.
+	let nearby = [];
+	if (rank > top.length) {
+		const nearbyStart = Math.max(0, rank - 3);
+		nearby = sorted.slice(nearbyStart, rank + 2).map((p, i) => ({
+			rank: nearbyStart + i + 1,
+			name: p.name,
+			score: p.best_score,
+			at: p.best_score_at,
+			plays: p.total_runs || 0,
+			rankChange: rankChangeFor(p, nearbyStart + i + 1),
+		}));
+	}
+
+	const meta = await ddb.send(new GetCommand({ TableName: META_TABLE, Key: { id: 'totals' } }));
+
 	return respond(200, {
 		rank,
 		score: you ? you.best_score : 0,
 		plays: you ? (you.total_runs || 0) : 0,
 		rankChange: you ? rankChangeFor(you, rank) : 0,
 		totalPlayers: sorted.length,
+		top,
+		nearby,
+		you: {
+			rank,
+			score: you ? you.best_score : 0,
+			isBest: false,
+			plays: you ? (you.total_runs || 0) : 0,
+			rankChange: you ? rankChangeFor(you, rank) : 0,
+		},
+		totalPlays: (meta.Item && meta.Item.total_plays) || 0,
 	});
 }
 

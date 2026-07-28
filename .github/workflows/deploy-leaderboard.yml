@@ -1,0 +1,37 @@
+name: Deploy leaderboard backend
+
+# Runs server/leaderboard/deploy.sh (DynamoDB tables, IAM role, Lambda, HTTP
+# API) whenever anything under server/leaderboard/ changes on main — a
+# server-side fix (like submit.js's /rank route) previously sat un-deployed
+# until someone remembered to run the script by hand. Safe to run on every
+# push: deploy.sh's own header notes every step checks whether its resource
+# already exists first, and the Lambda code/config are always just updated
+# in place.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/leaderboard/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC -> AWS, no long-lived secret involved
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::393903547387:role/vein-github-actions-deploy
+          aws-region: eu-north-1
+
+      - name: Ensure zip is available
+        run: command -v zip || (sudo apt-get update && sudo apt-get install -y zip)
+
+      - name: Deploy Lambda + API Gateway + DynamoDB
+        run: bash server/leaderboard/deploy.sh

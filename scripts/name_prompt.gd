@@ -107,10 +107,26 @@ func _process(_delta: float) -> void:
 			_show_suggestions(game.name_suggestions)
 		"error":
 			_watching = false
-			_set_status("Couldn't reach the server. Try again.", Palette.VOID)
+			# game.name_error is only set when the server actually answered
+			# with a rejection (see its own header comment there) — that's a
+			# real reason, not a dropped connection, so show it instead of
+			# the generic network-failure line lying about what happened.
+			if not game.name_error.is_empty():
+				_set_status("Couldn't claim that name (%s). Try again." % game.name_error, Palette.VOID)
+			else:
+				_set_status("Couldn't reach the server. Try again.", Palette.VOID)
 
 
 func _submit(text: String) -> void:
+	# The Done/suggestion buttons stay tappable while a claim is in flight —
+	# real playtest reported names that just wouldn't go through, and an
+	# impatient second tap mid-"Checking…" (slow network, a claim that's
+	# genuinely still running) called game._claim_name again on the same
+	# in-flight HTTPRequest, which errors it out from under the first attempt
+	# instead of letting it land. Ignoring taps while _watching is already
+	# true means the ONE request in flight is always the one that resolves.
+	if _watching:
+		return
 	_last_text = text
 	_clear_suggestions()
 	_watching = true

@@ -28,6 +28,13 @@ const SAVE_PATH := "user://vein.cfg"
 const LEADERBOARD_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/score"
 const NAME_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/name"
 const RANK_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/rank"
+## HTTPRequest has no timeout by default (0 = wait forever) — a flaky mobile
+## connection or a WebView that silently never completes the request (both
+## reported on real phones) left lb_state/name_state/rank_state stuck on
+## "loading"/"Submitting..." with no way out. Every request node below gets
+## this so a dead connection always resolves to "error" eventually instead
+## of hanging the UI indefinitely.
+const HTTP_TIMEOUT := 12.0
 
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
@@ -439,10 +446,6 @@ const DRAG_SLOP := 12.0
 @onready var tutorial_btn: Button = $Ui/Death/TutorialBtn
 @onready var share_btn: Button = $Ui/Death/ShareBtn
 @onready var menu_btn: Button = $Ui/Death/MenuBtn
-## Small top-left icon, visible only during a live run (see start_run()/
-## _on_stopped()/_on_quit_to_menu()) — the death screen already has its own
-## Menu button, this is the same escape hatch for mid-run.
-@onready var quit_btn: Button = $Ui/QuitBtn
 ## Full-rect Control, always correctly viewport-sized (declared in the
 ## .tscn — see there for why: a same-shaped Control built purely in code and
 ## parented straight under a CanvasLayer measured its own rect as (0, 0),
@@ -521,6 +524,13 @@ var _lb_http: HTTPRequest
 ## "taken", with a few guaranteed-free variations the server already checked.
 var name_state := "idle"
 var name_suggestions: Array = []
+## The server's own `error` string on an "error" state, when the failure was
+## a real rejection (a 400 like "bad player_id"/"bad_name", not a dropped
+## connection) rather than a network-level miss — name_prompt.gd shows this
+## instead of a generic "couldn't reach the server" when it's set, so a real
+## rejection reads as what actually went wrong rather than a lie about the
+## network. Cleared at the top of every new attempt.
+var name_error := ""
 var _name_http: HTTPRequest
 
 ## Read-only leaderboard-rank lookup for the main menu (see _fetch_rank,
@@ -579,6 +589,19 @@ var demand: int = VNode.Res.RAW
 ## Every resource DEMAND_TIERS has introduced so far this run — the pool the
 ## post-teaching rotation phase draws from (see _tick_escalation).
 var _unlocked_res: Array[int] = [VNode.Res.RAW]
+## Which DEMAND_TIERS entry the teaching schedule is currently sitting at —
+## an explicit index rather than re-derived from `demand` each frame, so
+## advancing it is a deliberate one-step action gated by
+## _current_demand_deliveries (see _tick_escalation), not just whatever the
+## clock says. Playtest: "if you don't feed it during the triangle craving
+## it goes to square without you dying" — a pure time-based schedule let an
+## entirely under-fed tier expire into the next one for free. Now the clock
+## can be ready to advance, but won't, until the Heart has actually been fed
+## its CURRENT craving at least once.
+var _demand_tier_idx := 0
+## Successful (kind == demand) deliveries since the tier at _demand_tier_idx
+## became active — reset to 0 on every advance (see _deliver/_tick_escalation).
+var _current_demand_deliveries := 0
 var _next_rotate_time := INF
 ## Pre-rolled outcome of the NEXT rotation flip, rolled DEMAND_TELL_LEAD
 ## seconds early so the Heart can telegraph it (see _tick_escalation and
@@ -664,7 +687,6 @@ func _ready() -> void:
 	tutorial_btn.pressed.connect(_on_replay_tutorial)
 	share_btn.pressed.connect(_on_open_leaderboard)
 	menu_btn.pressed.connect(_on_open_main_menu)
-	quit_btn.pressed.connect(_on_quit_to_menu)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
@@ -717,23 +739,31 @@ func _fit_desktop_window() -> void:
 
 func _load_save() -> void:
 	var cfg := ConfigFile.new()
-	if cfg.load(SAVE_PATH) != OK:
-		return
-	# Lifetime beats survive a rebalance; a best score does not.
-	lifetime_beats = int(cfg.get_value("run", "lifetime", 0))
-	if int(cfg.get_value("run", "tuning", 0)) == TUNING_VERSION:
-		best = int(cfg.get_value("run", "best", 0))
-	seen_forge = bool(cfg.get_value("run", "seen_forge", false))
-	seen_loom = bool(cfg.get_value("run", "seen_loom", false))
-	seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
-	seen_crucible = bool(cfg.get_value("run", "seen_crucible", false))
-	tut_connect = bool(cfg.get_value("run", "tut_connect", false))
-	tut_chain = bool(cfg.get_value("run", "tut_chain", false))
-	tut_forge = bool(cfg.get_value("run", "tut_forge", false))
-	tut_cut = bool(cfg.get_value("run", "tut_cut", false))
-	tutorial_done = bool(cfg.get_value("run", "tutorial_done", false))
-	player_id = str(cfg.get_value("run", "player_id", ""))
-	player_name = str(cfg.get_value("run", "player_name", ""))
+	# A genuinely fresh install has no user://vein.cfg yet — cfg.load fails,
+	# and every value below simply keeps its declared default (best=0,
+	# lifetime_beats=0, etc.), which is correct. What must NOT happen is
+	# bailing out before player_id gets a chance to generate: that used to
+	# return here unconditionally, so a first-time player's player_id stayed
+	# "" forever (never regenerated on a later launch either, since by then
+	# the file DOES exist and loads "successfully" with an empty value) —
+	# every /name and /score call the server ever saw from them failed with
+	# "bad player_id", and there was no way to ever recover from it client-side.
+	if cfg.load(SAVE_PATH) == OK:
+		# Lifetime beats survive a rebalance; a best score does not.
+		lifetime_beats = int(cfg.get_value("run", "lifetime", 0))
+		if int(cfg.get_value("run", "tuning", 0)) == TUNING_VERSION:
+			best = int(cfg.get_value("run", "best", 0))
+		seen_forge = bool(cfg.get_value("run", "seen_forge", false))
+		seen_loom = bool(cfg.get_value("run", "seen_loom", false))
+		seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
+		seen_crucible = bool(cfg.get_value("run", "seen_crucible", false))
+		tut_connect = bool(cfg.get_value("run", "tut_connect", false))
+		tut_chain = bool(cfg.get_value("run", "tut_chain", false))
+		tut_forge = bool(cfg.get_value("run", "tut_forge", false))
+		tut_cut = bool(cfg.get_value("run", "tut_cut", false))
+		tutorial_done = bool(cfg.get_value("run", "tutorial_done", false))
+		player_id = str(cfg.get_value("run", "player_id", ""))
+		player_name = str(cfg.get_value("run", "player_name", ""))
 	# First launch ever, or a save from before the leaderboard existed —
 	# every player needs SOME id before they can post a score, and it has
 	# to be stable across runs, so it's generated once here rather than at
@@ -890,6 +920,8 @@ func start_run(run_seed: int) -> void:
 	combo = 0
 	demand = VNode.Res.RAW
 	_unlocked_res = [VNode.Res.RAW]
+	_demand_tier_idx = 0
+	_current_demand_deliveries = 0
 	_next_rotate_time = INF
 	_next_rotate_demand = -1
 	_heart_fed_ever = false
@@ -916,6 +948,8 @@ func start_run(run_seed: int) -> void:
 	chain_rescues = 0
 	_throughput_stall = 0.0
 	throughput_rescues = 0
+	_demand_supply_stall = 0.0
+	demand_supply_rescues = 0
 
 	heart = _make_node(VNode.Kind.HEART, heart_spawn_pos())
 
@@ -931,7 +965,6 @@ func start_run(run_seed: int) -> void:
 	_make_node(VNode.Kind.WELL, heart.position + Vector2(146, 122))
 
 	death_ui.hide()
-	quit_btn.show()
 	# The Death screen persists across a Replay (no scene reload — see the
 	# ReplayBtn wiring), so the last run's wreckage has to be torn down
 	# explicitly or it just keeps accumulating, one more shattered layer per
@@ -994,7 +1027,6 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 
 func _on_stopped(total: int) -> void:
 	alive = false
-	quit_btn.hide()
 	Audio.stop_all()
 	# The run can die mid panic-pinch; never leave the world dilated. Only undo
 	# our own dilation — blindly writing 1.0 here would stomp the time scale the
@@ -1062,6 +1094,7 @@ func _submit_score() -> void:
 		return
 	if _lb_http == null:
 		_lb_http = HTTPRequest.new()
+		_lb_http.timeout = HTTP_TIMEOUT
 		add_child(_lb_http)
 		_lb_http.request_completed.connect(_on_lb_request_completed)
 	var body := JSON.stringify({
@@ -1092,10 +1125,19 @@ func _on_lb_request_completed(result: int, response_code: int, _headers: PackedS
 
 ## "Leaderboard" — opens the full top-10 panel over whatever _submit_score
 ## already fetched (or is still fetching: leaderboard_panel.gd reads
-## lb_state live and updates itself once it lands). Never makes its own
-## request, so there is no second round trip just to look at data that's
-## already sitting here.
+## lb_state live and updates itself once it lands).
+##
+## lb_state stays "idle" until this SESSION has actually ended a run — opened
+## from the main menu before that (a fresh launch, or straight after the
+## first-ever name claim), there was nothing to show and the panel just sat
+## on "Submitting..." forever, forever being the bug: nothing was ever
+## submitting. _fetch_board() below covers exactly that gap with a read-only
+## request; once a real run has submitted (or this has already run once)
+## lb_state is no longer "idle" and this is a no-op, so a submission already
+## in flight (or already loaded) is never raced or re-fetched.
 func _on_open_leaderboard() -> void:
+	if lb_state == "idle":
+		_fetch_board()
 	var panel := LeaderboardPanelScene.new()
 	modal_layer.add_child(panel)
 	panel.start(self, design_size())
@@ -1108,22 +1150,6 @@ func _on_open_main_menu() -> void:
 	var menu := MainMenuScene.new()
 	modal_layer.add_child(menu)
 	menu.start(self, design_size())
-
-
-## The in-run escape hatch (quit_btn, top-left corner, visible only while
-## alive) — abandons the current run silently, NOT the same as dying: no
-## death screen, no shatter, no score submission. Beat.running is cleared
-## directly rather than through Beat.stop(), which emits `stopped` and
-## would otherwise route straight into _on_stopped()'s full death flow.
-func _on_quit_to_menu() -> void:
-	if not alive:
-		return
-	alive = false
-	quit_btn.hide()
-	Audio.stop_all()
-	_end_dilation()
-	Beat.running = false
-	_on_open_main_menu()
 
 
 ## Rename — opens the same keyboard-driven prompt first launch uses, just
@@ -1150,11 +1176,13 @@ func _on_rename_confirmed(name_text: String) -> void:
 func _claim_name(name_text: String) -> void:
 	name_state = "checking"
 	name_suggestions = []
+	name_error = ""
 	if NAME_URL.is_empty():
 		name_state = "error"
 		return
 	if _name_http == null:
 		_name_http = HTTPRequest.new()
+		_name_http.timeout = HTTP_TIMEOUT
 		add_child(_name_http)
 		_name_http.request_completed.connect(_on_name_request_completed)
 	var body := JSON.stringify({"player_id": player_id, "name": name_text})
@@ -1179,6 +1207,10 @@ func _on_name_request_completed(result: int, response_code: int, _headers: Packe
 		name_state = "taken"
 		name_suggestions = parsed.get("suggestions", [])
 	else:
+		# A real rejection (bad_name, bad player_id, ...) reads as what it
+		# actually is instead of the generic network-failure message below —
+		# see name_error's own header comment.
+		name_error = str(parsed.get("error", ""))
 		name_state = "error"
 
 
@@ -1192,6 +1224,7 @@ func _fetch_rank() -> void:
 		return
 	if _rank_http == null:
 		_rank_http = HTTPRequest.new()
+		_rank_http.timeout = HTTP_TIMEOUT
 		add_child(_rank_http)
 		_rank_http.request_completed.connect(_on_rank_request_completed)
 	var body := JSON.stringify({"player_id": player_id})
@@ -1213,6 +1246,30 @@ func _on_rank_request_completed(result: int, response_code: int, _headers: Packe
 	rank_value = int(parsed.get("rank", 0))
 	rank_total_players = int(parsed.get("totalPlayers", 0))
 	rank_state = "loaded"
+
+
+## Read-only "show me the board" fetch — the same RANK_URL _fetch_rank
+## already hits (server/leaderboard/submit.js's /rank route now returns
+## top/nearby/you/totalPlays alongside rank, the exact shape /score's
+## response has), reusing _lb_http and _on_lb_request_completed so this
+## slots into lb_state/lb_top/lb_nearby/lb_you exactly like a real
+## submission would have. Only ever called from _on_open_leaderboard while
+## lb_state is still "idle" — see there for why that gate matters.
+func _fetch_board() -> void:
+	lb_state = "loading"
+	if RANK_URL.is_empty():
+		lb_state = "error"
+		return
+	if _lb_http == null:
+		_lb_http = HTTPRequest.new()
+		_lb_http.timeout = HTTP_TIMEOUT
+		add_child(_lb_http)
+		_lb_http.request_completed.connect(_on_lb_request_completed)
+	var body := JSON.stringify({"player_id": player_id})
+	var err := _lb_http.request(
+		RANK_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+	if err != OK:
+		lb_state = "error"
 
 
 func _commas(n: int) -> String:
@@ -1401,21 +1458,28 @@ func _tick_escalation(delta: float) -> void:
 		# turns out rotation barely ever held long enough to plan around in
 		# the first place.
 		if _next_rotate_time == INF:
-			for t in DEMAND_TIERS:
-				if _demand_clock >= t.at:
-					want = t.res
-					if not _unlocked_res.has(t.res):
-						_unlocked_res.append(t.res)
-						if t.res == VNode.Res.PRISM:
-							_prism_unlocked_at = run_time
+			# One step at a time: advancing past the CURRENT tier requires both
+			# its time AND at least one confirmed feed of it (see
+			# _demand_tier_idx's own header above for why).
+			if _demand_tier_idx < DEMAND_TIERS.size() - 1:
+				var next_tier: Dictionary = DEMAND_TIERS[_demand_tier_idx + 1]
+				if _demand_clock >= next_tier.at and _current_demand_deliveries >= 1:
+					_demand_tier_idx += 1
+					_current_demand_deliveries = 0
+			want = DEMAND_TIERS[_demand_tier_idx].res
+			if not _unlocked_res.has(want):
+				_unlocked_res.append(want)
+				if want == VNode.Res.PRISM:
+					_prism_unlocked_at = run_time
 
-		# Teaching schedule is over once every DEMAND_TIERS entry has landed —
-		# from here, demand jumps randomly among everything unlocked instead of
-		# sitting at PRISM forever (see ROTATE_GAP_START/MIN above).
-		# _next_rotate_time starts at INF (see start_run) so the first crossing
-		# just arms the timer rather than firing an immediate switch the instant
-		# PRISM lands.
-		if _demand_clock >= DEMAND_TIERS[-1].at and _next_rotate_time == INF:
+		# Teaching schedule is over once every DEMAND_TIERS entry has landed
+		# AND been fed at least once — from here, demand jumps randomly among
+		# everything unlocked instead of sitting at HEXAGON forever (see
+		# ROTATE_GAP_START/MIN above). _next_rotate_time starts at INF (see
+		# start_run) so the first crossing just arms the timer rather than
+		# firing an immediate switch the instant it lands.
+		if _demand_tier_idx == DEMAND_TIERS.size() - 1 and _current_demand_deliveries >= 1 \
+				and _next_rotate_time == INF:
 			_next_rotate_time = _demand_clock + _jitter(ROTATE_GAP_START, 0.3)
 		elif _demand_clock >= _next_rotate_time:
 			# Use the pre-rolled tell if one landed (the normal case — see the
@@ -1465,6 +1529,7 @@ func _tick_escalation(delta: float) -> void:
 		_ensure_move(delta)
 		_tick_tool_chain(delta)
 		_ensure_throughput(delta)
+		_ensure_demand_supply(delta)
 
 		# Tools keep arriving on their cadence but the BOARD stays capped —
 		# playtest: "after a while the screen is full of triangles and squares."
@@ -2488,6 +2553,90 @@ func _ensure_throughput(delta: float) -> void:
 	_spawn_rescue_well()
 
 
+# --- The demand-supply guarantee ---------------------------------------------
+#
+# Every guarantee above reacts AFTER something already broke: no move at all,
+# a tier's tool or its feeder gone, or a thin trickle below the achievable-rate
+# floor. Real playtest: "when a shape is getting close to being poisonous
+# there should be new spawned items for users to use them instead" — a Well
+# or tool sitting on a sliver of reserve still passes every check above right
+# up until the beat it actually corrupts, and only then do the reactive
+# rescues start their own debounce. This spawns the replacement WHILE the
+# dying node still has some life left, so whatever the Heart currently wants
+# never actually runs dry — scoped to just the one kind that makes the
+# CURRENT demand, since that's the lineage the player is actually leaning on
+# right now, not the whole board.
+
+## Below this fraction of its own reserve, a supply node counts as "running
+## low" here — deliberately generous (not near-empty) so the replacement
+## lands well before the old one is actually in danger, not at its last gasp.
+const LOW_SUPPLY_FRACTION := 0.3
+## Longer than RESCUE_DEBOUNCE/CHAIN_STALL_DEBOUNCE — this is a top-up, not an
+## already-broken state, so it can afford to wait a beat longer and confirm
+## the low reading sticks before spending a spawn on it.
+const DEMAND_SUPPLY_DEBOUNCE := 3.0
+var _demand_supply_stall := 0.0
+## Proactive top-ups forced in by this guarantee — like rescues/
+## chain_rescues/throughput_rescues, a handful per run is this working as
+## intended; a flood means ordinary supply itself is running too thin against
+## demand and needs retuning, not this guarantee.
+var demand_supply_rescues := 0
+
+
+## Which node kind makes `res` — RAW has no tool of its own so it maps
+## straight to the Well that makes it; VOID is never a demand and maps to
+## nothing. The mirror of _feeder_kind_for (which names what FEEDS a kind);
+## this names what MAKES a resource.
+func _producer_kind_for_res(res: int) -> int:
+	match res:
+		VNode.Res.RAW: return VNode.Kind.WELL
+		VNode.Res.REFINED: return VNode.Kind.FORGE
+		VNode.Res.CLOTH: return VNode.Kind.LOOM
+		VNode.Res.PRISM: return VNode.Kind.KILN
+		VNode.Res.HEXAGON: return VNode.Kind.CRUCIBLE
+	return -1
+
+
+## Live, connected (depth >= 0 — actually feeding, not pre-staged) nodes of
+## whichever kind makes the CURRENT demand: if none of them are running low,
+## or a healthy one already backs up the low one, there is nothing to do.
+## Otherwise this is exactly "a shape is getting close to being poisonous
+## with nothing fresh to switch to" — spawn through the same slots the
+## ordinary timer-driven spawns use (_spawn_well/_spawn_tool_slot), so this
+## respects the normal board caps rather than forcing a spawn through them;
+## a top-up has no business overriding board hygiene the way the
+## already-broken-state rescues above do.
+func _ensure_demand_supply(delta: float) -> void:
+	var kind := _producer_kind_for_res(demand)
+	if kind == -1:
+		_demand_supply_stall = 0.0
+		return
+
+	var running_low := false
+	var has_fresh_backup := false
+	for n in nodes:
+		if n.kind != kind or n.corrupted or n.depth < 0:
+			continue
+		if n.reserve_ratio() < LOW_SUPPLY_FRACTION:
+			running_low = true
+		else:
+			has_fresh_backup = true
+
+	if not running_low or has_fresh_backup:
+		_demand_supply_stall = 0.0
+		return
+
+	_demand_supply_stall += delta
+	if _demand_supply_stall < DEMAND_SUPPLY_DEBOUNCE:
+		return
+	_demand_supply_stall = 0.0
+	demand_supply_rescues += 1
+	if kind == VNode.Kind.WELL:
+		_spawn_well()
+	else:
+		_spawn_tool_slot(kind)
+
+
 # --- Graph: everything flows downhill toward demand -------------------------
 
 func _rebuild_graph() -> void:
@@ -2965,6 +3114,10 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 			_bad_tempo_flash = 1.0
 		elif kind == demand and kind != VNode.Res.VOID:
 			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN)
+			# Feeds the demand-tier advance gate (see _demand_tier_idx/
+			# _tick_escalation) — a correct delivery is what actually earns
+			# the schedule the right to move on to the next craving.
+			_current_demand_deliveries += 1
 		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		to.pulse = 1.0
 		Audio.swallow(kind, fuel / fuel_cap(), kind == demand)

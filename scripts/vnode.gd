@@ -399,7 +399,14 @@ func can_accept(kind_in: int) -> bool:
 
 func take(kind_in: int) -> bool:
 	if _accepts_tool_input(kind_in):
-		if intake.size() >= buffer_cap():
+		# Capped at the RECIPE's own size, not buffer_cap() — a Forge's cap is 3
+		# (its triangle's edge count, see buffer_cap), but an exotic recipe can
+		# ask for 4 of its ingredient (see game._roll_recipe's EXOTIC_FOUR_CHANCE).
+		# Capping intake at buffer_cap() there silently refused the 4th item
+		# forever: intake sat at 3/4 filled, _smelt() never saw enough to fire,
+		# and the triangle just never converted — "the four-circle triangles
+		# aren't working."
+		if intake.size() >= recipe.size():
 			return false
 		intake.append(kind_in)
 		return true
@@ -632,33 +639,61 @@ func _draw_demand(r: float) -> void:
 		_draw_demand_glyph(demand, s, c, Vector2.ZERO)
 
 
-func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
+## Local-space, origin-centred outline for a demand glyph at scale `s` — the
+## exact vertex math _draw_demand_glyph draws with, factored out so a caller
+## OUTSIDE this node (tutorial.gd's demand-match highlight) can trace the
+## same silhouette family at whatever size and position it needs, instead of
+## always ringing a shape with a generic circle. Empty for RAW/VOID — those
+## are circular, not a polygon, so the caller draws a plain arc instead (see
+## demand_glyph_is_circular).
+static func demand_glyph_points(res: int, s: float) -> PackedVector2Array:
 	match res:
 		Res.REFINED:
 			var tri := PackedVector2Array()
 			for i in 3:
 				var a := TAU * (float(i) / 3.0) - PI * 0.5
-				tri.append(Vector2(cos(a), sin(a)) * s * 1.2 + offset)
+				tri.append(Vector2(cos(a), sin(a)) * s * 1.2)
 			tri.append(tri[0])
-			draw_polyline(tri, c, 2.4, true)
+			return tri
 		Res.CLOTH:
-			draw_rect(Rect2(-s * 0.8 + offset.x, -s * 0.8 + offset.y, s * 1.6, s * 1.6), c, false, 2.4)
+			var h := s * 0.8
+			return PackedVector2Array([
+				Vector2(-h, -h), Vector2(h, -h), Vector2(h, h), Vector2(-h, h), Vector2(-h, -h),
+			])
 		Res.PRISM:
 			var pent := PackedVector2Array()
 			for i in 5:
 				var a := TAU * (float(i) / 5.0) - PI * 0.5
-				pent.append(Vector2(cos(a), sin(a)) * s * 1.15 + offset)
+				pent.append(Vector2(cos(a), sin(a)) * s * 1.15)
 			pent.append(pent[0])
-			draw_polyline(pent, c, 2.4, true)
+			return pent
 		Res.HEXAGON:
 			var hex := PackedVector2Array()
 			for i in 6:
 				var a := TAU * (float(i) / 6.0) - PI * 0.5
-				hex.append(Vector2(cos(a), sin(a)) * s * 1.1 + offset)
+				hex.append(Vector2(cos(a), sin(a)) * s * 1.1)
 			hex.append(hex[0])
-			draw_polyline(hex, c, 2.4, true)
-		_:
-			draw_arc(offset, s * 0.85, 0.0, TAU, 22, c, 2.4, true)
+			return hex
+	return PackedVector2Array()
+
+
+## RAW/VOID have no polygon (demand_glyph_points returns empty for them) —
+## the arc radius those cases draw at, so a caller building its own circular
+## fallback (tutorial.gd) uses the identical proportion instead of guessing.
+const DEMAND_GLYPH_CIRCLE_RATIO := 0.85
+
+
+func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
+	var pts := demand_glyph_points(res, s)
+	if pts.is_empty():
+		draw_arc(offset, s * DEMAND_GLYPH_CIRCLE_RATIO, 0.0, TAU, 22, c, 2.4, true)
+		return
+	if offset != Vector2.ZERO:
+		var shifted := PackedVector2Array()
+		for p in pts:
+			shifted.append(p + offset)
+		pts = shifted
+	draw_polyline(pts, c, 2.4, true)
 
 
 func _draw_ring(r: float, col: Color) -> void:

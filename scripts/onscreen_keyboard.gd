@@ -24,18 +24,32 @@ extends Control
 signal submitted(text: String)
 
 const MAX_LEN := 20
-const KEY_W := 46.0
-const KEY_H := 46.0
-const GAP := 4.0
+## Playtest: "keyboard buttons should be bigger, similar to iPhone keyboard",
+## then a follow-up pass asking for still more height and bigger labels — a
+## real iOS keyboard's keys run nearly edge to edge with a taller-than-wide
+## shape and only a few points of gap between them, not a small tile
+## floating in a lot of empty margin. KEY_W is already close to the 10-key
+## top row's own width ceiling against `_vp.x`, so it barely moves; KEY_H and
+## GAP (and KEY_FONT_SIZE below) are what actually change the feel.
+const KEY_W := 47.0
+const KEY_H := 60.0
+const GAP := 6.0
+const KEY_FONT_SIZE := 22
+## DEL is the one key players hunt for under pressure (typo, wrong char) —
+## explicit direction to give it more width than an ordinary letter key, on
+## top of the vector icon below replacing its old cramped "DEL" text.
+const DEL_KEY_W := 66.0
 
 const ROW_LETTERS_1 := ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]
 const ROW_LETTERS_2 := ["a", "s", "d", "f", "g", "h", "j", "k", "l"]
-## "DEL", not the "⌫" glyph (U+232B) this used to be — Space Mono has no
-## glyph for it, and unlike a native build (which can pull in an OS-level
-## fallback font), a web export like Telegram's Mini App has no such
-## fallback: the key rendered completely blank there. Still tappable either
-## way (Button hit-testing doesn't care what the label renders as), but
-## invisible reads as "not working" when you can't see where to tap it.
+## "DEL" used to be the "⌫" glyph (U+232B) — Space Mono has no glyph for it,
+## and unlike a native build (which can pull in an OS-level fallback font), a
+## web export like Telegram's Mini App has no such fallback: the key
+## rendered completely blank there. Swapping to the literal text "DEL"
+## worked everywhere but read as cramped and less recognizable than a real
+## icon — _make_key below now draws a plain left-arrow backspace icon with
+## draw_line/draw_colored_polygon instead of text, so it's a proper icon that
+## still can't go blank on any platform: no font glyph involved anywhere.
 const ROW_LETTERS_3 := ["z", "x", "c", "v", "b", "n", "m", "DEL"]
 const ROW_DIGITS := ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
 const ROW_SPECIALS := ["_", "-", "."]
@@ -86,9 +100,9 @@ func start(vp: Vector2, top_y: float, initial_text := "") -> void:
 
 	_done_btn = Button.new()
 	_done_btn.text = "Done"
-	_done_btn.position = Vector2(_vp.x * 0.5 - 90.0, y + 10.0)
-	_done_btn.size = Vector2(180.0, 48.0)
-	_done_btn.add_theme_font_size_override("font_size", 18)
+	_done_btn.position = Vector2(_vp.x * 0.5 - 100.0, y + 10.0)
+	_done_btn.size = Vector2(200.0, KEY_H)
+	_done_btn.add_theme_font_size_override("font_size", 22)
 	_done_btn.pressed.connect(_on_done)
 	add_child(_done_btn)
 
@@ -107,35 +121,70 @@ func style_primary(donor: Button) -> void:
 const PREVIEW_Y := 10.0
 
 
+## DEL is wider than an ordinary key (see DEL_KEY_W), so a row's total width
+## can no longer assume every key is the same size — summed per-key instead.
+func _key_width(label: String) -> float:
+	return DEL_KEY_W if label == "DEL" else KEY_W
+
+
 func _add_row(keys: Array, y: float) -> float:
-	var n := keys.size()
-	var row_w := float(n) * KEY_W + float(n - 1) * GAP
+	var row_w := 0.0
+	for k in keys:
+		row_w += _key_width(k)
+	row_w += float(keys.size() - 1) * GAP
 	var x := (_vp.x - row_w) * 0.5
 	for k in keys:
-		var btn := _make_key(k)
+		var w := _key_width(k)
+		var btn := _make_key(k, w)
 		btn.position = Vector2(x, y)
 		add_child(btn)
-		x += KEY_W + GAP
+		x += w + GAP
 	return y + KEY_H + GAP
 
 
-func _make_key(label: String) -> Button:
+func _make_key(label: String, width: float) -> Button:
 	var btn := Button.new()
-	btn.text = label
-	btn.size = Vector2(KEY_W, KEY_H)
-	# "DEL" is 3 characters against everything else's 1 — shrink just that
-	# one label so it doesn't crowd the same 46px-wide key.
-	btn.add_theme_font_size_override("font_size", 13 if label == "DEL" else 18)
+	btn.size = Vector2(width, KEY_H)
 	btn.add_theme_color_override("font_color", Palette.SCORE)
 	btn.add_theme_stylebox_override("normal", _key_style)
 	btn.add_theme_stylebox_override("hover", _key_style)
 	btn.add_theme_stylebox_override("pressed", _key_style_pressed)
 	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
 	if label == "DEL":
+		# No text at all — see _draw_del_icon, a plain vector arrow instead of
+		# a font glyph, so it can never render blank on any platform.
+		var icon := Control.new()
+		icon.size = btn.size
+		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon.draw.connect(_draw_del_icon.bind(icon))
+		btn.add_child(icon)
 		btn.pressed.connect(_on_backspace)
 	else:
+		btn.text = label
+		btn.add_theme_font_size_override("font_size", KEY_FONT_SIZE)
 		btn.pressed.connect(_on_char.bind(label))
 	return btn
+
+
+## A plain left-pointing arrow (shaft + arrowhead), drawn straight onto a
+## Control laid over the DEL key — see ROW_LETTERS_3's comment for why this
+## replaced BOTH the old Unicode glyph (invisible in Telegram's web export)
+## and the "DEL" text fallback (readable everywhere, but cramped and less
+## recognizable than an actual icon). A vector draw has no font dependency
+## at all, so there's no platform left for it to go blank on.
+const DEL_ICON_W := 24.0
+const DEL_ICON_H := 16.0
+
+func _draw_del_icon(icon: Control) -> void:
+	var col := Palette.SCORE
+	var c := icon.size * 0.5
+	var half_w := DEL_ICON_W * 0.5
+	var half_h := DEL_ICON_H * 0.5
+	var tip := c + Vector2(-half_w, 0.0)
+	var head_top := c + Vector2(-half_w + half_h, -half_h)
+	var head_bot := c + Vector2(-half_w + half_h, half_h)
+	icon.draw_line(tip, c + Vector2(half_w, 0.0), col, 3.0)
+	icon.draw_colored_polygon(PackedVector2Array([tip, head_top, head_bot]), col)
 
 
 func _on_char(ch: String) -> void:

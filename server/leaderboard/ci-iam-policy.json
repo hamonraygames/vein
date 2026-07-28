@@ -1,0 +1,65 @@
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "LeaderboardDynamoDB",
+			"Effect": "Allow",
+			"Action": [
+				"dynamodb:DescribeTable",
+				"dynamodb:CreateTable",
+				"dynamodb:PutItem"
+			],
+			"Resource": [
+				"arn:aws:dynamodb:eu-north-1:393903547387:table/vein-leaderboard-players",
+				"arn:aws:dynamodb:eu-north-1:393903547387:table/vein-leaderboard-meta"
+			]
+		},
+		{
+			"Sid": "LeaderboardLambdaRole",
+			"Effect": "Allow",
+			"Action": [
+				"iam:GetRole",
+				"iam:CreateRole",
+				"iam:AttachRolePolicy",
+				"iam:PutRolePolicy"
+			],
+			"Resource": "arn:aws:iam::393903547387:role/vein-leaderboard-lambda-role"
+		},
+		{
+			"Sid": "LeaderboardPassRoleToLambda",
+			"Effect": "Allow",
+			"Action": "iam:PassRole",
+			"Resource": "arn:aws:iam::393903547387:role/vein-leaderboard-lambda-role",
+			"Condition": {
+				"StringEquals": { "iam:PassedToService": "lambda.amazonaws.com" }
+			}
+		},
+		{
+			"Sid": "LeaderboardLambdaFunction",
+			"Effect": "Allow",
+			"Action": [
+				"lambda:GetFunction",
+				"lambda:CreateFunction",
+				"lambda:UpdateFunctionCode",
+				"lambda:UpdateFunctionConfiguration",
+				"lambda:AddPermission"
+			],
+			"Resource": "arn:aws:lambda:eu-north-1:393903547387:function:vein-leaderboard-submit"
+		},
+		{
+			"Sid": "LeaderboardApiGateway",
+			"Effect": "Allow",
+			"Action": [
+				"apigateway:GET",
+				"apigateway:POST"
+			],
+			"Resource": "arn:aws:apigateway:eu-north-1::/apis*"
+		},
+		{
+			"Sid": "CallerIdentity",
+			"Effect": "Allow",
+			"Action": "sts:GetCallerIdentity",
+			"Resource": "*"
+		}
+	]
+}
