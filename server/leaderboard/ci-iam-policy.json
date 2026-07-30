@@ -8,6 +8,7 @@
 				"dynamodb:DescribeTable",
 				"dynamodb:CreateTable",
 				"dynamodb:PutItem",
+				"dynamodb:DescribeTimeToLive",
 				"dynamodb:UpdateTimeToLive"
 			],
 			"Resource": [
