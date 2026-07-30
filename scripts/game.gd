@@ -16,6 +16,7 @@ const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
+const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
 const MainMenuScene := preload("res://scripts/main_menu.gd")
@@ -989,8 +990,7 @@ func start_run(run_seed: int) -> void:
 	chain_rescues = 0
 	_throughput_stall = 0.0
 	throughput_rescues = 0
-	_demand_supply_stall = 0.0
-	demand_supply_rescues = 0
+	corruption_respawns = 0
 	_pending_deliveries.clear()
 	_deliver_flush_timer = 0.0
 
@@ -1065,6 +1065,7 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 			n.produces = VNode.Res.RAW
 	node_layer.add_child(n)
 	nodes.append(n)
+	n.corruption_started.connect(_on_node_corrupted)
 	return n
 
 
@@ -1647,7 +1648,6 @@ func _tick_escalation(delta: float) -> void:
 		_ensure_move(delta)
 		_tick_tool_chain(delta)
 		_ensure_throughput(delta)
-		_ensure_demand_supply(delta)
 
 		# Tools keep arriving on their cadence but the BOARD stays capped —
 		# playtest: "after a while the screen is full of triangles and squares."
@@ -1751,8 +1751,11 @@ func _spawn_tool_slot(kind: int) -> void:
 
 ## New Wells displace the most-neglected old one once the board is full, so the
 ## count stays flat and readable instead of climbing all run. Only orphans are
-## ever displaced — a Well you actually wired in is safe.
-func _spawn_well() -> void:
+## ever displaced — a Well you actually wired in is safe. Returns the Well it
+## placed, or null on the one path that skips spawning entirely (see below) —
+## callers that need to know whether a replacement actually landed (see
+## _on_node_corrupted) read this instead of assuming a spawn happened.
+func _spawn_well() -> VNode:
 	var live: Array[VNode] = []
 	for n in nodes:
 		if n.kind == VNode.Kind.WELL and not n.corrupted:
@@ -1768,11 +1771,11 @@ func _spawn_well() -> void:
 		# Everything is connected and we're at cap: the player has earned a full
 		# board, so skip this spawn rather than deleting something in use.
 		if oldest == null:
-			return
+			return null
 		withered += 1
 		_remove_node(oldest)
 
-	_spawn_node(VNode.Kind.WELL)
+	return _spawn_node(VNode.Kind.WELL)
 
 
 ## What kind hands `kind` its raw material — a Forge eats from a Well, a Loom
@@ -1795,7 +1798,7 @@ func _feeder_kind_for(kind: int) -> int:
 ## Heart, because its job is to stand between a cluster of Wells and the trunk
 ## they overload. Spawning it out at the rim like a Well would make it
 ## unroutable and it would never be worth the veins.
-func _spawn_node(kind: int) -> void:
+func _spawn_node(kind: int) -> VNode:
 	var vp := design_size()
 	var best := Vector2.ZERO
 	var best_score := -INF
@@ -2025,6 +2028,7 @@ func _spawn_node(kind: int) -> void:
 		n.teach = true
 		_store_save()
 	_rebuild_graph()
+	return n
 
 
 ## What each tool kind makes never varies; what it EATS does. The plain
@@ -2566,6 +2570,12 @@ var _throughput_stall := 0.0
 ## both existence guarantees read healthy.
 var throughput_rescues := 0
 
+## Same-family replacements forced in the instant a node corrupts — see
+## _on_node_corrupted. Unlike the other rescue counters above (all reactive
+## to something already going wrong), a healthy handful of these per run is
+## just the harakiri mechanic working as intended, not a tuning smell.
+var corruption_respawns := 0
+
 
 ## Items/sec of `demand` the Heart needs right now to hold fuel steady,
 ## reading combo as zero — combo only ever helps, it must never be load-
@@ -2674,42 +2684,13 @@ func _ensure_throughput(delta: float) -> void:
 	_spawn_rescue_well()
 
 
-# --- The demand-supply guarantee ---------------------------------------------
-#
-# Every guarantee above reacts AFTER something already broke: no move at all,
-# a tier's tool or its feeder gone, or a thin trickle below the achievable-rate
-# floor. Real playtest: "when a shape is getting close to being poisonous
-# there should be new spawned items for users to use them instead" — a Well
-# or tool sitting on a sliver of reserve still passes every check above right
-# up until the beat it actually corrupts, and only then do the reactive
-# rescues start their own debounce. This spawns the replacement WHILE the
-# dying node still has some life left, so whatever the Heart currently wants
-# never actually runs dry — scoped to just the one kind that makes the
-# CURRENT demand, since that's the lineage the player is actually leaning on
-# right now, not the whole board.
-
-## Below this fraction of its own reserve, a supply node counts as "running
-## low" here — deliberately generous (not near-empty) so the replacement
-## lands well before the old one is actually in danger, not at its last gasp.
-## Raised from 0.3: playtest still caught nodes turning before the player had
-## noticed and rewired, so this now fires with more life left on the clock.
-const LOW_SUPPLY_FRACTION := 0.4
-## Longer than RESCUE_DEBOUNCE/CHAIN_STALL_DEBOUNCE — this is a top-up, not an
-## already-broken state, so it can afford to wait a beat longer and confirm
-## the low reading sticks before spending a spawn on it.
-const DEMAND_SUPPLY_DEBOUNCE := 3.0
-var _demand_supply_stall := 0.0
-## Proactive top-ups forced in by this guarantee — like rescues/
-## chain_rescues/throughput_rescues, a handful per run is this working as
-## intended; a flood means ordinary supply itself is running too thin against
-## demand and needs retuning, not this guarantee.
-var demand_supply_rescues := 0
-
-
 ## Which node kind makes `res` — RAW has no tool of its own so it maps
 ## straight to the Well that makes it; VOID is never a demand and maps to
 ## nothing. The mirror of _feeder_kind_for (which names what FEEDS a kind);
-## this names what MAKES a resource.
+## this names what MAKES a resource. Read by scripts/shape_count.gd (loose
+## Node2D-parent coupling, same convention budget_hint.gd already uses for
+## game.budget/veins_used()) to know which live-node count backs which
+## unlocked family.
 func _producer_kind_for_res(res: int) -> int:
 	match res:
 		VNode.Res.RAW: return VNode.Kind.WELL
@@ -2720,56 +2701,75 @@ func _producer_kind_for_res(res: int) -> int:
 	return -1
 
 
-## Live nodes of whichever kind makes the CURRENT demand: connected ones
-## (depth >= 0 — actually feeding, not pre-staged) split into running-low vs.
-## a fresh backup already covering them; an unconnected one counts as a
-## replacement already spawned and awaiting a vein, not something to
-## duplicate. If none are running low, a fresh backup already exists, or a
-## replacement is already sitting on the board unwired, there is nothing to
-## do. Otherwise this is exactly "a shape is getting close to being
-## poisonous with nothing fresh to switch to".
+# --- Harakiri: on-corruption same-family respawn -----------------------------
+#
+# Every guarantee above reacts AFTER something already broke: no move at all,
+# a tier's tool or its feeder gone, or a thin trickle below the achievable-rate
+# floor. An earlier version of this (the "demand-supply guarantee") reacted to
+# a Well/tool sitting on a sliver of reserve, scoped to just whatever kind the
+# CURRENT demand needed — real playtest: "when a shape is getting close to
+# being poisonous there should be new spawned items for users to use them
+# instead." This generalizes and replaces that: instead of guessing "running
+# low" from a reserve threshold on one lineage, it reacts to the actual,
+# unambiguous event — a node turning — for EVERY family, not just the one the
+# Heart happens to want right now. "Triangle dies, a new triangle born
+# somewhere else" — not necessarily with the same needs, just the same shape.
+# This is also what turns corruption into a deliberate tool rather than pure
+# hazard: the smart move once a shape starts dying is to keep milking it,
+# then cut it before it collapses — that was already the right move (avoids
+# extra poison damage), this just adds a payoff on top of the urgency that
+# was already there.
+#
+# See VNode.corruption_started (vnode.gd) for why this hooks a signal fired
+# from inside corrupt() itself rather than checking state here: corrupt() is
+# called both by this file's own spread/airborne contagion (_tick_corruption)
+# and internally by VNode's own reserve-depletion path — a signal is the only
+# way to catch both. Connected once per node in _make_node.
+
+
+## Fired the instant any node turns — see VNode.corruption_started. Spawns a
+## same-family replacement immediately; no debounce, no threshold, because
+## unlike the reserve-ratio heuristic this replaces, "corrupted" is already
+## an unambiguous, one-shot event (corrupt()'s own `if corrupted: return`
+## guard prevents this from ever double-firing for the same node).
 ##
-## For WELL this still goes through _spawn_well (its own cap is generous and
-## already evicts an orphan when full). For a tool tier this calls
-## _spawn_node directly instead of _spawn_tool_slot: base caps are as low as
-## 1 (Crucible) or 2 (Loom/Kiln — see _max_live_for), so _spawn_tool_slot's
-## own cap check (_count_healthy_kind < _max_live_for) counts the dying node
-## itself as occupying the only/last slot and silently refuses to spawn —
-## exactly the case this guarantee exists for. The board briefly holds one
-## more than the normal cap until the old node is cut or corrupts and
-## collapses away.
-func _ensure_demand_supply(delta: float) -> void:
-	var kind := _producer_kind_for_res(demand)
-	if kind == -1:
-		_demand_supply_stall = 0.0
+## Doesn't need round 1's cap-bypass hack: _count_healthy_kind already
+## excludes corrupted nodes, so the instant `n` turns it stops counting
+## toward its own family's cap, and a same-family respawn attempted right
+## after naturally sees the freed slot through the ordinary cap check.
+## _spawn_node is called directly (not _spawn_tool_slot, which can redirect
+## a spawn to reinforce a DIFFERENT critical kind) — strict same-family
+## replacement is the whole point, not "whatever's most needed."
+func _on_node_corrupted(n: VNode) -> void:
+	if n.kind == VNode.Kind.HEART:
 		return
-
-	var running_low := false
-	var has_fresh_backup := false
-	var has_pending_replacement := false
-	for n in nodes:
-		if n.kind != kind or n.corrupted:
-			continue
-		if n.depth < 0:
-			has_pending_replacement = true
-		elif n.reserve_ratio() < LOW_SUPPLY_FRACTION:
-			running_low = true
-		else:
-			has_fresh_backup = true
-
-	if not running_low or has_fresh_backup or has_pending_replacement:
-		_demand_supply_stall = 0.0
+	var spawned: VNode = null
+	if n.kind == VNode.Kind.WELL:
+		spawned = _spawn_well()
+	elif _count_healthy_kind(n.kind) < _max_live_for(n.kind):
+		spawned = _spawn_node(n.kind)
+	if spawned == null:
 		return
+	corruption_respawns += 1
+	# Wells replace far too often (a swarm of up to 20, see MAX_LIVE_WELLS)
+	# for a ghost per corruption to read as a meaningful event rather than
+	# visual noise — the respawn itself still fires every time, just quietly.
+	if n.kind != VNode.Kind.WELL:
+		_spawn_ghost(n.position, spawned, n.kind)
 
-	_demand_supply_stall += delta
-	if _demand_supply_stall < DEMAND_SUPPLY_DEBOUNCE:
-		return
-	_demand_supply_stall = 0.0
-	demand_supply_rescues += 1
-	if kind == VNode.Kind.WELL:
-		_spawn_well()
-	else:
-		_spawn_node(kind)
+
+## The visual bridge between a death and its replacement — see
+## scripts/ghost_spawn.gd. `spawned` already exists on the board for
+## gameplay purposes the instant this is called (reachable, connectable,
+## "always have a move" never waits on an animation) — ghost_spawn.gd's own
+## start() hides and shrinks it, only revealing it once the ghost's travel
+## finishes, so its FIRST appearance always reads as this event landing,
+## not a silent pop-in the player has to notice on their own. Same
+## instantiate-and-forget pattern as BurstScene/ShatterScene.
+func _spawn_ghost(from: Vector2, spawned: VNode, kind: int) -> void:
+	var ghost: Node2D = GhostScene.new()
+	vein_layer.add_child(ghost)
+	ghost.start(from, spawned, kind, rng.randi())
 
 
 # --- Graph: everything flows downhill toward demand -------------------------

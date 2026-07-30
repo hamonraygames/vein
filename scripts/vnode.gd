@@ -10,6 +10,15 @@ enum Kind { HEART, WELL, FORGE, LOOM, KILN, CRUCIBLE }
 ## entry is the deepest tier, everything reaches tiers by name.
 enum Res { RAW, REFINED, CLOTH, PRISM, VOID, HEXAGON }
 
+## Fired once, from inside corrupt() itself, the instant this node turns —
+## the only way to catch both paths that can trigger it (game.gd's spread/
+## airborne contagion in _tick_corruption, AND this node's own _emit/_smelt
+## calling corrupt() internally on reserve depletion). game.gd listens on
+## every node (connected in _make_node) to spawn a same-family replacement
+## the moment a shape starts dying, not just when it's already gone — same
+## convention as Vein's own `ruptured(vein: Vein)` signal (see vein.gd).
+signal corruption_started(node: VNode)
+
 ## Tools condense inputs into one stronger output — but WHICH inputs is now
 ## per-instance: every tool spawns with its own `recipe` (see below), rolled
 ## by game.gd. A Forge still makes REFINED, a Loom CLOTH, a Kiln PRISM; what
@@ -355,6 +364,7 @@ func corrupt() -> void:
 	buffer.clear()
 	intake.clear()
 	pulse = 1.0
+	corruption_started.emit(self)
 
 
 func reserve_ratio() -> float:
