@@ -1,30 +1,40 @@
 'use strict';
-// POST /score, POST /name, and POST /rank — the leaderboard's three
-// endpoints, one Lambda. /score does submit-and-fetch: record the run, then
-// return the same payload a plain "show me the board" call would (top 10,
-// this player's rank, global totals) so the in-game panel never needs a
-// second round trip after posting (see scripts/game.gd's _submit_score).
-// /name claims or renames a player's display name up front, enforcing
-// uniqueness — see handleName below — so /score itself never has to
-// re-check it on every single run. /rank is a read-only "where do I stand"
-// query for the main menu — see handleRank below — that never writes
-// anything, since opening the menu is not a run.
+// POST /score, POST /name, POST /rank, and POST /run/start — the
+// leaderboard's four endpoints, one Lambda. /score does submit-and-fetch:
+// record the run, then return the same payload a plain "show me the board"
+// call would (top 10, this player's rank, global totals) so the in-game
+// panel never needs a second round trip after posting (see
+// scripts/game.gd's _submit_score). /name claims or renames a player's
+// display name up front, enforcing uniqueness — see handleName below — so
+// /score itself never has to re-check it on every single run. /rank is a
+// read-only "where do I stand" query for the main menu — see handleRank
+// below — that never writes anything, since opening the menu is not a run.
+// /run/start fires the instant a real run begins (see game.gd's start_run)
+// and hands back an unguessable run_id that /score later requires — this is
+// a gameplay-lifecycle ping, not a registration step: it carries no name, no
+// uniqueness check, nothing /name does.
 //
-// Arcade-style, by explicit direction: no login, no per-submission proof of
-// identity — a player is whatever `player_id` their client sends (a random
-// ID generated once and saved locally, see game.gd's _load_save), under
-// whatever `name` they've claimed. Anyone who finds this URL could POST an
-// arbitrary score under an arbitrary (unclaimed) name; that trade was made
-// on purpose to drop the Telegram-only requirement the first version had
-// (see git history), and it matches VEIN's own stakes — bragging rights on
-// a casual mobile game, not a competitive ranking with anything real riding
-// on it. The bounds below exist to keep the data sane, not to stop a
-// determined cheater.
+// Arcade-style, by explicit direction: no login, no account, no per-name
+// proof of identity — a player is whatever `player_id` their client sends (a
+// random ID generated once and saved locally, see game.gd's _load_save),
+// under whatever `name` they've claimed. That trade was made on purpose to
+// drop the Telegram-only requirement the first version had (see git
+// history), and it matches VEIN's own stakes — bragging rights on a casual
+// mobile game, not a competitive ranking with anything real riding on it.
+// It no longer means a score can be fabricated from nothing, though: /score
+// requires a run_id minted server-side by /run/start at the moment a real
+// run began, ties elapsed time to the server's own clock (never anything the
+// client claims), and rejects a run_id that's unknown, already used, or
+// implausible for the score it's paired with — see handleScore. Anyone can
+// still play a real run and pad the number at the margins; nobody can POST a
+// #1 score with zero gameplay behind it anymore. The bounds below exist to
+// keep the data sane on top of that, not to catch every possible abuse.
 //
 // Uses the AWS SDK v3 client modules built into the nodejs20.x Lambda
 // runtime — no npm install, no bundling step, matching this repo's existing
 // no-build-tooling deploys (see deploy.sh: plain aws-cli, nothing else).
 
+const crypto = require('crypto');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const {
 	DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand,
@@ -33,10 +43,25 @@ const {
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE;
 const META_TABLE = process.env.META_TABLE;
+const RUNS_TABLE = process.env.RUNS_TABLE;
 const TOP_N = 10;
 const MAX_SCORE = 10000000;
 const MAX_NAME_LEN = 20;
 const MAX_ID_LEN = 64;
+
+const RUN_ID_LEN = 32; // crypto.randomBytes(16).toString('hex')
+// How much score a run_id's elapsed real time (server clock only, never
+// anything the client claims) is allowed to plausibly represent. All four
+// tunable via Lambda env vars so they can be retuned from real play data
+// without a code deploy — see deploy.sh's ENV_VARS for the defaults.
+const MAX_SCORE_RATE = Number(process.env.MAX_SCORE_RATE) || 1000; // points/sec
+const MAX_RUN_SECONDS = Number(process.env.MAX_RUN_SECONDS) || 1200; // 20 min
+const MIN_RUN_SECONDS = Number(process.env.MIN_RUN_SECONDS) || 2;
+const SCORE_GRACE = Number(process.env.SCORE_GRACE) || 100;
+// Table hygiene only (auto-expire abandoned run_ids) — deliberately well
+// past MAX_RUN_SECONDS so a slow/backgrounded client never loses a
+// legitimately-still-in-progress run_id before it can submit.
+const RUN_TTL_SECONDS = 60 * 60 * 6;
 
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
@@ -130,6 +155,36 @@ async function handleName(payload) {
 	return respond(200, { ok: true, name: requested });
 }
 
+// POST /run/start — called by game.gd's start_run() the instant a run
+// begins (fire-and-forget, see _start_run_ping in game.gd). Issues an
+// unguessable run_id tied to server wall-clock time, so handleScore below
+// can compute elapsed time from something the client never controlled.
+// Deliberately does NOT validate `name` or touch PLAYERS_TABLE at all — this
+// must stay completely outside the registration/name-claim flow.
+async function handleRunStart(payload) {
+	const playerId = String(payload.player_id || '').trim();
+	if (!playerId || playerId.length > MAX_ID_LEN) {
+		return respond(400, { error: 'bad player_id' });
+	}
+
+	const runId = crypto.randomBytes(16).toString('hex');
+	const now = Date.now();
+	await ddb.send(new PutCommand({
+		TableName: RUNS_TABLE,
+		Item: {
+			run_id: runId,
+			player_id: playerId,
+			started_at: now,
+			consumed: false,
+			// DynamoDB-native TTL attribute (epoch seconds) — see deploy.sh's
+			// update-time-to-live call.
+			ttl: Math.floor(now / 1000) + RUN_TTL_SECONDS,
+		},
+	}));
+
+	return respond(200, { run_id: runId });
+}
+
 async function handleScore(payload) {
 	const playerId = String(payload.player_id || '').trim();
 	if (!playerId || playerId.length > MAX_ID_LEN) {
@@ -141,6 +196,73 @@ async function handleScore(payload) {
 	const score = Number(payload.score);
 	if (!Number.isFinite(score) || score < 0 || score > MAX_SCORE) {
 		return respond(400, { error: 'bad score' });
+	}
+
+	// A run_id proves a real run actually started, server-side, before this
+	// score existed — the fix for someone POSTing straight to /score with a
+	// fabricated number and no gameplay behind it at all (see the top-of-file
+	// comment). Every check below rejects with 400 and writes nothing.
+	const runId = String(payload.run_id || '').trim();
+	if (runId.length !== RUN_ID_LEN) {
+		return respond(400, { error: 'bad run_id' });
+	}
+	const runRow = await ddb.send(new GetCommand({
+		TableName: RUNS_TABLE,
+		Key: { run_id: runId },
+	}));
+	const run = runRow.Item;
+	if (!run) {
+		return respond(400, { error: 'unknown run_id' });
+	}
+	if (run.player_id !== playerId) {
+		return respond(400, { error: 'run_id player mismatch' });
+	}
+	if (run.consumed) {
+		return respond(400, { error: 'run already submitted' });
+	}
+
+	// Only server-side timestamps feed this — `started_at` was set by this
+	// same Lambda in handleRunStart, `Date.now()` here is this Lambda's own
+	// clock right now. The client's own elapsed-time claims (there are none
+	// in the payload today, and none should ever be added) never enter this
+	// math. Clamped to MAX_RUN_SECONDS BEFORE use in the rate check below —
+	// without that clamp, an attacker could grab a run_id and simply wait
+	// real wall-clock hours before ever submitting, "banking" unbounded
+	// elapsed-time budget against MAX_SCORE_RATE. The clamp is what turns a
+	// per-second rate limit into an actual ceiling.
+	const rawElapsedSeconds = (Date.now() - Number(run.started_at)) / 1000;
+	const elapsedSeconds = Math.min(Math.max(rawElapsedSeconds, 0), MAX_RUN_SECONDS);
+
+	if (score > 0 && elapsedSeconds < MIN_RUN_SECONDS) {
+		return respond(400, { error: 'run too short' });
+	}
+	if (score > elapsedSeconds * MAX_SCORE_RATE + SCORE_GRACE) {
+		return respond(400, { error: 'score implausible for run duration' });
+	}
+
+	// Conditional on !consumed so two concurrent /score calls for the same
+	// run_id can't both pass the checks above and both write — the loser gets
+	// a ConditionalCheckFailedException, turned into the same "already
+	// submitted" rejection a genuine second attempt gets. Marked consumed
+	// BEFORE the writes below proceed, so a crash/timeout partway through
+	// handleScore after this point fails safe (run_id burned, no
+	// double-count risk) rather than leaving a replay window open.
+	try {
+		await ddb.send(new UpdateCommand({
+			TableName: RUNS_TABLE,
+			Key: { run_id: runId },
+			// `consumed` is a DynamoDB reserved keyword — must be aliased via
+			// ExpressionAttributeNames, same as `name` (`#n`) elsewhere here.
+			UpdateExpression: 'SET #c = :true',
+			ConditionExpression: '#c = :false',
+			ExpressionAttributeNames: { '#c': 'consumed' },
+			ExpressionAttributeValues: { ':true': true, ':false': false },
+		}));
+	} catch (e) {
+		if (e.name === 'ConditionalCheckFailedException') {
+			return respond(400, { error: 'run already submitted' });
+		}
+		throw e;
 	}
 
 	const existing = await ddb.send(new GetCommand({
@@ -344,6 +466,9 @@ exports.handler = async (event) => {
 	const path = event.rawPath
 		|| (event.requestContext && event.requestContext.http && event.requestContext.http.path)
 		|| '';
+	if (path.endsWith('/run/start')) {
+		return handleRunStart(payload);
+	}
 	if (path.endsWith('/name')) {
 		return handleName(payload);
 	}

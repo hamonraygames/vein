@@ -12,6 +12,7 @@ cd "$(dirname "$0")"
 REGION="eu-north-1"
 PLAYERS_TABLE="vein-leaderboard-players"
 META_TABLE="vein-leaderboard-meta"
+RUNS_TABLE="vein-leaderboard-runs"
 ROLE_NAME="vein-leaderboard-lambda-role"
 FUNCTION_NAME="vein-leaderboard-submit"
 API_NAME="vein-leaderboard-api"
@@ -47,9 +48,33 @@ else
 		--billing-mode PAY_PER_REQUEST >/dev/null
 fi
 
-for t in "$PLAYERS_TABLE" "$META_TABLE"; do
+if table_exists "$RUNS_TABLE"; then
+	echo "==> Table $RUNS_TABLE already exists"
+else
+	echo "==> Creating table $RUNS_TABLE"
+	aws dynamodb create-table --region "$REGION" \
+		--table-name "$RUNS_TABLE" \
+		--attribute-definitions AttributeName=run_id,AttributeType=S \
+		--key-schema AttributeName=run_id,KeyType=HASH \
+		--billing-mode PAY_PER_REQUEST >/dev/null
+fi
+
+for t in "$PLAYERS_TABLE" "$META_TABLE" "$RUNS_TABLE"; do
 	aws dynamodb wait table-exists --region "$REGION" --table-name "$t"
 done
+
+# TTL auto-expires abandoned run rows (see submit.js's RUN_TTL_SECONDS) so
+# the table doesn't grow unbounded from runs that never finish. Re-enabling
+# an already-enabled attribute is a harmless no-op, but check first anyway
+# to match this script's existing "check before creating" convention.
+RUNS_TTL_STATUS="$(aws dynamodb describe-time-to-live --region "$REGION" \
+	--table-name "$RUNS_TABLE" --query TimeToLiveDescription.TimeToLiveStatus \
+	--output text 2>/dev/null || echo "")"
+if [[ "$RUNS_TTL_STATUS" != "ENABLED" && "$RUNS_TTL_STATUS" != "ENABLING" ]]; then
+	echo "==> Enabling TTL on $RUNS_TABLE (attribute: ttl)"
+	aws dynamodb update-time-to-live --region "$REGION" --table-name "$RUNS_TABLE" \
+		--time-to-live-specification "Enabled=true,AttributeName=ttl" >/dev/null
+fi
 
 # Seed the single meta counters item if it isn't there yet — the Lambda's
 # `ADD total_plays :one` only works once the attribute exists as a number,
@@ -85,7 +110,8 @@ aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name "vein-leaderboard
 			\"Action\": [\"dynamodb:GetItem\", \"dynamodb:PutItem\", \"dynamodb:UpdateItem\", \"dynamodb:Scan\"],
 			\"Resource\": [
 				\"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/$PLAYERS_TABLE\",
-				\"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/$META_TABLE\"
+				\"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/$META_TABLE\",
+				\"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/$RUNS_TABLE\"
 			]
 		}]
 	}" >/dev/null
@@ -104,7 +130,7 @@ echo "==> Zipping Lambda code"
 rm -f /tmp/vein-leaderboard-submit.zip
 zip -q -r /tmp/vein-leaderboard-submit.zip submit.js
 
-ENV_VARS="Variables={PLAYERS_TABLE=$PLAYERS_TABLE,META_TABLE=$META_TABLE}"
+ENV_VARS="Variables={PLAYERS_TABLE=$PLAYERS_TABLE,META_TABLE=$META_TABLE,RUNS_TABLE=$RUNS_TABLE,MAX_SCORE_RATE=1000,MAX_RUN_SECONDS=1200,MIN_RUN_SECONDS=2,SCORE_GRACE=100}"
 
 if aws lambda get-function --region "$REGION" --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
 	echo "==> Updating function $FUNCTION_NAME"
@@ -151,7 +177,7 @@ if [[ -z "$INTEGRATION_ID" || "$INTEGRATION_ID" == "None" ]]; then
 		--payload-format-version "2.0" --query IntegrationId --output text)"
 fi
 
-for route in "POST /score" "POST /name" "POST /rank"; do
+for route in "POST /score" "POST /name" "POST /rank" "POST /run/start"; do
 	ROUTE_EXISTS="$(aws apigatewayv2 get-routes --region "$REGION" --api-id "$API_ID" \
 		--query "Items[?RouteKey=='$route'].RouteId" --output text)"
 	if [[ -z "$ROUTE_EXISTS" || "$ROUTE_EXISTS" == "None" ]]; then
@@ -181,6 +207,12 @@ aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
 	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/rank" \
 	>/dev/null 2>&1 || true
 
+aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
+	--statement-id "vein-leaderboard-apigw-run-start" --action lambda:InvokeFunction \
+	--principal apigateway.amazonaws.com \
+	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/run/start" \
+	>/dev/null 2>&1 || true
+
 ENDPOINT="$(aws apigatewayv2 get-api --region "$REGION" --api-id "$API_ID" --query ApiEndpoint --output text)"
-echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank"
-echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL constants."
+echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank, POST $ENDPOINT/run/start"
+echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL/RANK_URL/RUN_START_URL constants."

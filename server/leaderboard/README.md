@@ -1,6 +1,6 @@
 # VEIN leaderboard backend
 
-An AWS Lambda behind an API Gateway HTTP API, fronting two DynamoDB tables —
+An AWS Lambda behind an API Gateway HTTP API, fronting three DynamoDB tables —
 plain aws-cli provisioning (see [deploy.sh](deploy.sh)), no CDK/Terraform/SAM,
 matching how the rest of this project ships infra (see `../../deploy_web.sh`).
 
@@ -11,22 +11,29 @@ matching how the rest of this project ships infra (see `../../deploy_web.sh`).
   used to compute `rankChange` — see below).
 - `vein-leaderboard-meta` — a single `totals` item: `total_players`,
   `total_plays`, both plain counters incremented atomically per submission.
+- `vein-leaderboard-runs` — one item per started run: `run_id`, `player_id`,
+  `started_at` (server timestamp, ms since epoch), `consumed` (bool), `ttl`
+  (DynamoDB-native TTL, auto-expires stale rows). Written by `/run/start`,
+  read and marked consumed by `/score` — see "Arcade-style, on purpose" below.
 
 ## Arcade-style, on purpose
 
-There's no login and no proof of identity — a player is whatever
-`player_id` their client sends (a random ID generated once and saved
-locally, see `_load_save`/`_generate_player_id` in `scripts/game.gd`),
-under whatever name they've claimed via `/name` (see `scripts/name_prompt.gd`
-and its in-game custom keyboard). Anyone who found this URL could POST an
-arbitrary score under any name that isn't already claimed — that's the
-accepted trade for a leaderboard that works everywhere (Telegram, a plain
-browser tab, a local build) with no sign-in step. `submit.js` still bounds
-score/name/ID to sane sizes and enforces one name per player, but it's not
-trying to stop a determined cheater; VEIN is a casual mobile game, not a
-competitive ranking with anything real riding on it. An earlier version
-required a signed Telegram session instead — see git history if that trade
-ever needs revisiting.
+There's no login and no account — a player is whatever `player_id` their
+client sends (a random ID generated once and saved locally, see
+`_load_save`/`_generate_player_id` in `scripts/game.gd`), under whatever name
+they've claimed via `/name` (see `scripts/name_prompt.gd` and its in-game
+custom keyboard). Anyone who found this URL could POST under any name that
+isn't already claimed — but as of `/run/start`, they can no longer fabricate
+a score out of nothing: `/score` requires a `run_id` minted server-side at
+the moment a real run began, ties the run's elapsed time to the server's own
+clock (never anything the client claims), and rejects any score that's
+implausible for that much time or that reuses/replays a `run_id`. This still
+isn't proof of identity and still isn't trying to stop a determined cheater
+who actually plays through a run and pads the number at the margins — just
+no more instant #1 from a single crafted POST. VEIN is a casual mobile game,
+not a competitive ranking with anything real riding on it. An earlier
+version required a signed Telegram session instead of any of this — see git
+history if that trade ever needs revisiting.
 
 Names are unique going forward (case-insensitive), enforced only at the
 moment one is claimed or changed via `/name` — `/score` never re-checks it,
@@ -35,6 +42,23 @@ were already duplicated in the table before this existed are grandfathered,
 not retroactively fixed.
 
 ## Endpoints
+
+### `POST /run/start` — mark the moment a real run began
+
+Fire-and-forget, called from `scripts/game.gd`'s `start_run()` the instant a
+run starts — not part of the name-claim/registration flow, carries no name,
+no uniqueness semantics, nothing `/name` does. `/score` below requires the
+`run_id` this returns.
+
+Request body:
+```json
+{ "player_id": "<random ID, generated once and saved locally>" }
+```
+
+Response body:
+```json
+{ "run_id": "<32-character hex string>" }
+```
 
 ### `POST /name` — claim or change a display name
 
@@ -64,11 +88,18 @@ So the panel never needs a second round trip after posting.
 
 Request body:
 ```json
-{ "player_id": "<random ID, generated once and saved locally>", "name": "your name", "score": 1234, "beats": 5678 }
+{ "player_id": "<random ID, generated once and saved locally>", "name": "your name", "score": 1234, "beats": 5678, "run_id": "<from a prior /run/start>" }
 ```
 
 `beats` is accepted but not currently stored; the board ranks by `score`,
 same number the death screen shows.
+
+`run_id` must come from a prior `/run/start` call for this same `player_id`,
+not yet used by an earlier `/score` submission, and old enough (but not too
+old — see `MAX_RUN_SECONDS`) relative to now for the submitted `score` to be
+plausible at up to `MAX_SCORE_RATE` points/sec — see `submit.js`'s
+`handleScore`. A missing, unknown, mismatched, reused, or implausible
+`run_id` all reject with `400` and write nothing.
 
 Response body:
 ```json
@@ -118,11 +149,28 @@ deploys the game to — nothing else.
 ./deploy.sh
 ```
 
-Creates or updates, in order: the two DynamoDB tables, an IAM role scoped to
-just those tables, the Lambda function, and an HTTP API with `POST /score`,
-`POST /name`, and `POST /rank` routes and open CORS. Safe to re-run; every
-step checks before creating. Prints the endpoint URL at the end — paste it
-into `scripts/game.gd`'s `LEADERBOARD_URL`/`NAME_URL`/`RANK_URL` constants.
+Creates or updates, in order: the three DynamoDB tables (including TTL on
+`vein-leaderboard-runs`), an IAM role scoped to just those tables, the Lambda
+function, and an HTTP API with `POST /score`, `POST /name`, `POST /rank`, and
+`POST /run/start` routes and open CORS. Safe to re-run; every step checks
+before creating. Prints the endpoint URL at the end — paste it into
+`scripts/game.gd`'s `LEADERBOARD_URL`/`NAME_URL`/`RANK_URL`/`RUN_START_URL`
+constants.
+
+The score-plausibility thresholds (`MAX_SCORE_RATE`, `MAX_RUN_SECONDS`,
+`MIN_RUN_SECONDS`, `SCORE_GRACE` — see `submit.js`'s `handleScore`) are
+Lambda env vars, defaulted in `deploy.sh`'s `ENV_VARS` line. Retune them
+there (or with a direct `aws lambda update-function-configuration`) without
+touching `submit.js` or redeploying code.
+
+If deploying through the CI workflow rather than running this script
+locally, the CI role's IAM policy (`ci-iam-policy.json` in this directory) is
+hand-maintained documentation of what the live `vein-github-actions-deploy`
+role's policy should contain — nothing in this repo applies it automatically.
+After editing it, apply it once by hand (e.g.
+`aws iam put-role-policy --role-name vein-github-actions-deploy --policy-name <existing-name> --policy-document file://ci-iam-policy.json`)
+before merging, or the next CI-triggered deploy fails with `AccessDenied` on
+whatever changed.
 
 ## Scale note
 

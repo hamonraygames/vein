@@ -22,12 +22,14 @@ const MainMenuScene := preload("res://scripts/main_menu.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
-## POST /score, POST /name, and POST /rank on server/leaderboard's AWS
-## backend (Lambda + API Gateway, see there) — printed by
-## server/leaderboard/deploy.sh on each deploy. Same host, three routes.
+## POST /score, POST /name, POST /rank, and POST /run/start on
+## server/leaderboard's AWS backend (Lambda + API Gateway, see there) —
+## printed by server/leaderboard/deploy.sh on each deploy. Same host, four
+## routes.
 const LEADERBOARD_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/score"
 const NAME_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/name"
 const RANK_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/rank"
+const RUN_START_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/run/start"
 ## HTTPRequest has no timeout by default (0 = wait forever) — a flaky mobile
 ## connection or a WebView that silently never completes the request (both
 ## reported on real phones) left lb_state/name_state/rank_state stuck on
@@ -367,15 +369,30 @@ const TOOL_IDEAL_HEART_DIST := 195.0
 ## bonus — see vein.gd) does the same job for every pair, not just the
 ## Heart-facing one.
 
-## Live-tool ceilings. Playtest: "after a while the screen is full of
+## Live-tool BASE ceilings (see _max_live_for for the intensity-scaled cap
+## actually used everywhere). Playtest: "after a while the screen is full of
 ## triangles and squares" — tools never die, so without a cap every gap tick
-## added scenery forever. Enough for one canonical of each plus exotics.
+## added scenery forever. Enough for one canonical of each plus exotics, early
+## on while a new player still needs a clutter-free board.
 const MAX_LIVE_FORGES := 3
 const MAX_LIVE_LOOMS := 2
 const MAX_LIVE_KILNS := 2
-## Truly rare, per VEIN.md — "only a rare Crucible can make" a hexagon, so
-## unlike every tier below it, the board never holds more than one at a time.
+## Truly rare, per VEIN.md — "only a rare Crucible can make" a hexagon — but
+## still ramps up alongside every other tier (see _max_live_for): late in an
+## intense run the limiting factor should be the player's own reach and
+## reaction speed, not a hard ceiling that leaves the rarest tier permanently
+## one corruption away from a dead lineage.
 const MAX_LIVE_CRUCIBLES := 1
+## How many extra live-tool slots intensity adds on top of the base cap
+## above, once pressure() climbs past 1.0 — same "the world keeps getting
+## meaner past EXERTION_SPAN" idiom as SPREAD_TIME_LATE/AIRBORNE_CHANCE_MAX.
+## Runs are 3-8 minutes (VEIN.md) and pressure hits 1.0 around EXERTION_SPAN
+## (200s) once fully hardcore, so this only shows up in the intense back half
+## of a longer run — the low base caps still do their early clutter-control
+## job untouched for a new player.
+const EXTRA_LIVE_CAP := 2
+## Pressure units past 1.0 needed to reach the full EXTRA_LIVE_CAP headroom.
+const CAP_RAMP_SPAN := 1.2
 
 ## Rot that is never cut does not get to sit there forever as free clutter,
 ## poisoning at your leisure — it collapses outright, taking the asset with it.
@@ -516,6 +533,15 @@ var lb_you := {"rank": 0, "score": 0, "isBest": false}
 var lb_total_players := 0
 var lb_total_plays := 0
 var _lb_http: HTTPRequest
+
+## Set by _start_run_ping once server/leaderboard's /run/start responds;
+## empty until then (the response may land after gameplay has already
+## started — that's fine, see _start_run_ping). Sent along with _submit_score
+## so the server can verify this run's elapsed time against its own clock,
+## not anything the client claims. Never persisted — a fresh value every
+## start_run() call, same lifetime as score.
+var _run_id := ""
+var _run_start_http: HTTPRequest
 
 ## Name-claim/rename result (see _claim_name, called from name_prompt.gd for
 ## both first-launch claim and rename) — same live-state-read pattern as
@@ -893,6 +919,7 @@ func _on_replay_tutorial() -> void:
 
 func start_run(run_seed: int) -> void:
 	Audio.start()
+	_start_run_ping()
 	for n in nodes:
 		n.queue_free()
 	for v in veins:
@@ -1074,6 +1101,48 @@ func _on_stopped(total: int) -> void:
 	_shatter.start(snapshots, rng.randi())
 
 
+## Fire-and-forget "a run just began" ping to server/leaderboard's
+## /run/start — called from start_run() the moment a real run starts, so the
+## server has its own timestamp for when this run began before it ever sees
+## a score. Purely a gameplay-lifecycle signal, NOT part of the name-claim/
+## registration flow: no UI, doesn't gate starting to play, and
+## _submit_score already tolerates _run_id staying empty (the server then
+## just rejects that submission, same as any other network hiccup — see
+## _submit_score's existing "error" handling below). Skipped under any dev
+## harness, same reasoning as _submit_score's own _harness_active guard.
+func _start_run_ping() -> void:
+	_run_id = ""
+	if _harness_active:
+		return
+	if RUN_START_URL.is_empty():
+		return
+	if _run_start_http == null:
+		_run_start_http = HTTPRequest.new()
+		_run_start_http.timeout = HTTP_TIMEOUT
+		add_child(_run_start_http)
+		_run_start_http.request_completed.connect(_on_run_start_request_completed)
+	var body := JSON.stringify({"player_id": player_id})
+	# No error handling on a failed request() call itself — a run that never
+	# gets a run_id just fails its later /score submission the same way an
+	# offline device already does today; nothing else in gameplay depends on
+	# this succeeding.
+	_run_start_http.request(
+		RUN_START_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+
+
+func _on_run_start_request_completed(result: int, response_code: int,
+		_headers: PackedStringArray, body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return
+	# Arrives whenever it arrives — start_run() has already reset every other
+	# per-run field synchronously; this is the one exception that fills in
+	# asynchronously, which _submit_score just reads at death time.
+	_run_id = String(parsed.get("run_id", ""))
+
+
 ## Arcade-style, works everywhere (Telegram, a plain browser tab, a local
 ## build), no login (see server/leaderboard/README.md) — fired automatically
 ## the instant the Heart stops (see _on_stopped), not from a button. Name is
@@ -1099,6 +1168,7 @@ func _submit_score() -> void:
 		_lb_http.request_completed.connect(_on_lb_request_completed)
 	var body := JSON.stringify({
 		"player_id": player_id, "name": player_name, "score": score, "beats": beats,
+		"run_id": _run_id,
 	})
 	var err := _lb_http.request(
 		LEADERBOARD_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
@@ -1593,12 +1663,15 @@ func _critical_tool_kind() -> int:
 
 
 func _max_live_for(kind: int) -> int:
+	var base := 0
 	match kind:
-		VNode.Kind.FORGE: return MAX_LIVE_FORGES
-		VNode.Kind.LOOM: return MAX_LIVE_LOOMS
-		VNode.Kind.KILN: return MAX_LIVE_KILNS
-		VNode.Kind.CRUCIBLE: return MAX_LIVE_CRUCIBLES
-	return 0
+		VNode.Kind.FORGE: base = MAX_LIVE_FORGES
+		VNode.Kind.LOOM: base = MAX_LIVE_LOOMS
+		VNode.Kind.KILN: base = MAX_LIVE_KILNS
+		VNode.Kind.CRUCIBLE: base = MAX_LIVE_CRUCIBLES
+		_: return 0
+	var extra := floori(clampf((pressure() - 1.0) / CAP_RAMP_SPAN, 0.0, 1.0) * EXTRA_LIVE_CAP)
+	return base + extra
 
 
 ## True if `kind` is the critical tier (see _critical_tool_kind) and could use
@@ -2570,7 +2643,9 @@ func _ensure_throughput(delta: float) -> void:
 ## Below this fraction of its own reserve, a supply node counts as "running
 ## low" here — deliberately generous (not near-empty) so the replacement
 ## lands well before the old one is actually in danger, not at its last gasp.
-const LOW_SUPPLY_FRACTION := 0.3
+## Raised from 0.3: playtest still caught nodes turning before the player had
+## noticed and rewired, so this now fires with more life left on the clock.
+const LOW_SUPPLY_FRACTION := 0.4
 ## Longer than RESCUE_DEBOUNCE/CHAIN_STALL_DEBOUNCE — this is a top-up, not an
 ## already-broken state, so it can afford to wait a beat longer and confirm
 ## the low reading sticks before spending a spawn on it.
@@ -2597,15 +2672,24 @@ func _producer_kind_for_res(res: int) -> int:
 	return -1
 
 
-## Live, connected (depth >= 0 — actually feeding, not pre-staged) nodes of
-## whichever kind makes the CURRENT demand: if none of them are running low,
-## or a healthy one already backs up the low one, there is nothing to do.
-## Otherwise this is exactly "a shape is getting close to being poisonous
-## with nothing fresh to switch to" — spawn through the same slots the
-## ordinary timer-driven spawns use (_spawn_well/_spawn_tool_slot), so this
-## respects the normal board caps rather than forcing a spawn through them;
-## a top-up has no business overriding board hygiene the way the
-## already-broken-state rescues above do.
+## Live nodes of whichever kind makes the CURRENT demand: connected ones
+## (depth >= 0 — actually feeding, not pre-staged) split into running-low vs.
+## a fresh backup already covering them; an unconnected one counts as a
+## replacement already spawned and awaiting a vein, not something to
+## duplicate. If none are running low, a fresh backup already exists, or a
+## replacement is already sitting on the board unwired, there is nothing to
+## do. Otherwise this is exactly "a shape is getting close to being
+## poisonous with nothing fresh to switch to".
+##
+## For WELL this still goes through _spawn_well (its own cap is generous and
+## already evicts an orphan when full). For a tool tier this calls
+## _spawn_node directly instead of _spawn_tool_slot: base caps are as low as
+## 1 (Crucible) or 2 (Loom/Kiln — see _max_live_for), so _spawn_tool_slot's
+## own cap check (_count_healthy_kind < _max_live_for) counts the dying node
+## itself as occupying the only/last slot and silently refuses to spawn —
+## exactly the case this guarantee exists for. The board briefly holds one
+## more than the normal cap until the old node is cut or corrupts and
+## collapses away.
 func _ensure_demand_supply(delta: float) -> void:
 	var kind := _producer_kind_for_res(demand)
 	if kind == -1:
@@ -2614,15 +2698,18 @@ func _ensure_demand_supply(delta: float) -> void:
 
 	var running_low := false
 	var has_fresh_backup := false
+	var has_pending_replacement := false
 	for n in nodes:
-		if n.kind != kind or n.corrupted or n.depth < 0:
+		if n.kind != kind or n.corrupted:
 			continue
-		if n.reserve_ratio() < LOW_SUPPLY_FRACTION:
+		if n.depth < 0:
+			has_pending_replacement = true
+		elif n.reserve_ratio() < LOW_SUPPLY_FRACTION:
 			running_low = true
 		else:
 			has_fresh_backup = true
 
-	if not running_low or has_fresh_backup:
+	if not running_low or has_fresh_backup or has_pending_replacement:
 		_demand_supply_stall = 0.0
 		return
 
@@ -2634,7 +2721,7 @@ func _ensure_demand_supply(delta: float) -> void:
 	if kind == VNode.Kind.WELL:
 		_spawn_well()
 	else:
-		_spawn_tool_slot(kind)
+		_spawn_node(kind)
 
 
 # --- Graph: everything flows downhill toward demand -------------------------
@@ -3195,10 +3282,14 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 		# what actually happened — a vector cross now, drawn (not a font
 		# glyph) so it can't come out as a missing-character box. Sized up
 		# alongside the stronger burst so the whole event competes on equal
-		# footing with a real score pop.
+		# footing with a real score pop. Playtest: the muted `warn` tint that
+		# fits the burst particles all but disappeared as a mark on its own —
+		# drawn in Palette.SCORE instead, the same bright, legible colour the
+		# "+N" pop already earns its visibility from, so the cross reads at a
+		# glance instead of blending into the board.
 		var mark: Node2D = FloatTextScene.new()
 		vein_layer.add_child(mark)
-		mark.spawn_cross(at + jitter, warn, 28, out_dir)
+		mark.spawn_cross(at + jitter, Palette.SCORE, 28, out_dir)
 		return
 	if absf(gain) < 0.5:
 		return
@@ -3214,7 +3305,13 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 	var col: Color
 	var text: String
 	if kind == VNode.Res.VOID:
-		col = Palette.VOID
+		# Playtest: Palette.VOID's muted cold tint read as harder to spot than
+		# the "+N" pop right next to it, even though it's the more important
+		# number to notice. Drawn in Palette.SCORE instead — same legible
+		# colour as a gain, so a poison hit competes for the eye on equal
+		# footing; the leading "-" and the burst below still carry "this is
+		# bad", the tint no longer has to.
+		col = Palette.SCORE
 		text = "%d" % rounded
 		# A poison landing has to be FELT, not just read as a negative number
 		# sitting next to every positive one — the same small violent burst a
