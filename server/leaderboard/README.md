@@ -13,8 +13,10 @@ matching how the rest of this project ships infra (see `../../deploy_web.sh`).
   `total_plays`, both plain counters incremented atomically per submission.
 - `vein-leaderboard-runs` — one item per started run: `run_id`, `player_id`,
   `started_at` (server timestamp, ms since epoch), `consumed` (bool), `ttl`
-  (DynamoDB-native TTL, auto-expires stale rows). Written by `/run/start`,
-  read and marked consumed by `/score` — see "Arcade-style, on purpose" below.
+  (DynamoDB-native TTL, auto-expires stale rows), `validated_score`,
+  `total_raw_count`/`total_refined_count`, `last_batch_at`. Written by
+  `/run/start`, accumulated by `/run/deliver`, read and marked consumed by
+  `/score` — see "Arcade-style, on purpose" below.
 
 ## Arcade-style, on purpose
 
@@ -23,17 +25,33 @@ client sends (a random ID generated once and saved locally, see
 `_load_save`/`_generate_player_id` in `scripts/game.gd`), under whatever name
 they've claimed via `/name` (see `scripts/name_prompt.gd` and its in-game
 custom keyboard). Anyone who found this URL could POST under any name that
-isn't already claimed — but as of `/run/start`, they can no longer fabricate
-a score out of nothing: `/score` requires a `run_id` minted server-side at
-the moment a real run began, ties the run's elapsed time to the server's own
-clock (never anything the client claims), and rejects any score that's
-implausible for that much time or that reuses/replays a `run_id`. This still
-isn't proof of identity and still isn't trying to stop a determined cheater
-who actually plays through a run and pads the number at the margins — just
-no more instant #1 from a single crafted POST. VEIN is a casual mobile game,
-not a competitive ranking with anything real riding on it. An earlier
-version required a signed Telegram session instead of any of this — see git
-history if that trade ever needs revisiting.
+isn't already claimed — but they can no longer fabricate a score, in two
+layers:
+
+1. `/score` requires a `run_id` minted server-side by `/run/start` at the
+   moment a real run began — closes the zero-effort case, an instant fake #1
+   from a single crafted POST with no run behind it at all.
+2. `/score` no longer trusts the `score` it's sent, either. Real-world
+   red-teaming of layer 1 alone found that "plausible for elapsed time" isn't
+   the same as "earned" — `/run/start`, `sleep 2`, `score: 2000` sailed
+   straight through and took #1. So the authoritative score is now
+   `validated_score` on the run row, built exclusively from `/run/deliver`
+   batches: the client reports every actual scoring delivery
+   (`kind`/`combo`/`pot`) as it happens, and `handleRunDeliver`/`handleScore`
+   recompute each one's gain themselves from the same formula game.gd uses,
+   rate-limiting both the point total AND the raw/refined delivery *counts*
+   against real server-clocked elapsed time.
+
+Neither layer is proof of identity, and neither is trying to stop a
+determined cheater who reads the open-source client and scripts a
+properly-paced, properly-shaped bot for the full duration of the run they
+want to claim — that would take genuinely unforgeable proof of play (full
+server-side replay validation), disproportionate for VEIN's actual stakes
+(bragging rights on a casual mobile game, not a competitive ranking with
+anything real riding on it). What this closes is casual/opportunistic
+abuse — the actual incidents that prompted both layers. An earlier version
+required a signed Telegram session instead of any of this — see git history
+if that trade ever needs revisiting.
 
 Names are unique going forward (case-insensitive), enforced only at the
 moment one is claimed or changed via `/name` — `/score` never re-checks it,
@@ -58,6 +76,39 @@ Request body:
 Response body:
 ```json
 { "run_id": "<32-character hex string>" }
+```
+
+### `POST /run/deliver` — report scoring deliveries as they happen
+
+Fire-and-forget, called periodically by `scripts/game.gd`'s
+`_flush_deliveries()` (every `DELIVER_FLUSH_INTERVAL` of real time) with
+whatever scoring deliveries happened since the last flush — the actual proof
+of play behind a submitted score, not part of the name-claim/registration
+flow.
+
+Request body:
+```json
+{ "player_id": "<random ID>", "run_id": "<from a prior /run/start>", "deliveries": [{ "kind": 5, "combo": 7, "pot": 1.0 }] }
+```
+
+`kind` is the resource enum int (`scripts/vnode.gd`'s `Res`: `0`=RAW,
+`1`=REFINED, `2`=CLOTH, `3`=PRISM, `4`=VOID, `5`=HEXAGON), `combo` the
+vein-edit rhythm combo at that delivery (clamped server-side to
+`0..COMBO_CAP`), `pot` the poison potency for a `VOID` delivery (clamped to
+`0..MAX_POT`, ignored otherwise). Each event's gain is recomputed
+server-side from these three fields, never trusted as a number — see
+`submit.js`'s `_validateDeliveries`.
+
+Both the gain-sum and the raw/refined event *counts* (two different rate
+tiers — a tool-tier delivery is far more rate-constrained in real play than
+a Well's) are checked against real server-clocked elapsed time, per-batch
+and cumulative since the run began. A missing/unknown/mismatched/consumed
+`run_id`, a malformed `deliveries` array, or an implausible batch all reject
+with `400` and write nothing.
+
+Success (`200`):
+```json
+{ "ok": true }
 ```
 
 ### `POST /name` — claim or change a display name
@@ -88,18 +139,20 @@ So the panel never needs a second round trip after posting.
 
 Request body:
 ```json
-{ "player_id": "<random ID, generated once and saved locally>", "name": "your name", "score": 1234, "beats": 5678, "run_id": "<from a prior /run/start>" }
+{ "player_id": "<random ID, generated once and saved locally>", "name": "your name", "score": 1234, "beats": 5678, "run_id": "<from a prior /run/start>", "deliveries": [] }
 ```
 
-`beats` is accepted but not currently stored; the board ranks by `score`,
-same number the death screen shows.
+`beats` is accepted but not currently stored. **`score` is advisory only and
+never trusted** — the board ranks by the run's own server-derived
+`validated_score` instead (built from `/run/deliver` batches, see above).
+`deliveries` here is optional: whatever the client still had buffered since
+its last periodic flush, validated and rate-checked exactly the same way
+`/run/deliver` does, folded in atomically with marking the run consumed.
 
-`run_id` must come from a prior `/run/start` call for this same `player_id`,
-not yet used by an earlier `/score` submission, and old enough (but not too
-old — see `MAX_RUN_SECONDS`) relative to now for the submitted `score` to be
-plausible at up to `MAX_SCORE_RATE` points/sec — see `submit.js`'s
-`handleScore`. A missing, unknown, mismatched, reused, or implausible
-`run_id` all reject with `400` and write nothing.
+`run_id` must come from a prior `/run/start` call for this same `player_id`
+and not yet used by an earlier `/score` submission. A missing, unknown,
+mismatched, reused, or malformed-`deliveries` request all reject with `400`
+and write nothing — see `submit.js`'s `handleScore`.
 
 Response body:
 ```json
@@ -151,17 +204,21 @@ deploys the game to — nothing else.
 
 Creates or updates, in order: the three DynamoDB tables (including TTL on
 `vein-leaderboard-runs`), an IAM role scoped to just those tables, the Lambda
-function, and an HTTP API with `POST /score`, `POST /name`, `POST /rank`, and
-`POST /run/start` routes and open CORS. Safe to re-run; every step checks
-before creating. Prints the endpoint URL at the end — paste it into
-`scripts/game.gd`'s `LEADERBOARD_URL`/`NAME_URL`/`RANK_URL`/`RUN_START_URL`
+function, and an HTTP API with `POST /score`, `POST /name`, `POST /rank`,
+`POST /run/start`, and `POST /run/deliver` routes and open CORS. Safe to
+re-run; every step checks before creating. Prints the endpoint URL at the
+end — paste it into `scripts/game.gd`'s
+`LEADERBOARD_URL`/`NAME_URL`/`RANK_URL`/`RUN_START_URL`/`DELIVER_URL`
 constants.
 
-The score-plausibility thresholds (`MAX_SCORE_RATE`, `MAX_RUN_SECONDS`,
-`MIN_RUN_SECONDS`, `SCORE_GRACE` — see `submit.js`'s `handleScore`) are
-Lambda env vars, defaulted in `deploy.sh`'s `ENV_VARS` line. Retune them
-there (or with a direct `aws lambda update-function-configuration`) without
-touching `submit.js` or redeploying code.
+The score-plausibility thresholds — `MAX_SCORE_RATE`/`MAX_RUN_SECONDS`/
+`MIN_RUN_SECONDS`/`SCORE_GRACE` (the backstop on `handleScore`'s derived
+`validated_score`) and `RAW_DELIVERY_RATE`/`REFINED_DELIVERY_RATE`/
+`DELIVERY_COUNT_GRACE`/`MAX_BATCH_WINDOW_SECONDS` (the primary gate, in
+`handleRunDeliver`) — are all Lambda env vars, defaulted in `deploy.sh`'s
+`ENV_VARS` line. Retune them there (or with a direct
+`aws lambda update-function-configuration`) without touching `submit.js` or
+redeploying code.
 
 If deploying through the CI workflow rather than running this script
 locally, the CI role's IAM policy (`ci-iam-policy.json` in this directory) is

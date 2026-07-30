@@ -1,18 +1,21 @@
 'use strict';
-// POST /score, POST /name, POST /rank, and POST /run/start — the
-// leaderboard's four endpoints, one Lambda. /score does submit-and-fetch:
-// record the run, then return the same payload a plain "show me the board"
-// call would (top 10, this player's rank, global totals) so the in-game
-// panel never needs a second round trip after posting (see
-// scripts/game.gd's _submit_score). /name claims or renames a player's
-// display name up front, enforcing uniqueness — see handleName below — so
-// /score itself never has to re-check it on every single run. /rank is a
-// read-only "where do I stand" query for the main menu — see handleRank
-// below — that never writes anything, since opening the menu is not a run.
-// /run/start fires the instant a real run begins (see game.gd's start_run)
-// and hands back an unguessable run_id that /score later requires — this is
-// a gameplay-lifecycle ping, not a registration step: it carries no name, no
-// uniqueness check, nothing /name does.
+// POST /score, POST /name, POST /rank, POST /run/start, and POST
+// /run/deliver — the leaderboard's five endpoints, one Lambda. /score does
+// submit-and-fetch: record the run, then return the same payload a plain
+// "show me the board" call would (top 10, this player's rank, global
+// totals) so the in-game panel never needs a second round trip after
+// posting (see scripts/game.gd's _submit_score). /name claims or renames a
+// player's display name up front, enforcing uniqueness — see handleName
+// below — so /score itself never has to re-check it on every single run.
+// /rank is a read-only "where do I stand" query for the main menu — see
+// handleRank below — that never writes anything, since opening the menu is
+// not a run. /run/start fires the instant a real run begins (see game.gd's
+// start_run) and hands back an unguessable run_id — a gameplay-lifecycle
+// ping, not a registration step: it carries no name, no uniqueness check,
+// nothing /name does. /run/deliver is the run's actual proof of play: the
+// client reports each scoring delivery (kind/combo/pot) as it happens,
+// batched every few seconds, and this Lambda recomputes each one's gain
+// itself instead of trusting a number — see handleRunDeliver.
 //
 // Arcade-style, by explicit direction: no login, no account, no per-name
 // proof of identity — a player is whatever `player_id` their client sends (a
@@ -21,13 +24,22 @@
 // drop the Telegram-only requirement the first version had (see git
 // history), and it matches VEIN's own stakes — bragging rights on a casual
 // mobile game, not a competitive ranking with anything real riding on it.
-// It no longer means a score can be fabricated from nothing, though: /score
-// requires a run_id minted server-side by /run/start at the moment a real
-// run began, ties elapsed time to the server's own clock (never anything the
-// client claims), and rejects a run_id that's unknown, already used, or
-// implausible for the score it's paired with — see handleScore. Anyone can
-// still play a real run and pad the number at the margins; nobody can POST a
-// #1 score with zero gameplay behind it anymore. The bounds below exist to
+// It no longer means a score can be fabricated from nothing, though.
+// Round 1 (run_id + elapsed-time bound) closed the zero-effort case — an
+// instant fake #1 from a single crafted POST — but red-teaming it live
+// proved a real number is still just a *plausible* one, not an *earned*
+// one: `/run/start` then `sleep 2` then `score: 2000` sailed straight
+// through. Round 2 closes that: /score no longer trusts `payload.score` at
+// all. The authoritative score is `validated_score` on the run row,
+// accumulated exclusively through /run/deliver batches (plus any final
+// unflushed tail attached to /score itself) — each delivery's gain is
+// recomputed server-side from `kind`/`combo`/`pot` via the same formula
+// game.gd uses (see FUEL_BY_RES/COMBO_GAIN/COMBO_CAP below), and both the
+// gain-sum and the raw/refined event *counts* are rate-limited against real
+// server-clocked elapsed time. This is still not unforgeable — a
+// sufficiently motivated attacker who reads the open client could script a
+// properly-paced, properly-shaped bot — but it closes casual/opportunistic
+// abuse the same way round 1 did, one level down. The bounds below exist to
 // keep the data sane on top of that, not to catch every possible abuse.
 //
 // Uses the AWS SDK v3 client modules built into the nodejs20.x Lambda
@@ -51,9 +63,11 @@ const MAX_ID_LEN = 64;
 
 const RUN_ID_LEN = 32; // crypto.randomBytes(16).toString('hex')
 // How much score a run_id's elapsed real time (server clock only, never
-// anything the client claims) is allowed to plausibly represent. All four
-// tunable via Lambda env vars so they can be retuned from real play data
-// without a code deploy — see deploy.sh's ENV_VARS for the defaults.
+// anything the client claims) is allowed to plausibly represent. Now a
+// backstop on the derived validated_score (see handleScore) rather than the
+// primary gate — round 2 (/run/deliver) is the primary gate. All tunable
+// via Lambda env vars so they can be retuned from real play data without a
+// code deploy — see deploy.sh's ENV_VARS for the defaults.
 const MAX_SCORE_RATE = Number(process.env.MAX_SCORE_RATE) || 1000; // points/sec
 const MAX_RUN_SECONDS = Number(process.env.MAX_RUN_SECONDS) || 1200; // 20 min
 const MIN_RUN_SECONDS = Number(process.env.MIN_RUN_SECONDS) || 2;
@@ -62,6 +76,47 @@ const SCORE_GRACE = Number(process.env.SCORE_GRACE) || 100;
 // past MAX_RUN_SECONDS so a slow/backgrounded client never loses a
 // legitimately-still-in-progress run_id before it can submit.
 const RUN_TTL_SECONDS = 60 * 60 * 6;
+
+// --- Delivery-event validation (round 2) ------------------------------------
+//
+// Mirrors scripts/vnode.gd's `enum Res` and game.gd's FUEL_BY_RES/
+// COMBO_GAIN/COMBO_CAP exactly — keep both sides in sync on any tuning
+// change, same risk class as any client/server contract (e.g. the name
+// charset cleanName() mirrors from onscreen_keyboard.gd).
+const RES = { RAW: 0, REFINED: 1, CLOTH: 2, PRISM: 3, VOID: 4, HEXAGON: 5 };
+const FUEL_BY_RES = { 0: 1.0, 1: 3.0, 2: 7.0, 3: 15.0, 4: -2.5, 5: 31.0 };
+const COMBO_GAIN = 0.07;
+const COMBO_CAP = 10;
+// Generous ceiling above vnode.gd's POISON_POT_BY_KIND (tops out at 2.5) —
+// not a meaningful exploit vector since VOID gain is negative, so clamping
+// wide rather than hardcoding exact per-kind values is fine here.
+const MAX_POT = 3.0;
+// Event-count rate caps, split in two because a flat cap can't tell "many
+// cheap Wells" from "many expensive Crucibles" apart. RAW is generous
+// (covers a full late-game Well swarm: up to 20 Wells x ~2.8/sec each).
+// Everything from a tool (REFINED/CLOTH/PRISM/HEXAGON/VOID) is far more
+// constrained even at game.gd's intensity-scaled board caps, so its rate is
+// much lower — this is what actually catches "claim a huge pile of
+// high-value deliveries" that a single flat cap would let through.
+const RAW_DELIVERY_RATE = Number(process.env.RAW_DELIVERY_RATE) || 60;
+const REFINED_DELIVERY_RATE = Number(process.env.REFINED_DELIVERY_RATE) || 15;
+// A flat count grace large enough to absorb one node's worth of buffered
+// items releasing in a burst (vnode.gd's buffer_cap() tops out at 6, for a
+// Crucible or a Well), not an arbitrary round number — sized against
+// REFINED_DELIVERY_RATE (the tighter of the two tiers), where a bigger
+// grace would swallow a meaningful fraction of even a several-second
+// window (see the regression test for exactly this: a 10-count grace let a
+// crafted 40-Hexagon batch slip through a 2-second window undetected).
+const DELIVERY_COUNT_GRACE = Number(process.env.DELIVERY_COUNT_GRACE) || 6;
+// Per-batch clamp ceiling — distinct from MAX_RUN_SECONDS (the cumulative
+// one). Without this, one giant batch sent after a long wait since the
+// previous batch would reopen the same "bank unbounded elapsed time"
+// problem MAX_RUN_SECONDS exists to close, just one level down.
+const MAX_BATCH_WINDOW_SECONDS = Number(process.env.MAX_BATCH_WINDOW_SECONDS) || 60;
+// Payload/compute-cost bound on a single /run/deliver (or /score's final
+// tail) call — no legitimate flush at DELIVER_FLUSH_INTERVAL cadence (see
+// game.gd) ever needs anywhere near this many events in one request.
+const MAX_DELIVERIES_PER_BATCH = 500;
 
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
@@ -176,6 +231,13 @@ async function handleRunStart(payload) {
 			player_id: playerId,
 			started_at: now,
 			consumed: false,
+			// Accumulated exclusively by handleRunDeliver (and /score's own final
+			// tail) — see there. This, not payload.score, is what handleScore
+			// actually ranks a run by.
+			validated_score: 0,
+			total_raw_count: 0,
+			total_refined_count: 0,
+			last_batch_at: now,
 			// DynamoDB-native TTL attribute (epoch seconds) — see deploy.sh's
 			// update-time-to-live call.
 			ttl: Math.floor(now / 1000) + RUN_TTL_SECONDS,
@@ -185,6 +247,116 @@ async function handleRunStart(payload) {
 	return respond(200, { run_id: runId });
 }
 
+// Recomputes each delivery's gain itself from kind/combo/pot rather than
+// trusting a number — the same formula game.gd's _deliver uses. Clamps
+// combo/pot to their legal ranges rather than rejecting out-of-range values,
+// matching the client's own clamping behavior (no reason for the server to
+// be stricter than the game itself is about a harmless-either-way input).
+// Returns null if the batch itself is malformed (wrong shape, too long, a
+// kind outside 0-5) — those DO reject, since there's no legal reading of them.
+function _validateDeliveries(deliveries) {
+	if (!Array.isArray(deliveries) || deliveries.length > MAX_DELIVERIES_PER_BATCH) {
+		return null;
+	}
+	let gain = 0;
+	let rawCount = 0;
+	let refinedCount = 0;
+	for (const d of deliveries) {
+		const kind = Number(d && d.kind);
+		if (!Number.isInteger(kind) || !(kind in FUEL_BY_RES)) {
+			return null;
+		}
+		const combo = Math.min(Math.max(Number(d.combo) || 0, 0), COMBO_CAP);
+		const pot = Math.min(Math.max(Number(d.pot) || 1, 0), MAX_POT);
+		let eventGain = FUEL_BY_RES[kind];
+		if (kind === RES.VOID) {
+			eventGain *= pot;
+		} else {
+			eventGain *= (1 + combo * COMBO_GAIN);
+		}
+		gain += eventGain;
+		if (kind === RES.RAW) {
+			rawCount += 1;
+		} else {
+			refinedCount += 1;
+		}
+	}
+	return { gain, rawCount, refinedCount };
+}
+
+// POST /run/deliver — the run's actual proof of play. Called periodically by
+// game.gd's _flush_deliveries() (every DELIVER_FLUSH_INTERVAL of real time)
+// with the deliveries that happened since the last flush; game.gd folds any
+// final unflushed tail directly into /score instead of a last round trip
+// here. Every check rejects with 400 and writes nothing.
+async function handleRunDeliver(payload) {
+	const playerId = String(payload.player_id || '').trim();
+	if (!playerId || playerId.length > MAX_ID_LEN) {
+		return respond(400, { error: 'bad player_id' });
+	}
+	const runId = String(payload.run_id || '').trim();
+	if (runId.length !== RUN_ID_LEN) {
+		return respond(400, { error: 'bad run_id' });
+	}
+
+	const validated = _validateDeliveries(payload.deliveries);
+	if (validated === null) {
+		return respond(400, { error: 'bad deliveries' });
+	}
+
+	const runRow = await ddb.send(new GetCommand({ TableName: RUNS_TABLE, Key: { run_id: runId } }));
+	const run = runRow.Item;
+	if (!run) {
+		return respond(400, { error: 'unknown run_id' });
+	}
+	if (run.player_id !== playerId) {
+		return respond(400, { error: 'run_id player mismatch' });
+	}
+	if (run.consumed) {
+		return respond(400, { error: 'run already submitted' });
+	}
+
+	const now = Date.now();
+	// Two independent windows, both server-clocked only: how much this ONE
+	// batch could plausibly hold (capped at MAX_BATCH_WINDOW_SECONDS so a
+	// batch sent after a long gap can't bank an unbounded allowance — the
+	// same lesson MAX_RUN_SECONDS already taught round 1, one level down),
+	// and how much the RUN AS A WHOLE could plausibly hold so far (catches
+	// many small batches each sneaking in under DELIVERY_COUNT_GRACE).
+	const sinceLastBatch = Math.min(
+		Math.max((now - Number(run.last_batch_at || run.started_at)) / 1000, 0),
+		MAX_BATCH_WINDOW_SECONDS,
+	);
+	const sinceStart = Math.min(
+		Math.max((now - Number(run.started_at)) / 1000, 0),
+		MAX_RUN_SECONDS,
+	);
+
+	const newRawTotal = Number(run.total_raw_count || 0) + validated.rawCount;
+	const newRefinedTotal = Number(run.total_refined_count || 0) + validated.refinedCount;
+	if (validated.rawCount > sinceLastBatch * RAW_DELIVERY_RATE + DELIVERY_COUNT_GRACE
+			|| validated.refinedCount > sinceLastBatch * REFINED_DELIVERY_RATE + DELIVERY_COUNT_GRACE
+			|| newRawTotal > sinceStart * RAW_DELIVERY_RATE + DELIVERY_COUNT_GRACE
+			|| newRefinedTotal > sinceStart * REFINED_DELIVERY_RATE + DELIVERY_COUNT_GRACE) {
+		return respond(400, { error: 'deliveries implausible for elapsed time' });
+	}
+
+	await ddb.send(new UpdateCommand({
+		TableName: RUNS_TABLE,
+		Key: { run_id: runId },
+		UpdateExpression: 'ADD validated_score :gain, total_raw_count :rawCount, '
+			+ 'total_refined_count :refinedCount SET last_batch_at = :now',
+		ExpressionAttributeValues: {
+			':gain': validated.gain,
+			':rawCount': validated.rawCount,
+			':refinedCount': validated.refinedCount,
+			':now': now,
+		},
+	}));
+
+	return respond(200, { ok: true });
+}
+
 async function handleScore(payload) {
 	const playerId = String(payload.player_id || '').trim();
 	if (!playerId || playerId.length > MAX_ID_LEN) {
@@ -192,11 +364,6 @@ async function handleScore(payload) {
 	}
 	const cleaned = cleanName(payload.name);
 	const name = cleaned.length > 0 ? cleaned : 'player';
-
-	const score = Number(payload.score);
-	if (!Number.isFinite(score) || score < 0 || score > MAX_SCORE) {
-		return respond(400, { error: 'bad score' });
-	}
 
 	// A run_id proves a real run actually started, server-side, before this
 	// score existed — the fix for someone POSTing straight to /score with a
@@ -221,43 +388,98 @@ async function handleScore(payload) {
 		return respond(400, { error: 'run already submitted' });
 	}
 
-	// Only server-side timestamps feed this — `started_at` was set by this
-	// same Lambda in handleRunStart, `Date.now()` here is this Lambda's own
-	// clock right now. The client's own elapsed-time claims (there are none
-	// in the payload today, and none should ever be added) never enter this
-	// math. Clamped to MAX_RUN_SECONDS BEFORE use in the rate check below —
-	// without that clamp, an attacker could grab a run_id and simply wait
-	// real wall-clock hours before ever submitting, "banking" unbounded
-	// elapsed-time budget against MAX_SCORE_RATE. The clamp is what turns a
-	// per-second rate limit into an actual ceiling.
-	const rawElapsedSeconds = (Date.now() - Number(run.started_at)) / 1000;
-	const elapsedSeconds = Math.min(Math.max(rawElapsedSeconds, 0), MAX_RUN_SECONDS);
+	// Round 2: payload.score is advisory only now, never trusted — the
+	// authoritative score is run.validated_score, built exclusively from
+	// rate-limited, formula-recomputed /run/deliver batches (see there and
+	// the top-of-file comment). Any deliveries still sitting in the client's
+	// buffer at death ride along here (see game.gd's _submit_score) instead
+	// of one more round trip, validated and rate-checked exactly the same
+	// way handleRunDeliver does.
+	let tailGain = 0;
+	let tailRawCount = 0;
+	let tailRefinedCount = 0;
+	if (payload.deliveries !== undefined) {
+		const validated = _validateDeliveries(payload.deliveries);
+		if (validated === null) {
+			return respond(400, { error: 'bad deliveries' });
+		}
+		tailGain = validated.gain;
+		tailRawCount = validated.rawCount;
+		tailRefinedCount = validated.refinedCount;
+	}
 
-	if (score > 0 && elapsedSeconds < MIN_RUN_SECONDS) {
+	// Only server-side timestamps feed this — `started_at`/`last_batch_at`
+	// were set by this same Lambda, `Date.now()` here is this Lambda's own
+	// clock right now. The client's own elapsed-time claims never enter this
+	// math. Both windows clamped BEFORE use, same reasoning as
+	// handleRunDeliver: MAX_BATCH_WINDOW_SECONDS stops one giant tail after a
+	// long gap since the last flush from banking unbounded allowance, and
+	// MAX_RUN_SECONDS stops the same trick against the run's total elapsed
+	// time.
+	const now = Date.now();
+	const sinceLastBatch = Math.min(
+		Math.max((now - Number(run.last_batch_at || run.started_at)) / 1000, 0),
+		MAX_BATCH_WINDOW_SECONDS,
+	);
+	const elapsedSeconds = Math.min(Math.max((now - Number(run.started_at)) / 1000, 0), MAX_RUN_SECONDS);
+
+	const newRawTotal = Number(run.total_raw_count || 0) + tailRawCount;
+	const newRefinedTotal = Number(run.total_refined_count || 0) + tailRefinedCount;
+	if (tailRawCount > sinceLastBatch * RAW_DELIVERY_RATE + DELIVERY_COUNT_GRACE
+			|| tailRefinedCount > sinceLastBatch * REFINED_DELIVERY_RATE + DELIVERY_COUNT_GRACE
+			|| newRawTotal > elapsedSeconds * RAW_DELIVERY_RATE + DELIVERY_COUNT_GRACE
+			|| newRefinedTotal > elapsedSeconds * REFINED_DELIVERY_RATE + DELIVERY_COUNT_GRACE) {
+		return respond(400, { error: 'deliveries implausible for elapsed time' });
+	}
+
+	// Backstop on the score this run is ABOUT to have, on top of the
+	// delivery-level checks above — cheap defense in depth, catches any bug
+	// in the per-event math rather than gating on it exclusively.
+	const wouldBeScore = Number(run.validated_score || 0) + tailGain;
+	if (wouldBeScore > 0 && elapsedSeconds < MIN_RUN_SECONDS) {
 		return respond(400, { error: 'run too short' });
 	}
-	if (score > elapsedSeconds * MAX_SCORE_RATE + SCORE_GRACE) {
+	if (wouldBeScore > elapsedSeconds * MAX_SCORE_RATE + SCORE_GRACE) {
 		return respond(400, { error: 'score implausible for run duration' });
 	}
 
 	// Conditional on !consumed so two concurrent /score calls for the same
 	// run_id can't both pass the checks above and both write — the loser gets
 	// a ConditionalCheckFailedException, turned into the same "already
-	// submitted" rejection a genuine second attempt gets. Marked consumed
-	// BEFORE the writes below proceed, so a crash/timeout partway through
-	// handleScore after this point fails safe (run_id burned, no
-	// double-count risk) rather than leaving a replay window open.
+	// submitted" rejection a genuine second attempt gets. Marked consumed in
+	// the SAME atomic write that folds in the final tail (if any), so a
+	// crash/timeout partway through handleScore after this point fails safe
+	// (run_id burned, no double-count risk) rather than leaving a replay
+	// window open. ALL_NEW hands back the authoritative validated_score
+	// after the tail is applied, in one round trip.
+	let finalScore;
 	try {
-		await ddb.send(new UpdateCommand({
+		const updated = await ddb.send(new UpdateCommand({
 			TableName: RUNS_TABLE,
 			Key: { run_id: runId },
 			// `consumed` is a DynamoDB reserved keyword — must be aliased via
 			// ExpressionAttributeNames, same as `name` (`#n`) elsewhere here.
-			UpdateExpression: 'SET #c = :true',
+			UpdateExpression: 'ADD validated_score :gain, total_raw_count :rawCount, '
+				+ 'total_refined_count :refinedCount SET #c = :true, last_batch_at = :now',
 			ConditionExpression: '#c = :false',
 			ExpressionAttributeNames: { '#c': 'consumed' },
-			ExpressionAttributeValues: { ':true': true, ':false': false },
+			ExpressionAttributeValues: {
+				':gain': tailGain,
+				':rawCount': tailRawCount,
+				':refinedCount': tailRefinedCount,
+				':true': true,
+				':false': false,
+				':now': now,
+			},
+			ReturnValues: 'ALL_NEW',
 		}));
+		// Rounded here, not in validated_score itself — the underlying
+		// accumulation across multiple /run/deliver batches stays a precise
+		// float (avoids compounding rounding error batch to batch), only the
+		// player-facing value that becomes best_score is an integer, matching
+		// what the client has always shown (game.gd's _commas takes an int;
+		// a stray float leaking into the leaderboard panel would look broken).
+		finalScore = Math.max(0, Math.round(Number(updated.Attributes.validated_score) || 0));
 	} catch (e) {
 		if (e.name === 'ConditionalCheckFailedException') {
 			return respond(400, { error: 'run already submitted' });
@@ -283,7 +505,7 @@ async function handleScore(payload) {
 	// (see the rankChange/last_rank block once the fresh scan below knows
 	// where everyone actually stands). 0 means "no prior run to compare to."
 	const priorRank = hasRow ? (Number(existing.Item.last_rank) || 0) : 0;
-	const isNewBest = score > priorBest;
+	const isNewBest = finalScore > priorBest;
 	const newTotalRuns = priorRuns + 1;
 
 	if (isNewBest) {
@@ -292,7 +514,7 @@ async function handleScore(payload) {
 			Item: {
 				player_id: playerId,
 				name,
-				best_score: score,
+				best_score: finalScore,
 				best_score_at: new Date().toISOString(),
 				total_runs: newTotalRuns,
 				has_played: true,
@@ -369,7 +591,7 @@ async function handleScore(payload) {
 		nearby,
 		you: {
 			rank,
-			score: you ? you.best_score : score,
+			score: you ? you.best_score : finalScore,
 			isBest: isNewBest,
 			plays: you ? (you.total_runs || 0) : newTotalRuns,
 			rankChange: priorRank > 0 ? priorRank - rank : 0,
@@ -468,6 +690,9 @@ exports.handler = async (event) => {
 		|| '';
 	if (path.endsWith('/run/start')) {
 		return handleRunStart(payload);
+	}
+	if (path.endsWith('/run/deliver')) {
+		return handleRunDeliver(payload);
 	}
 	if (path.endsWith('/name')) {
 		return handleName(payload);

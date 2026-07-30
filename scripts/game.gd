@@ -22,14 +22,15 @@ const MainMenuScene := preload("res://scripts/main_menu.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
-## POST /score, POST /name, POST /rank, and POST /run/start on
-## server/leaderboard's AWS backend (Lambda + API Gateway, see there) —
-## printed by server/leaderboard/deploy.sh on each deploy. Same host, four
-## routes.
+## POST /score, POST /name, POST /rank, POST /run/start, and POST
+## /run/deliver on server/leaderboard's AWS backend (Lambda + API Gateway,
+## see there) — printed by server/leaderboard/deploy.sh on each deploy. Same
+## host, five routes.
 const LEADERBOARD_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/score"
 const NAME_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/name"
 const RANK_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/rank"
 const RUN_START_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/run/start"
+const DELIVER_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/run/deliver"
 ## HTTPRequest has no timeout by default (0 = wait forever) — a flaky mobile
 ## connection or a WebView that silently never completes the request (both
 ## reported on real phones) left lb_state/name_state/rank_state stuck on
@@ -543,6 +544,19 @@ var _lb_http: HTTPRequest
 var _run_id := ""
 var _run_start_http: HTTPRequest
 
+## Round 2 of leaderboard anti-cheat: proof of play, not just a trusted
+## score number — see server/leaderboard/submit.js's handleRunDeliver. Every
+## Heart-bound delivery that actually affects score (see _deliver) appends
+## {kind, combo, pot} here; _flush_deliveries periodically POSTs and clears
+## this, and _submit_score folds in whatever's still buffered at death.
+var _pending_deliveries: Array[Dictionary] = []
+var _deliver_http: HTTPRequest
+## How often real elapsed time _flush_deliveries fires on, while a run is
+## alive — frequent enough to keep batches small (so the server's per-batch
+## rate check stays meaningful), infrequent enough not to be chatty.
+const DELIVER_FLUSH_INTERVAL := 4.0
+var _deliver_flush_timer := 0.0
+
 ## Name-claim/rename result (see _claim_name, called from name_prompt.gd for
 ## both first-launch claim and rename) — same live-state-read pattern as
 ## lb_state above. "idle" until a claim is in flight, then
@@ -977,6 +991,8 @@ func start_run(run_seed: int) -> void:
 	throughput_rescues = 0
 	_demand_supply_stall = 0.0
 	demand_supply_rescues = 0
+	_pending_deliveries.clear()
+	_deliver_flush_timer = 0.0
 
 	heart = _make_node(VNode.Kind.HEART, heart_spawn_pos())
 
@@ -1143,6 +1159,31 @@ func _on_run_start_request_completed(result: int, response_code: int,
 	_run_id = String(parsed.get("run_id", ""))
 
 
+## Fire-and-forget periodic delivery-batch flush — see _pending_deliveries
+## and server/leaderboard/submit.js's handleRunDeliver, the actual proof of
+## play behind a submitted score. Skipped, buffer left intact for the next
+## attempt, if _run_id hasn't arrived yet — the rare race where the flush
+## timer fires before _start_run_ping's own response has landed; nothing is
+## lost, it just waits for the next cycle (or _submit_score's own final
+## flush at death, whichever comes first).
+func _flush_deliveries() -> void:
+	if _run_id.is_empty() or DELIVER_URL.is_empty():
+		return
+	if _deliver_http == null:
+		_deliver_http = HTTPRequest.new()
+		_deliver_http.timeout = HTTP_TIMEOUT
+		add_child(_deliver_http)
+	var body := JSON.stringify({
+		"player_id": player_id, "run_id": _run_id, "deliveries": _pending_deliveries,
+	})
+	# No error handling on a failed request() call itself, no response
+	# handler — a dropped batch just means those deliveries don't count
+	# server-side, same acceptable-loss reasoning as _start_run_ping.
+	_deliver_http.request(
+		DELIVER_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+	_pending_deliveries.clear()
+
+
 ## Arcade-style, works everywhere (Telegram, a plain browser tab, a local
 ## build), no login (see server/leaderboard/README.md) — fired automatically
 ## the instant the Heart stops (see _on_stopped), not from a button. Name is
@@ -1166,10 +1207,17 @@ func _submit_score() -> void:
 		_lb_http.timeout = HTTP_TIMEOUT
 		add_child(_lb_http)
 		_lb_http.request_completed.connect(_on_lb_request_completed)
+	# `score` rides along for display/debug purposes only — the server now
+	# derives the authoritative score itself from validated_score, built
+	# exclusively from /run/deliver batches plus this call's own `deliveries`
+	# tail (see server/leaderboard/submit.js's handleScore). Whatever's still
+	# buffered since the last periodic flush goes out here instead of one
+	# more round trip.
 	var body := JSON.stringify({
 		"player_id": player_id, "name": player_name, "score": score, "beats": beats,
-		"run_id": _run_id,
+		"run_id": _run_id, "deliveries": _pending_deliveries,
 	})
+	_pending_deliveries.clear()
 	var err := _lb_http.request(
 		LEADERBOARD_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
 	if err != OK:
@@ -2955,6 +3003,11 @@ func _process(delta: float) -> void:
 	if not alive:
 		return
 
+	_deliver_flush_timer += delta
+	if _deliver_flush_timer >= DELIVER_FLUSH_INTERVAL and not _pending_deliveries.is_empty():
+		_deliver_flush_timer = 0.0
+		_flush_deliveries()
+
 	_tick_escalation(delta)
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
@@ -3205,6 +3258,16 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 			# _tick_escalation) — a correct delivery is what actually earns
 			# the schedule the right to move on to the next craving.
 			_current_demand_deliveries += 1
+		if not off_demand and not _harness_active:
+			# Leaderboard anti-cheat round 2: proof of play, not a trusted
+			# score number — see server/leaderboard/submit.js's
+			# handleRunDeliver. Only demand-matching/VOID deliveries actually
+			# move score (see above), so only those get reported; an
+			# off-demand one is already worth ~0 and would just bloat the
+			# batch for nothing. _harness_active skipped same as everywhere
+			# else leaderboard-related — a bot's deliveries are not a real
+			# player's run.
+			_pending_deliveries.append({"kind": kind, "combo": combo, "pot": pot})
 		fuel = clampf(fuel + gain, 0.0, fuel_cap())
 		to.pulse = 1.0
 		Audio.swallow(kind, fuel / fuel_cap(), kind == demand)

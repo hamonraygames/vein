@@ -130,7 +130,7 @@ echo "==> Zipping Lambda code"
 rm -f /tmp/vein-leaderboard-submit.zip
 zip -q -r /tmp/vein-leaderboard-submit.zip submit.js
 
-ENV_VARS="Variables={PLAYERS_TABLE=$PLAYERS_TABLE,META_TABLE=$META_TABLE,RUNS_TABLE=$RUNS_TABLE,MAX_SCORE_RATE=1000,MAX_RUN_SECONDS=1200,MIN_RUN_SECONDS=2,SCORE_GRACE=100}"
+ENV_VARS="Variables={PLAYERS_TABLE=$PLAYERS_TABLE,META_TABLE=$META_TABLE,RUNS_TABLE=$RUNS_TABLE,MAX_SCORE_RATE=1000,MAX_RUN_SECONDS=1200,MIN_RUN_SECONDS=2,SCORE_GRACE=100,RAW_DELIVERY_RATE=60,REFINED_DELIVERY_RATE=15,DELIVERY_COUNT_GRACE=6,MAX_BATCH_WINDOW_SECONDS=60}"
 
 if aws lambda get-function --region "$REGION" --function-name "$FUNCTION_NAME" >/dev/null 2>&1; then
 	echo "==> Updating function $FUNCTION_NAME"
@@ -177,7 +177,7 @@ if [[ -z "$INTEGRATION_ID" || "$INTEGRATION_ID" == "None" ]]; then
 		--payload-format-version "2.0" --query IntegrationId --output text)"
 fi
 
-for route in "POST /score" "POST /name" "POST /rank" "POST /run/start"; do
+for route in "POST /score" "POST /name" "POST /rank" "POST /run/start" "POST /run/deliver"; do
 	ROUTE_EXISTS="$(aws apigatewayv2 get-routes --region "$REGION" --api-id "$API_ID" \
 		--query "Items[?RouteKey=='$route'].RouteId" --output text)"
 	if [[ -z "$ROUTE_EXISTS" || "$ROUTE_EXISTS" == "None" ]]; then
@@ -213,6 +213,12 @@ aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
 	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/run/start" \
 	>/dev/null 2>&1 || true
 
+aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
+	--statement-id "vein-leaderboard-apigw-run-deliver" --action lambda:InvokeFunction \
+	--principal apigateway.amazonaws.com \
+	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/run/deliver" \
+	>/dev/null 2>&1 || true
+
 ENDPOINT="$(aws apigatewayv2 get-api --region "$REGION" --api-id "$API_ID" --query ApiEndpoint --output text)"
-echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank, POST $ENDPOINT/run/start"
-echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL/RANK_URL/RUN_START_URL constants."
+echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank, POST $ENDPOINT/run/start, POST $ENDPOINT/run/deliver"
+echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL/RANK_URL/RUN_START_URL/DELIVER_URL constants."
