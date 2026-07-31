@@ -1,8 +1,9 @@
 # Credits
 
-All audio in VEIN is **real recorded/produced CC0 material** sourced from
-[OpenGameArt](https://opengameart.org). Nothing here is synthesised in-engine —
-that is a deliberate standing constraint on this project, not an accident.
+All audio in VEIN is **real recorded/produced CC0 material**, mostly sourced
+from [OpenGameArt](https://opengameart.org) with the voice lines from
+[Kenney](https://kenney.nl). Nothing here is synthesised in-engine — that is
+a deliberate standing constraint on this project, not an accident.
 
 Every asset below is **CC0 1.0 (public domain dedication)**, which imposes no
 attribution requirement. This file exists anyway: knowing where a sample came
@@ -45,6 +46,22 @@ far from where it was recorded.
 | `audio/corrupt.ogg` | [10 Impact/Shield Blocks](https://opengameart.org/content/10-impactshield-blocks) (`impact.8`) | StarNinjas | CC0 | **in use** |
 | `audio/note_raw.ogg` | [4 Metal Dings/Rings](https://opengameart.org/content/4-metal-dingsrings) (`ding.1`) | StarNinjas | CC0 | unused |
 | `audio/note_refined.ogg` | [4 Metal Dings/Rings](https://opengameart.org/content/4-metal-dingsrings) (`ding.3`) | StarNinjas | CC0 | unused |
+
+## Voice (callouts)
+
+Milestone callouts (see `scripts/callout.gd`) pair a big on-screen text pop
+with an optional voice line. A few generic ones below are real CC0 voice-over
+takes; most of the pool (the funnier, VEIN-specific lines like "juicy" or
+"give me more") has no matching real recording yet and plays text-only until
+someone records them — see `scripts/audio.gd`'s `VOICE` dict for the full
+key list and which ones are still silent.
+
+| File | Source | Author | License | Status |
+|---|---|---|---|---|
+| `audio/voice/new_highscore.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`best`) |
+| `audio/voice/congratulations.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`best`) |
+| `audio/voice/power_up.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`combo`) |
+| `audio/voice/level_up.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`combo`) |
 
 ## Fonts
 

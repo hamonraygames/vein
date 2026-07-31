@@ -121,6 +121,54 @@ body {
 // Safe to run unconditionally: outside Telegram, window.Telegram.WebApp is
 // simply undefined and every call below is guarded.
 (function () {
+	// VEIN starts its background track the instant the scene is ready (see
+	// game.gd's start_run(), called from _ready(), which calls Audio.start())
+	// — before the player has touched anything. Web Audio autoplay policy is
+	// born-suspended until the PAGE has "user activation" from a real
+	// gesture, and normally a browser's own audio-unlock logic grabs that
+	// from the page's first click/touch/key automatically — but this game's
+	// one interaction verb is a DRAG (see VEIN.md), not a tap/click, and on
+	// mobile Safari/Chrome that reliably failed to register as the trusted
+	// gesture autoplay-unlock was waiting for, same failure mode as
+	// Telegram's WebView below. Priming (creating AND actually playing a
+	// silent buffer through) an AudioContext of our own on the EARLIEST raw
+	// touch/pointer/key event — capture phase, before anything else can
+	// intercept or reinterpret it — grants the page that activation
+	// directly; per the Web Audio autoplay spec, any AudioContext created
+	// afterward (including Godot's own, already-suspended one)
+	// starts/resumes unsuspended too.
+	//
+	// Originally scoped to only run inside Telegram's guard below, on the
+	// assumption a plain mobile browser tab already got this for free — that
+	// assumption did not hold on real devices (reported: no sound on mobile
+	// in either a plain browser tab or the Telegram Mini App), so this now
+	// runs unconditionally, Telegram or not. Harmless where it was never
+	// needed: priming an extra silent AudioContext has no audible or visible
+	// effect on a desktop tab where autoplay was never blocked to begin with.
+	var _audioPrimed = false;
+	function _primeAudio() {
+		if (_audioPrimed) {
+			return;
+		}
+		_audioPrimed = true;
+		var Ctx = window.AudioContext || window.webkitAudioContext;
+		if (!Ctx) {
+			return;
+		}
+		var ctx = new Ctx();
+		if (ctx.state === 'suspended') {
+			ctx.resume();
+		}
+		var buffer = ctx.createBuffer(1, 1, 22050);
+		var src = ctx.createBufferSource();
+		src.buffer = buffer;
+		src.connect(ctx.destination);
+		src.start(0);
+	}
+	['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(function (evt) {
+		document.addEventListener(evt, _primeAudio, { capture: true, passive: true });
+	});
+
 	const tg = window.Telegram && window.Telegram.WebApp;
 	if (!tg) {
 		return;
@@ -152,52 +200,6 @@ body {
 	// canvas can be left the wrong size after any Telegram-driven resize.
 	tg.onEvent('viewportChanged', function () {
 		window.dispatchEvent(new Event('resize'));
-	});
-
-	// Silent on Telegram's MOBILE app (iOS/Android's native in-app WebView),
-	// fine on Telegram Desktop's own webview and on a plain browser tab.
-	// VEIN starts its background track the instant the scene is ready (see
-	// game.gd's start_run(), called from _ready(), which calls Audio.start())
-	// — before the player has touched anything. A strict mobile WebView's Web
-	// Audio autoplay policy is born-suspended until the PAGE has "user
-	// activation" from a real gesture, and normally Godot's own web runtime
-	// grabs that from the page's first click/touch/key automatically — but
-	// this game's one interaction verb is a DRAG (see VEIN.md), and
-	// disableVerticalSwipes() above already proves Telegram's native gesture
-	// recognizer intercepts that drag's early touch events on mobile before
-	// they behave like an ordinary page click, which is exactly the kind of
-	// thing that can make a WebView never count it as the trusted gesture
-	// autoplay-unlock is watching for. Priming (creating AND actually
-	// playing a silent buffer through) an AudioContext of our own on the
-	// EARLIEST raw touch/pointer/key event — capture phase, before Telegram
-	// or Godot can intercept or reinterpret it — grants the page that
-	// activation directly; per the Web Audio autoplay spec, any AudioContext
-	// created afterward (including Godot's own, already-suspended one)
-	// starts/resumes unsuspended too. Scoped to inside the Telegram guard
-	// only — the plain web build already works today and this must not
-	// change its audio init path.
-	var _audioPrimed = false;
-	function _primeAudio() {
-		if (_audioPrimed) {
-			return;
-		}
-		_audioPrimed = true;
-		var Ctx = window.AudioContext || window.webkitAudioContext;
-		if (!Ctx) {
-			return;
-		}
-		var ctx = new Ctx();
-		if (ctx.state === 'suspended') {
-			ctx.resume();
-		}
-		var buffer = ctx.createBuffer(1, 1, 22050);
-		var src = ctx.createBufferSource();
-		src.buffer = buffer;
-		src.connect(ctx.destination);
-		src.start(0);
-	}
-	['touchstart', 'touchend', 'pointerdown', 'mousedown', 'keydown'].forEach(function (evt) {
-		document.addEventListener(evt, _primeAudio, { capture: true, passive: true });
 	});
 }());
 		</script>

@@ -23,6 +23,7 @@ boot_splash/use_filter=true
 
 Beat="*res://scripts/beat.gd"
 Audio="*res://scripts/audio.gd"
+Callout="*res://scripts/callout.gd"
 
 [display]
 

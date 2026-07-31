@@ -61,7 +61,11 @@ func _draw() -> void:
 	var col := Palette.SCORE
 	col.a = clampf(0.30 + _swell * 0.34 + _punch * 0.5, 0.0, 1.0)
 	var size := 30 + int(_punch * 9.0)
-	_centred(str(game.score), origin, size, col)
+	# game.score can briefly run negative internally (see game.gd's _pop_gain
+	# — it no longer clamps per-delivery so an early VOID hit's debt is
+	# correctly paid off by later gains, matching the server's own
+	# validated_score accumulator); clamp only here, for display.
+	_centred(str(maxi(0, game.score)), origin, size, col)
 
 
 func _centred(text: String, at: Vector2, size: int, col: Color) -> void:

@@ -443,6 +443,14 @@ const GOOD_WINDOW := 0.22
 const COMBO_GAIN := 0.07
 const COMBO_CAP := 10
 
+## Combo thresholds that can earn a Callout.fire("combo") — see
+## _maybe_combo_callout. Last entry is COMBO_CAP itself, the "GODLIKE" tier.
+const COMBO_CALLOUT_TIERS := [5, 8, COMBO_CAP]
+## Score gap between Callout.fire("milestone") checks — see _pop_gain. Not
+## every crossing actually fires (Callout.fire itself rolls that), this is
+## just how often the roll happens.
+const MILESTONE_CALLOUT_STEP := 250
+
 const SNAP := 48.0             # magnetic radius; imprecise thumbs feel precise
 const LONG_PRESS := 0.32
 const DILATION := 0.3
@@ -624,6 +632,15 @@ var wasted := 0
 ## Consecutive edits made on the heartbeat. This is the mastery layer: elite
 ## play is not just topology, it is surgery in rhythm.
 var combo := 0
+## Index into _COMBO_CALLOUT_TIERS of the highest tier this streak has
+## already fired a Callout for (see _maybe_combo_callout) — reset everywhere
+## combo itself resets to 0, so the next streak can earn them again.
+var _combo_callout_tier := 0
+## Score milestone gate for Callout.fire("milestone") — see _pop_gain.
+var _next_milestone_callout := 0
+## True once this run's score has crossed `best` and fired its one
+## Callout.fire("best") — see _pop_gain.
+var _best_callout_fired := false
 
 ## The shape the Heart wants right now. Drawn inside it — see VNode._draw_demand.
 var demand: int = VNode.Res.RAW
@@ -960,6 +977,9 @@ func start_run(run_seed: int) -> void:
 	corruptions = 0
 	wasted = 0
 	combo = 0
+	_combo_callout_tier = 0
+	_next_milestone_callout = MILESTONE_CALLOUT_STEP
+	_best_callout_fired = false
 	demand = VNode.Res.RAW
 	_unlocked_res = [VNode.Res.RAW]
 	_demand_tier_idx = 0
@@ -1086,7 +1106,7 @@ func _on_stopped(total: int) -> void:
 		best = score
 	_store_save()
 
-	score_label.text = "Score  %s" % _commas(score)
+	score_label.text = "Score  %s" % _commas(maxi(0, score))
 	# The target. Without something to beat, "one more run" has no hook — and
 	# VEIN has no win state to offer instead.
 	if beat_best_this_run:
@@ -2870,6 +2890,7 @@ func _tempo_action() -> bool:
 		Audio.sync_hit(combo, q <= PERFECT_WINDOW)
 		if OS.has_feature("mobile"):
 			Input.vibrate_handheld(30 + combo * 6)
+		_maybe_combo_callout()
 		return true
 
 	# Off-beat costs you the COMBO and nothing else — no fuel, no hurt sound.
@@ -2884,8 +2905,22 @@ func _tempo_action() -> bool:
 	# fuel and a rising combo; miss and you simply don't. Building is never
 	# punished, so a vein is always safe to draw.
 	combo = 0
+	_combo_callout_tier = 0
 	_bad_tempo_flash = 1.0
 	return false
+
+
+## Fires at most once per streak per tier as combo climbs through
+## COMBO_CALLOUT_TIERS — _combo_callout_tier (reset everywhere combo itself
+## resets to 0) tracks the highest tier already fired this streak.
+func _maybe_combo_callout() -> void:
+	if _harness_active:
+		return
+	for i in COMBO_CALLOUT_TIERS.size():
+		if _combo_callout_tier <= i and combo >= COMBO_CALLOUT_TIERS[i]:
+			_combo_callout_tier = i + 1
+			Callout.fire("combo", vein_layer, design_size() * 0.5)
+			return
 
 
 func _tempo_quality() -> float:
@@ -3102,6 +3137,14 @@ func _tick_corruption(delta: float) -> void:
 	# rule as the demand rotation (see pressure()).
 	var spread_time := lerpf(VNode.SPREAD_TIME, SPREAD_TIME_LATE, exert)
 	spread_time = maxf(SPREAD_TIME_FLOOR, spread_time - maxf(pressure() - 1.0, 0.0) * 0.8)
+	# A corrupted node still wired to the Heart is already being punished the
+	# ordinary way — its own VOID buffer flows downhill and poisons the Heart
+	# directly every beat (see VNode._emit/_push_from_nodes). Cut its Heart
+	# vein and that outlet is gone, so it turns on whatever it is STILL wired
+	# to instead, meaner than before — severing only the Heart-side link
+	# (leaving siblings attached) must be worse than cutting the whole limb,
+	# not free of consequence the way it read before this fix.
+	var orphan_spread_time := maxf(SPREAD_TIME_FLOOR, spread_time * 0.5)
 	var airborne := exert >= AIRBORNE_AT
 	var airborne_chance := minf(
 		AIRBORNE_CHANCE_MAX, AIRBORNE_CHANCE + maxf(pressure() - 1.0, 0.0) * 0.1)
@@ -3110,15 +3153,24 @@ func _tick_corruption(delta: float) -> void:
 	for n in nodes:
 		if not n.corrupted:
 			continue
+		var t: float = orphan_spread_time if n.depth < 0 else spread_time
 		n.spread_accum += delta
-		if n.spread_accum < spread_time:
+		if n.spread_accum < t:
 			continue
 		n.spread_accum = 0.0
 
+		# ONE neighbour per firing, not every live-vein neighbour at once — a
+		# hub wired to three or four others used to hard-flip all of them in
+		# the same frame ("very rapidly all become poisonous and die fast").
+		# Picking one at random still eventually takes the whole limb, just
+		# staggered one bite at a time instead of a single instant wipe.
+		var candidates: Array[VNode] = []
 		for v in veins:
 			var o := v.other(n)
 			if o != null and not o.corrupted and o.kind == VNode.Kind.WELL and o not in newly:
-				newly.append(o)
+				candidates.append(o)
+		if not candidates.is_empty():
+			newly.append(candidates[rng.randi() % candidates.size()])
 
 		if airborne and rng.randf() < airborne_chance:
 			var jumped := _nearest_orphan_well(n.position, AIRBORNE_RADIUS)
@@ -3131,6 +3183,12 @@ func _tick_corruption(delta: float) -> void:
 		Audio.play("corrupt", -4.0, 0.62)
 		if OS.has_feature("mobile"):
 			Input.vibrate_handheld(140)
+		# The moment of the "attack" itself, not just the aftermath — a burst
+		# right on the newly-turned node, same vector language _tick_lifecycle
+		# already uses for a collapse.
+		var burst: Node2D = BurstScene.new()
+		vein_layer.add_child(burst)
+		burst.spawn([n.position], [VNode.Res.VOID], rng.randi(), Color(0, 0, 0, 0), exert)
 
 
 func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
@@ -3236,6 +3294,8 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 			_rescue = 1.0
 			if OS.has_feature("mobile"):
 				Input.vibrate_handheld(120)
+			if not _harness_active:
+				Callout.fire("rescue", vein_layer, design_size() * 0.5, true)
 		var gain := float(FUEL_BY_RES.get(kind, 1.0))
 		# A spent tool's poison bites harder than a spent circle's (pot > 1).
 		if kind == VNode.Res.VOID:
@@ -3251,6 +3311,7 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 			gain = WRONG_SHAPE_FUEL
 			wasted += 1
 			combo = 0
+			_combo_callout_tier = 0
 			_bad_tempo_flash = 1.0
 		elif kind == demand and kind != VNode.Res.VOID:
 			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN)
@@ -3364,7 +3425,23 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 	_score_carry -= float(rounded)
 	if rounded == 0:
 		return
-	score = maxi(0, score + rounded)
+	# Deliberately NOT maxi(0, ...)'d here — a VOID/poison hit early in a run
+	# can push the running total below zero, and clamping it back to 0 on the
+	# spot silently forgives that debt instead of making later gains pay it
+	# off, same as the server's own validated_score accumulator does (see
+	# submit.js's handleRunDeliver/handleScore — it only floors once, at
+	# final submission). Clamping every delivery here used to make the
+	# HUD/death-screen number diverge from what the leaderboard actually
+	# recorded. Display sites (score_hud.gd, score_label below) clamp for
+	# show instead.
+	score += rounded
+	if not _harness_active:
+		if score >= _next_milestone_callout:
+			_next_milestone_callout += MILESTONE_CALLOUT_STEP
+			Callout.fire("milestone", vein_layer, design_size() * 0.5)
+		if not _best_callout_fired and score > best:
+			_best_callout_fired = true
+			Callout.fire("best", vein_layer, design_size() * 0.5, true)
 	var col: Color
 	var text: String
 	if kind == VNode.Res.VOID:
