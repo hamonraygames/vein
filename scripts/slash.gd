@@ -4,13 +4,11 @@ extends Node2D
 ## actually crosses gets cut"). The cut itself already worked with no visual
 ## call-out; this is purely the "you just sliced that with a blade" read, so
 ## the gesture teaches itself instead of the player wondering why a line
-## disappeared. Same self-contained, self-freeing pattern as burst.gd/
-## poison_dart.gd — draws in absolute world coordinates, not relative to
-## `position`.
+## disappeared. Same self-contained, self-freeing pattern as burst.gd —
+## draws in absolute world coordinates, not relative to `position`.
 ##
-## A bright core over a wider, dimmer glow, both fading fast — the same
-## two-layer trick poison_dart.gd's head+tail uses to read as motion rather
-## than a static mark.
+## A bright core over a wider, dimmer glow, both fading fast — reads as a
+## flash of motion rather than a static mark.
 
 const LIFE := 0.16
 
