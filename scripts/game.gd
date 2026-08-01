@@ -3190,10 +3190,19 @@ func _tick_corruption(delta: float) -> void:
 		# the same frame ("very rapidly all become poisonous and die fast").
 		# Picking one at random still eventually takes the whole limb, just
 		# staggered one bite at a time instead of a single instant wipe.
+		#
+		# ANY non-Heart neighbour, not just a Well — restricting this to
+		# Kind.WELL meant a corrupted Well whose only live neighbours were
+		# tools (the ordinary case: a Well feeds a Forge/Loom, not another
+		# Well) had zero valid targets and could never attack at all, while a
+		# corrupted TOOL almost always has a Well neighbour and attacked
+		# freely. Reported: "only noncircle shapes... start shooting back at
+		# neighbours... circles just don't." The Heart itself is the one
+		# real exclusion — corruption has no meaning there.
 		var candidates: Array[VNode] = []
 		for v in veins:
 			var o := v.other(n)
-			if o != null and not o.corrupted and o.kind == VNode.Kind.WELL and o not in newly:
+			if o != null and not o.corrupted and o.kind != VNode.Kind.HEART and o not in newly:
 				candidates.append(o)
 		if not candidates.is_empty():
 			var target: VNode = candidates[rng.randi() % candidates.size()]
