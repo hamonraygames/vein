@@ -422,14 +422,33 @@ const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
 ## rage, not a tightening-over-the-run threat, so it does not scale with
 ## intensity or pressure the way those do.
 const ORPHAN_SPREAD_TIME := 0.4
-## Hard ceiling on how many nodes _tick_corruption can turn in a single
-## call, no matter what. A circuit breaker, not a tuning knob — the airborne
-## fix above (see _tick_corruption) addresses the actual runaway feedback
-## loop a real report traced to (rage spread + airborne jump + the
-## no-debounce same-family respawn all feeding each other, "the whole
-## screen suddenly went poisonous" and the phone got hot), but this caps the
-## worst case regardless of whatever interaction finds the next way in.
+## Hard ceiling on how many nodes _tick_corruption can turn INSTANTLY in a
+## single call — the airborne-jump path only now (vein-adjacency spread
+## resolves through the deferred _start_poison_burst instead, capped
+## separately by MAX_PENDING_POISON_BURSTS below). A circuit breaker, not a
+## tuning knob — the airborne fix in _tick_corruption addresses the actual
+## runaway feedback loop a real report traced to (rage spread + airborne
+## jump + the no-debounce same-family respawn all feeding each other, "the
+## whole screen suddenly went poisonous" and the phone got hot), but this
+## caps the worst case regardless of whatever interaction finds the next
+## way in.
 const MAX_CORRUPTIONS_PER_TICK := 6
+## A raging node's attack on a neighbour — see _start_poison_burst. Multiple
+## fast darts instead of one instant one, both because it reads as an actual
+## attack landing rather than a silent flip, and because it slows the
+## overall rage cascade down slightly (playtest: one dart killing instantly
+## made it feel faster than intended even after ORPHAN_SPREAD_TIME/
+## MAX_CORRUPTIONS_PER_TICK above were already tuned down).
+const RAGE_BURST_COUNT := 3
+const RAGE_BURST_GAP := 0.12
+## Mirrors poison_dart.gd's own TRAVEL_TIME — duplicated rather than read
+## off PoisonDartScene directly so this stays a plain, easily-verified
+## constant; keep both in sync if either changes.
+const RAGE_DART_TRAVEL_TIME := 0.22
+## How many targets can be mid-burst (see _start_poison_burst) at once — a
+## second circuit breaker alongside MAX_CORRUPTIONS_PER_TICK, this time for
+## the deferred/timer-based path rather than the same-frame one.
+const MAX_PENDING_POISON_BURSTS := 6
 
 ## How fast a tool spends its reserve per smelt, at intensity 0 — see
 ## VNode.depletion_rate. Playtest: a Forge could go necrotic within the
@@ -634,6 +653,10 @@ var dropped := 0
 var poisoned := 0
 ## Wells that ran dry and turned this run.
 var corruptions := 0
+## Nodes currently mid-burst as a poison-rage target (see
+## _start_poison_burst) — excluded from being picked as a NEW target so two
+## attackers never pile separate bursts onto the same node.
+var _poison_pending := {}
 ## Wells withered from neglect, and rot collapsed outright. Both remove the
 ## node itself, so `nodes` undercounts everything that ever appeared once
 ## either of these fires — these are the cumulative truth the probe reads
@@ -992,6 +1015,7 @@ func start_run(run_seed: int) -> void:
 	spawned_wells = 0
 	poisoned = 0
 	corruptions = 0
+	_poison_pending.clear()
 	wasted = 0
 	combo = 0
 	_combo_callout_tier = 0
@@ -3170,12 +3194,10 @@ func _tick_corruption(delta: float) -> void:
 	var airborne_chance := minf(
 		AIRBORNE_CHANCE_MAX, AIRBORNE_CHANCE + maxf(pressure() - 1.0, 0.0) * 0.1)
 
+	# Airborne-jump targets only — those still corrupt instantly (see below),
+	# vein-adjacency targets now go through _start_poison_burst instead (see
+	# its own comment for why a single instant dart was replaced).
 	var newly: Array[VNode] = []
-	# Which node targeted which — vein-adjacency spread only (an airborne
-	# jump leaps to a Well with no vein at all, so there is no line to draw a
-	# dart along). Keyed by the target, since each target is only ever
-	# claimed once per tick (the `o not in newly` check below).
-	var attacker_of := {}
 	for n in nodes:
 		if not n.corrupted:
 			continue
@@ -3198,16 +3220,18 @@ func _tick_corruption(delta: float) -> void:
 		# corrupted TOOL almost always has a Well neighbour and attacked
 		# freely. Reported: "only noncircle shapes... start shooting back at
 		# neighbours... circles just don't." The Heart itself is the one
-		# real exclusion — corruption has no meaning there.
+		# real exclusion — corruption has no meaning there. Also excludes
+		# anything already mid-burst (_poison_pending) so two attackers can't
+		# both pile a burst onto the same target.
 		var candidates: Array[VNode] = []
 		for v in veins:
 			var o := v.other(n)
-			if o != null and not o.corrupted and o.kind != VNode.Kind.HEART and o not in newly:
+			if o != null and not o.corrupted and o.kind != VNode.Kind.HEART \
+					and not _poison_pending.has(o) and o not in newly:
 				candidates.append(o)
-		if not candidates.is_empty():
+		if not candidates.is_empty() and _poison_pending.size() < MAX_PENDING_POISON_BURSTS:
 			var target: VNode = candidates[rng.randi() % candidates.size()]
-			newly.append(target)
-			attacker_of[target] = n
+			_start_poison_burst(n, target)
 
 		# Airborne is a slow, occasional "roaming blight" (see the file
 		# comment), gated to the ORIGINAL spread_time cadence only — NOT the
@@ -3223,24 +3247,13 @@ func _tick_corruption(delta: float) -> void:
 		# intense-looking one.
 		if n.depth >= 0 and airborne and rng.randf() < airborne_chance:
 			var jumped := _nearest_orphan_well(n.position, AIRBORNE_RADIUS)
-			if jumped != null and jumped not in newly:
+			if jumped != null and jumped not in newly and not _poison_pending.has(jumped):
 				newly.append(jumped)
 
 		if newly.size() >= MAX_CORRUPTIONS_PER_TICK:
 			break
 
 	for n in newly:
-		# The dart is purely cosmetic and fired BEFORE n.corrupt() flips its
-		# visible state, so the strike still reads as "something hit this"
-		# even though the dart itself takes a couple frames to actually
-		# arrive — a same-tick dart is a large improvement over no visible
-		# attack at all, and waiting for real flight time to land the hit
-		# would need a deferred corrupt() this codebase has no precedent for.
-		if attacker_of.has(n):
-			var attacker: VNode = attacker_of[n]
-			var dart: Node2D = PoisonDartScene.new()
-			vein_layer.add_child(dart)
-			dart.spawn(attacker.position, n.position)
 		n.corrupt()
 		corruptions += 1
 		Audio.play("corrupt", -4.0, 0.62)
@@ -3252,6 +3265,45 @@ func _tick_corruption(delta: float) -> void:
 		var burst: Node2D = BurstScene.new()
 		vein_layer.add_child(burst)
 		burst.spawn([n.position], [VNode.Res.VOID], rng.randi(), Color(0, 0, 0, 0), exert)
+
+
+## A raging node's vein-adjacency attack — RAGE_BURST_COUNT fast darts
+## (RAGE_BURST_GAP apart) instead of one instant dart that killed the target
+## the same frame it was picked. Playtest: "it just kills them with one
+## poisonous dot... send more dots, like a burst, and after two-three fast
+## dots they die" — one dart reading as an instant flip lost both the sense
+## of an actual attack landing AND made the whole rage cascade feel faster
+## than intended. `target` is marked _poison_pending for the whole burst so
+## no second attacker can pile another burst onto it in the meantime (see
+## the candidate filter in _tick_corruption above), and every deferred step
+## re-checks is_instance_valid + not already corrupted, since a corrupted
+## node can still be cut, collapse, or (rarely) get caught by the OTHER
+## spread path (airborne) before its own burst finishes.
+func _start_poison_burst(attacker: VNode, target: VNode) -> void:
+	_poison_pending[target] = true
+	for i in RAGE_BURST_COUNT:
+		get_tree().create_timer(i * RAGE_BURST_GAP).timeout.connect(func() -> void:
+			if not is_instance_valid(attacker) or not is_instance_valid(target) or target.corrupted:
+				return
+			var dart: Node2D = PoisonDartScene.new()
+			vein_layer.add_child(dart)
+			dart.spawn(attacker.position, target.position)
+		)
+
+	var total := (RAGE_BURST_COUNT - 1) * RAGE_BURST_GAP + RAGE_DART_TRAVEL_TIME
+	get_tree().create_timer(total).timeout.connect(func() -> void:
+		_poison_pending.erase(target)
+		if not is_instance_valid(target) or target.corrupted:
+			return
+		target.corrupt()
+		corruptions += 1
+		Audio.play("corrupt", -4.0, 0.62)
+		if OS.has_feature("mobile"):
+			Input.vibrate_handheld(140)
+		var burst: Node2D = BurstScene.new()
+		vein_layer.add_child(burst)
+		burst.spawn([target.position], [VNode.Res.VOID], rng.randi(), Color(0, 0, 0, 0), intensity())
+	)
 
 
 func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
