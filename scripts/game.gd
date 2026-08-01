@@ -422,6 +422,14 @@ const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
 ## rage, not a tightening-over-the-run threat, so it does not scale with
 ## intensity or pressure the way those do.
 const ORPHAN_SPREAD_TIME := 0.4
+## Hard ceiling on how many nodes _tick_corruption can turn in a single
+## call, no matter what. A circuit breaker, not a tuning knob — the airborne
+## fix above (see _tick_corruption) addresses the actual runaway feedback
+## loop a real report traced to (rage spread + airborne jump + the
+## no-debounce same-family respawn all feeding each other, "the whole
+## screen suddenly went poisonous" and the phone got hot), but this caps the
+## worst case regardless of whatever interaction finds the next way in.
+const MAX_CORRUPTIONS_PER_TICK := 6
 
 ## How fast a tool spends its reserve per smelt, at intensity 0 — see
 ## VNode.depletion_rate. Playtest: a Forge could go necrotic within the
@@ -3192,10 +3200,25 @@ func _tick_corruption(delta: float) -> void:
 			newly.append(target)
 			attacker_of[target] = n
 
-		if airborne and rng.randf() < airborne_chance:
+		# Airborne is a slow, occasional "roaming blight" (see the file
+		# comment), gated to the ORIGINAL spread_time cadence only — NOT the
+		# fast ORPHAN_SPREAD_TIME rage path. Letting it roll on the fast path
+		# too was a real bug: every orphaned node in a rage cluster rolled
+		# independently every 0.4s, so a cluster of even a handful of nodes
+		# had a near-certain chance SOME jump would land almost every tick —
+		# and since a jump can land on another node that is ALSO orphaned
+		# (post-rage, a big chunk of the board can be), that node immediately
+		# joined the fast path too. Confirmed report: "the whole screen
+		# suddenly went poisonous" and the phone got hot from the resulting
+		# spawn/VFX storm — a real runaway feedback loop, not just an
+		# intense-looking one.
+		if n.depth >= 0 and airborne and rng.randf() < airborne_chance:
 			var jumped := _nearest_orphan_well(n.position, AIRBORNE_RADIUS)
 			if jumped != null and jumped not in newly:
 				newly.append(jumped)
+
+		if newly.size() >= MAX_CORRUPTIONS_PER_TICK:
+			break
 
 	for n in newly:
 		# The dart is purely cosmetic and fired BEFORE n.corrupt() flips its
