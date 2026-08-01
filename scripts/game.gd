@@ -17,6 +17,7 @@ const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
 const PoisonDartScene := preload("res://scripts/poison_dart.gd")
+const SlashScene := preload("res://scripts/slash.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
@@ -422,6 +423,10 @@ const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
 ## rage, not a tightening-over-the-run threat, so it does not scale with
 ## intensity or pressure the way those do.
 const ORPHAN_SPREAD_TIME := 0.4
+## Minimum time a node must have been corrupted before it can attack at
+## all, connected or not — see _tick_corruption. The actual "notice this
+## turned and decide what to do about it" window.
+const MIN_RAGE_GRACE := 1.2
 ## Hard ceiling on how many nodes _tick_corruption can turn INSTANTLY in a
 ## single call — the airborne-jump path only now (vein-adjacency spread
 ## resolves through the deferred _start_poison_burst instead, capped
@@ -3201,6 +3206,17 @@ func _tick_corruption(delta: float) -> void:
 	for n in nodes:
 		if not n.corrupted:
 			continue
+		# A hard floor under BOTH timers below — without it, a node that sat
+		# corrupted-but-connected for a couple of seconds (spread_accum
+		# quietly climbing toward the slow spread_time threshold) could have
+		# its accumulated timer already past the much shorter
+		# ORPHAN_SPREAD_TIME the instant it got disconnected, so the very
+		# act of cutting it loose triggered an immediate attack with zero
+		# warning. Playtest: "when they got poisonous it should give you a
+		# little buffer to disconnect it — right now it instantly starts
+		# shooting at neighbours, doesn't even let you disconnect it."
+		if n.corrupt_age < MIN_RAGE_GRACE:
+			continue
 		var t: float = ORPHAN_SPREAD_TIME if n.depth < 0 else spread_time
 		n.spread_accum += delta
 		if n.spread_accum < t:
@@ -3224,14 +3240,19 @@ func _tick_corruption(delta: float) -> void:
 		# anything already mid-burst (_poison_pending) so two attackers can't
 		# both pile a burst onto the same target.
 		var candidates: Array[VNode] = []
+		# Which live vein actually connects to each candidate — the burst
+		# below travels the poison along that vein's own curve rather than a
+		# straight line, matching how every ordinary resource dot moves.
+		var candidate_vein := {}
 		for v in veins:
 			var o := v.other(n)
 			if o != null and not o.corrupted and o.kind != VNode.Kind.HEART \
 					and not _poison_pending.has(o) and o not in newly:
 				candidates.append(o)
+				candidate_vein[o] = v
 		if not candidates.is_empty() and _poison_pending.size() < MAX_PENDING_POISON_BURSTS:
 			var target: VNode = candidates[rng.randi() % candidates.size()]
-			_start_poison_burst(n, target)
+			_start_poison_burst(n, target, candidate_vein[target])
 
 		# Airborne is a slow, occasional "roaming blight" (see the file
 		# comment), gated to the ORIGINAL spread_time cadence only — NOT the
@@ -3279,15 +3300,23 @@ func _tick_corruption(delta: float) -> void:
 ## re-checks is_instance_valid + not already corrupted, since a corrupted
 ## node can still be cut, collapse, or (rarely) get caught by the OTHER
 ## spread path (airborne) before its own burst finishes.
-func _start_poison_burst(attacker: VNode, target: VNode) -> void:
+##
+## `vein` is the live connection between them — the darts ride its actual
+## curve (see poison_dart.gd), same as every ordinary resource dot, not a
+## straight line cutting across the board like a shot. Playtest: "it
+## shouldn't be like a gun... it should shoot the poison through the veins
+## just like normal poison dots." A vein can still be cut out from under an
+## in-flight burst, so this is re-validated alongside attacker/target below.
+func _start_poison_burst(attacker: VNode, target: VNode, vein: Vein) -> void:
 	_poison_pending[target] = true
 	for i in RAGE_BURST_COUNT:
 		get_tree().create_timer(i * RAGE_BURST_GAP).timeout.connect(func() -> void:
-			if not is_instance_valid(attacker) or not is_instance_valid(target) or target.corrupted:
+			if not is_instance_valid(attacker) or not is_instance_valid(target) \
+					or not is_instance_valid(vein) or target.corrupted:
 				return
 			var dart: Node2D = PoisonDartScene.new()
 			vein_layer.add_child(dart)
-			dart.spawn(attacker.position, target.position)
+			dart.spawn(vein, vein.a == attacker)
 		)
 
 	var total := (RAGE_BURST_COUNT - 1) * RAGE_BURST_GAP + RAGE_DART_TRAVEL_TIME
@@ -3622,11 +3651,20 @@ func _vein_at(p: Vector2) -> Vein:
 func _slice_check(from: Vector2, to: Vector2) -> void:
 	if from == to:
 		return
+	var cut_any := false
 	for v in veins.duplicate():
 		for i in v.pts.size() - 1:
 			if Geometry2D.segment_intersects_segment(from, to, v.pts[i], v.pts[i + 1]) != null:
 				_remove_vein(v, true)
+				cut_any = true
 				break
+	# The knife-slash read (see slash.gd) — one per swipe segment that
+	# actually connected, not per vein, so criss-crossing two veins in the
+	# same frame draws a single clean streak instead of overlapping copies.
+	if cut_any:
+		var slash: Node2D = SlashScene.new()
+		vein_layer.add_child(slash)
+		slash.spawn(from, to)
 
 
 func _unhandled_input(event: InputEvent) -> void:
