@@ -415,6 +415,12 @@ const AIRBORNE_AT := 0.38         ## intensity floor before blight can jump gaps
 const AIRBORNE_RADIUS := 190.0
 const AIRBORNE_CHANCE := 0.35     ## per spread-tick, once AIRBORNE_AT is crossed
 const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
+## How fast a corrupted node with no path to the Heart spreads to whichever
+## neighbours it is still wired to — see _tick_corruption. Flat and fast,
+## unlike SPREAD_TIME/SPREAD_TIME_LATE above: this is meant to read as a
+## rage, not a tightening-over-the-run threat, so it does not scale with
+## intensity or pressure the way those do.
+const ORPHAN_SPREAD_TIME := 0.4
 
 ## How fast a tool spends its reserve per smelt, at intensity 0 — see
 ## VNode.depletion_rate. Playtest: a Forge could go necrotic within the
@@ -3140,11 +3146,15 @@ func _tick_corruption(delta: float) -> void:
 	# A corrupted node still wired to the Heart is already being punished the
 	# ordinary way — its own VOID buffer flows downhill and poisons the Heart
 	# directly every beat (see VNode._emit/_push_from_nodes). Cut its Heart
-	# vein and that outlet is gone, so it turns on whatever it is STILL wired
-	# to instead, meaner than before — severing only the Heart-side link
-	# (leaving siblings attached) must be worse than cutting the whole limb,
-	# not free of consequence the way it read before this fix.
-	var orphan_spread_time := maxf(SPREAD_TIME_FLOOR, spread_time * 0.5)
+	# vein and that outlet is gone: it goes into a RAGE instead, tearing
+	# through whatever it is still wired to at ORPHAN_SPREAD_TIME — a flat,
+	# fast interval, deliberately NOT scaled down from spread_time (half of a
+	# slow number is still slow; "a save when the heart is nearly gone must
+	# feel enormous" applies just as hard the other direction). One neighbour
+	# per firing still (see below), but each freshly-turned neighbour is
+	# itself orphaned and starts its own rage clock immediately, so a limb of
+	# several nodes chain-reacts through the whole thing in a couple of
+	# seconds, not a slow bleed one node at a time.
 	var airborne := exert >= AIRBORNE_AT
 	var airborne_chance := minf(
 		AIRBORNE_CHANCE_MAX, AIRBORNE_CHANCE + maxf(pressure() - 1.0, 0.0) * 0.1)
@@ -3153,7 +3163,7 @@ func _tick_corruption(delta: float) -> void:
 	for n in nodes:
 		if not n.corrupted:
 			continue
-		var t: float = orphan_spread_time if n.depth < 0 else spread_time
+		var t: float = ORPHAN_SPREAD_TIME if n.depth < 0 else spread_time
 		n.spread_accum += delta
 		if n.spread_accum < t:
 			continue
