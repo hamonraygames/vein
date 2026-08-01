@@ -16,6 +16,7 @@ const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
+const PoisonDartScene := preload("res://scripts/poison_dart.gd")
 const SlashScene := preload("res://scripts/slash.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
@@ -441,12 +442,10 @@ const MAX_CORRUPTIONS_PER_TICK := 6
 ## MAX_CORRUPTIONS_PER_TICK above were already tuned down).
 const RAGE_BURST_COUNT := 3
 const RAGE_BURST_GAP := 0.12
-## How long after the LAST hit before the target actually dies — deliberately
-## NOT tied to how long a real injected dot takes to physically travel the
-## vein (that varies with the vein's own length via Vein.SPEED); this is
-## purely pacing for the kill itself, independent of whichever hits' dots
-## happened to be visible (see _start_poison_burst — a dot only renders when
-## the attacker is that vein's actual flow source).
+## Mirrors poison_dart.gd's own TRAVEL_TIME — duplicated rather than read
+## off PoisonDartScene directly so this stays a plain, easily-verified
+## constant; keep both in sync if either changes. How long after the LAST
+## dart is fired before the target actually dies.
 const RAGE_DART_TRAVEL_TIME := 0.22
 ## How many targets can be mid-burst (see _start_poison_burst) at once — a
 ## second circuit breaker alongside MAX_CORRUPTIONS_PER_TICK, this time for
@@ -3296,23 +3295,21 @@ func _tick_corruption(delta: float) -> void:
 ## of an actual attack landing AND made the whole rage cascade feel faster
 ## than intended.
 ##
-## `vein` is the live connection between them. Each hit is a REAL VOID dot
-## injected onto that vein (Vein.inject, the exact function every ordinary
-## delivery already uses) — it rides the vein's own curve and renders
-## through Vein._draw_poison_dot, the same writhing violet dot every other
-## poisoned delivery in the game already uses. Playtest: "don't invent a new
-## way of hitting neighbours — use the veins, just like normal poison dots."
-## Only fires when `attacker` is that vein's actual flow source (dots can
-## only ever travel source->sink, see vein.gd's own sample()/advance()); the
-## rarer reverse-direction case (attacking back toward the Well-ward side of
-## an orphaned island) skips the visual rather than inventing a way around
-## that constraint — the kill itself is NOT gated on the dot, so it still
-## lands on schedule either way. `target` is marked _poison_pending for the
-## whole burst so no second attacker can pile another burst onto it in the
-## meantime (see the candidate loop in _tick_corruption above), and the
-## resolve step re-checks is_instance_valid + not already corrupted, since a
-## corrupted node can still be cut, collapse, or get caught by the OTHER
-## spread path (airborne) before its own burst finishes.
+## `vein` is the live connection between them — the darts ride its actual
+## curve (see poison_dart.gd), not a straight line cutting across the board.
+## A real Vein.inject() dot was tried here instead and reverted: it only
+## travels a vein's fixed flow direction, and only resolves anything once it
+## arrives through the ordinary delivery pipeline, which just treats VOID as
+## harmless pass-through for a non-Heart destination — so the visible dot
+## and the actual kill ended up decoupled and unreliable, which is exactly
+## what broke. poison_dart.gd is purely cosmetic and drawn to match vein.gd's
+## own _draw_poison_dot; this function alone decides who actually dies and
+## when, so the two can never disagree. `target` is marked _poison_pending
+## for the whole burst so no second attacker can pile another burst onto it
+## in the meantime (see the candidate loop in _tick_corruption above), and
+## the resolve step re-checks is_instance_valid + not already corrupted,
+## since a corrupted node can still be cut, collapse, or get caught by the
+## OTHER spread path (airborne) before its own burst finishes.
 func _start_poison_burst(attacker: VNode, target: VNode, vein: Vein) -> void:
 	_poison_pending[target] = true
 	for i in RAGE_BURST_COUNT:
@@ -3320,8 +3317,9 @@ func _start_poison_burst(attacker: VNode, target: VNode, vein: Vein) -> void:
 			if not is_instance_valid(attacker) or not is_instance_valid(target) \
 					or not is_instance_valid(vein) or target.corrupted:
 				return
-			if vein.source() == attacker:
-				vein.inject(VNode.Res.VOID, attacker.poison_pot)
+			var dart: Node2D = PoisonDartScene.new()
+			vein_layer.add_child(dart)
+			dart.spawn(vein, vein.a == attacker)
 		)
 
 	var total := (RAGE_BURST_COUNT - 1) * RAGE_BURST_GAP + RAGE_DART_TRAVEL_TIME
