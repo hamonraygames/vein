@@ -423,10 +423,6 @@ const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
 ## rage, not a tightening-over-the-run threat, so it does not scale with
 ## intensity or pressure the way those do.
 const ORPHAN_SPREAD_TIME := 0.4
-## Minimum time a node must have been corrupted before it can attack at
-## all, connected or not — see _tick_corruption. The actual "notice this
-## turned and decide what to do about it" window.
-const MIN_RAGE_GRACE := 1.2
 ## Hard ceiling on how many nodes _tick_corruption can turn INSTANTLY in a
 ## single call — the airborne-jump path only now (vein-adjacency spread
 ## resolves through the deferred _start_poison_burst instead, capped
@@ -3206,16 +3202,22 @@ func _tick_corruption(delta: float) -> void:
 	for n in nodes:
 		if not n.corrupted:
 			continue
-		# A hard floor under BOTH timers below — without it, a node that sat
+		# A hard floor under BOTH timers below, reusing VNode.CORRUPT_PERIOD
+		# (the cadence a corrupted node already emits its own poison at)
+		# rather than a separate made-up number — the node is already
+		# "actually dangerous" the moment it produces its first poison dot,
+		# so that is also the earliest it makes sense for it to turn on its
+		# neighbours. Without this floor, a node that sat
 		# corrupted-but-connected for a couple of seconds (spread_accum
 		# quietly climbing toward the slow spread_time threshold) could have
 		# its accumulated timer already past the much shorter
 		# ORPHAN_SPREAD_TIME the instant it got disconnected, so the very
 		# act of cutting it loose triggered an immediate attack with zero
 		# warning. Playtest: "when they got poisonous it should give you a
-		# little buffer to disconnect it — right now it instantly starts
-		# shooting at neighbours, doesn't even let you disconnect it."
-		if n.corrupt_age < MIN_RAGE_GRACE:
+		# little buffer to disconnect it, just like before when it first
+		# produces a poisonous dot — I don't want a lot of time, but not
+		# instant either."
+		if n.corrupt_age < VNode.CORRUPT_PERIOD:
 			continue
 		var t: float = ORPHAN_SPREAD_TIME if n.depth < 0 else spread_time
 		n.spread_accum += delta
