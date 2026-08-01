@@ -16,6 +16,7 @@ const VeinScene := preload("res://scripts/vein.gd")
 const BurstScene := preload("res://scripts/burst.gd")
 const FloatTextScene := preload("res://scripts/float_text.gd")
 const ShatterScene := preload("res://scripts/shatter.gd")
+const PoisonDartScene := preload("res://scripts/poison_dart.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
@@ -450,12 +451,14 @@ const COMBO_GAIN := 0.07
 const COMBO_CAP := 10
 
 ## Combo thresholds that can earn a Callout.fire("combo") — see
-## _maybe_combo_callout. Last entry is COMBO_CAP itself, the "GODLIKE" tier.
+## _maybe_combo_callout. Last entry is COMBO_CAP itself, the max-combo tier.
 const COMBO_CALLOUT_TIERS := [5, 8, COMBO_CAP]
 ## Score gap between Callout.fire("milestone") checks — see _pop_gain. Not
 ## every crossing actually fires (Callout.fire itself rolls that), this is
-## just how often the roll happens.
-const MILESTONE_CALLOUT_STEP := 250
+## just how often the roll happens. Widened from 250 after playtest feedback
+## that callouts overall were firing far too often — see callout.gd's own
+## MIN_GAP/FIRE_CHANCE for the other half of that fix.
+const MILESTONE_CALLOUT_STEP := 500
 
 const SNAP := 48.0             # magnetic radius; imprecise thumbs feel precise
 const LONG_PRESS := 0.32
@@ -3160,6 +3163,11 @@ func _tick_corruption(delta: float) -> void:
 		AIRBORNE_CHANCE_MAX, AIRBORNE_CHANCE + maxf(pressure() - 1.0, 0.0) * 0.1)
 
 	var newly: Array[VNode] = []
+	# Which node targeted which — vein-adjacency spread only (an airborne
+	# jump leaps to a Well with no vein at all, so there is no line to draw a
+	# dart along). Keyed by the target, since each target is only ever
+	# claimed once per tick (the `o not in newly` check below).
+	var attacker_of := {}
 	for n in nodes:
 		if not n.corrupted:
 			continue
@@ -3180,7 +3188,9 @@ func _tick_corruption(delta: float) -> void:
 			if o != null and not o.corrupted and o.kind == VNode.Kind.WELL and o not in newly:
 				candidates.append(o)
 		if not candidates.is_empty():
-			newly.append(candidates[rng.randi() % candidates.size()])
+			var target: VNode = candidates[rng.randi() % candidates.size()]
+			newly.append(target)
+			attacker_of[target] = n
 
 		if airborne and rng.randf() < airborne_chance:
 			var jumped := _nearest_orphan_well(n.position, AIRBORNE_RADIUS)
@@ -3188,6 +3198,17 @@ func _tick_corruption(delta: float) -> void:
 				newly.append(jumped)
 
 	for n in newly:
+		# The dart is purely cosmetic and fired BEFORE n.corrupt() flips its
+		# visible state, so the strike still reads as "something hit this"
+		# even though the dart itself takes a couple frames to actually
+		# arrive — a same-tick dart is a large improvement over no visible
+		# attack at all, and waiting for real flight time to land the hit
+		# would need a deferred corrupt() this codebase has no precedent for.
+		if attacker_of.has(n):
+			var attacker: VNode = attacker_of[n]
+			var dart: Node2D = PoisonDartScene.new()
+			vein_layer.add_child(dart)
+			dart.spawn(attacker.position, n.position)
 		n.corrupt()
 		corruptions += 1
 		Audio.play("corrupt", -4.0, 0.62)

@@ -96,6 +96,13 @@ const COLLAPSE_TIME := 8.0
 ## Fraction of COLLAPSE_TIME at which visible fading begins — the collapse
 ## equivalent of WITHER_WARN_AT below.
 const COLLAPSE_FADE_AT := 0.6
+## A corrupted node with no path to the Heart (depth < 0) is no longer
+## poisoning anything but its own remaining neighbours (see game.gd's
+## _tick_corruption rage spread) — once it is done raging there is nothing
+## left for it to threaten, so it collapses far faster than a Heart-
+## connected corpse, which earns the long COLLAPSE_TIME above because it is
+## still actively poisoning the Heart every beat.
+const ORPHAN_COLLAPSE_TIME := 1.6
 
 ## An orphaned Well (nothing downstream will ever take what it makes) that sits
 ## unconnected this long withers and vanishes. Without this the board only ever
@@ -314,7 +321,10 @@ func _process(delta: float) -> void:
 
 ## 0..1 toward collapse. Game reads this to know when to remove the node.
 func collapse_ratio() -> float:
-	return clampf(corrupt_age / COLLAPSE_TIME, 0.0, 1.0) if corrupted else 0.0
+	if not corrupted:
+		return 0.0
+	var span := ORPHAN_COLLAPSE_TIME if depth < 0 else COLLAPSE_TIME
+	return clampf(corrupt_age / span, 0.0, 1.0)
 
 
 ## 0..1 toward withering away from neglect.
