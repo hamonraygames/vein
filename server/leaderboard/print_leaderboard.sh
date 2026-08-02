@@ -69,27 +69,32 @@ now_epoch="$(date +%s)"
 
 echo
 echo "==================== VEIN LEADERBOARD ===================="
-printf "%-5s %-22s %10s %7s  %s\n" "RANK" "NAME" "SCORE" "PLAYS" "LAST BEST"
-echo "------------------------------------------------------------"
+printf "%-5s %-22s %10s %7s  %-24s  %s\n" "RANK" "NAME" "SCORE" "PLAYS" "LAST BEST" "LAST PLAYED"
+echo "--------------------------------------------------------------------------------------"
 
 sorted_json="$(jq -c '[.[] | select(.has_played != false)]
 	| sort_by(-(.best_score // 0), .name // "")' <<<"$players_json")"
 
-jq -r 'to_entries[] | "\(.key+1)\t\(.value.name // "?")\t\(.value.best_score // 0)\t\(.value.total_runs // 0)\t\(.value.best_score_at // "-")"' \
+# last_played_at moves on EVERY /score submission, best or not (see
+# submit.js's handleScore) — best_score_at only ever moves on an actual new
+# best, so a player who's played 50 times without beating their first run
+# would otherwise look stale since day one. Rows written before
+# last_played_at existed fall back to "-", same as best_score_at already did.
+jq -r 'to_entries[] | "\(.key+1)\t\(.value.name // "?")\t\(.value.best_score // 0)\t\(.value.total_runs // 0)\t\(.value.best_score_at // "-")\t\(.value.last_played_at // "-")"' \
 	<<<"$sorted_json" \
-	| while IFS=$'\t' read -r rank name score plays at; do
-		printf "%-5s %-22s %10s %7s  %s\n" "$rank" "$name" "$score" "$plays" "$at"
+	| while IFS=$'\t' read -r rank name score plays at played; do
+		printf "%-5s %-22s %10s %7s  %-24s  %s\n" "$rank" "$name" "$score" "$plays" "$at" "$played"
 	done
 
 unranked_json="$(jq -c '[.[] | select(.has_played == false)] | sort_by(.name // "")' <<<"$players_json")"
 unranked_count="$(jq 'length' <<<"$unranked_json")"
 
 if [[ "$unranked_count" -gt 0 ]]; then
-	echo "------------------------------------------------------------"
+	echo "--------------------------------------------------------------------------------------"
 	echo "(claimed a name, never finished a run — unranked)"
 	jq -r '.[] | .name // "?"' <<<"$unranked_json" \
 		| while IFS= read -r name; do
-			printf "%-5s %-22s %10s %7s  %s\n" "-" "$name" "-" "0" "(no runs yet)"
+			printf "%-5s %-22s %10s %7s  %-24s  %s\n" "-" "$name" "-" "0" "(no runs yet)" "-"
 		done
 fi
 

@@ -567,17 +567,29 @@ async function handleScore(payload) {
 	const priorRank = hasRow ? (Number(existing.Item.last_rank) || 0) : 0;
 	const isNewBest = finalScore > priorBest;
 	const newTotalRuns = priorRuns + 1;
+	// Every /score submission, new best or not — unlike best_score_at (only
+	// ever moves on an actual new best), this is a plain "when did they last
+	// finish a run" readout for print_leaderboard.sh's admin view, so a
+	// player who's played 50 times without beating their first run still
+	// shows up as recently active instead of looking stale since day one.
+	const nowIso = new Date().toISOString();
 
 	if (isNewBest) {
-		await ddb.send(new PutCommand({
+		// UpdateCommand, not a full-item PutCommand — a Put here used to
+		// silently wipe every field not listed (recovery_code included, once
+		// that shipped) on the exact players most likely to hit this branch:
+		// anyone actively improving their score. UpdateItem creates the row
+		// just as well when it doesn't exist yet (a brand-new player's first
+		// run is always a "new best" against priorBest's -1 default), so
+		// this loses nothing for that case either.
+		await ddb.send(new UpdateCommand({
 			TableName: PLAYERS_TABLE,
-			Item: {
-				player_id: playerId,
-				name,
-				best_score: finalScore,
-				best_score_at: new Date().toISOString(),
-				total_runs: newTotalRuns,
-				has_played: true,
+			Key: { player_id: playerId },
+			UpdateExpression: 'SET best_score = :score, best_score_at = :at, '
+				+ 'total_runs = :runs, #n = :name, has_played = :true, last_played_at = :at',
+			ExpressionAttributeNames: { '#n': 'name' },
+			ExpressionAttributeValues: {
+				':score': finalScore, ':at': nowIso, ':runs': newTotalRuns, ':name': name, ':true': true,
 			},
 		}));
 	} else {
@@ -587,9 +599,11 @@ async function handleScore(payload) {
 		await ddb.send(new UpdateCommand({
 			TableName: PLAYERS_TABLE,
 			Key: { player_id: playerId },
-			UpdateExpression: 'SET total_runs = :runs, #n = :name, has_played = :true',
+			UpdateExpression: 'SET total_runs = :runs, #n = :name, has_played = :true, last_played_at = :at',
 			ExpressionAttributeNames: { '#n': 'name' },
-			ExpressionAttributeValues: { ':runs': newTotalRuns, ':name': name, ':true': true },
+			ExpressionAttributeValues: {
+				':runs': newTotalRuns, ':name': name, ':true': true, ':at': nowIso,
+			},
 		}));
 	}
 
