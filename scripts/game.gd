@@ -3606,7 +3606,15 @@ func _start_poison_dart(target: VNode, vein: Vein, forward: bool) -> void:
 
 	get_tree().create_timer(travel_time).timeout.connect(func() -> void:
 		_poison_pending.erase(target)
-		if not is_instance_valid(target) or target.corrupted:
+		# is_instance_valid(vein) matters here, not just target — this used
+		# to only check the target, so cutting the vein mid-attack made the
+		# dart visually vanish (poison_dart.gd's own _process already checks
+		# vein validity) while the kill fired anyway on schedule regardless.
+		# Playtest: "when a neighbour is not attacked yet and we disconnect
+		# it, it should get disconnected safely... sometimes even though you
+		# disconnect [it], a neighbour got poisoned." Cutting the connection
+		# is exactly what should call off an attack still in flight.
+		if not is_instance_valid(vein) or not is_instance_valid(target) or target.corrupted:
 			return
 		target.corrupt()
 		corruptions += 1
