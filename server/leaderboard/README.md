@@ -8,7 +8,8 @@ matching how the rest of this project ships infra (see `../../deploy_web.sh`).
   `best_score`, `best_score_at`, `total_runs`, `has_played` (false only for a
   row created by a `/name` claim that hasn't finished a run yet — see below),
   `last_rank` (this player's rank as of their own last `/score` submission,
-  used to compute `rankChange` — see below).
+  used to compute `rankChange` — see below), `recovery_code` (set once on
+  the first `/name` claim and never reissued — see `/recover` below).
 - `vein-leaderboard-meta` — a single `totals` item: `total_players`,
   `total_plays`, both plain counters incremented atomically per submission.
 - `vein-leaderboard-runs` — one item per started run: `run_id`, `player_id`,
@@ -192,6 +193,36 @@ Response body:
 ```
 
 `rank` is `0` if this player has never posted a score.
+
+### `POST /recover` — reclaim an existing identity on a new device
+
+There's no login, so a fresh install has no way to know it's the same person
+as an existing `player_id` — this is the one exception, trading a short
+human-typeable secret (shown once after the first successful `/name` claim,
+see `scripts/game.gd`'s `recovery_code`) for the `player_id`/`name` it
+belongs to, so a player can pick up their existing identity instead of
+starting over as a fresh random name. Read-only, same posture as `/rank`: a
+device switch is not a run, so this never bumps `total_runs`/`totalPlayers`.
+
+Request body:
+```json
+{ "recovery_code": "abc12345" }
+```
+
+Response body:
+```json
+{ "ok": true, "player_id": "<the recovered player_id>", "name": "existing-name", "best_score": 1234 }
+```
+
+Unknown/malformed code: `404 { "error": "code_not_found" }` / `400 { "error": "bad_code" }`.
+
+The code itself is generated once, the first time a `player_id` ever claims
+a name (`handleName`'s `if_not_exists` on `recovery_code`), and never
+reissued by a later rename — it's the one field on a player row that
+survives every rename, exactly because it's what ties a player's identity
+together across devices. A row created before this feature existed has no
+`recovery_code` until its next `/name` call (i.e. its next rename); there is
+no backfill for rows that never rename again.
 
 ## Deploying
 

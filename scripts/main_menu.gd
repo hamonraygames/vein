@@ -1,9 +1,11 @@
 extends Control
 ## Landing screen: shown from game.gd's _ready() on every real launch once a
 ## name is set (see there), and reopened from the death screen's Menu button
-## without forcing a replay first. Three entries — Play, Leaderboard, and the
-## current name (tap to rename) — nothing else, by explicit direction: keep
-## it minimal.
+## without forcing a replay first. Four entries — Play, Leaderboard, the
+## current name (tap to rename), and Play Tutorial (same lesson the death
+## screen's own "Replay tutorial" offers, reachable without dying first) —
+## kept in that order so Tutorial reads as the least-reached-for option, not
+## competing with Play for a returning player's eye.
 ##
 ## The Heart itself sits here at its real gameplay position
 ## (game.heart_spawn_pos(), the same call start_run() uses), in silhouette
@@ -37,10 +39,16 @@ var _title: Label
 var _stats_label: Label
 var _play_btn: Button
 var _board_btn: Button
+var _tutorial_btn: Button
+var _code_label: Label
+var _restore_btn: Button
 var _heart: VNode
 
 var _fading := false
 var _fade_t := 0.0
+## Which start_run path the fade-out ends in — see _on_play/_on_tutorial and
+## the fade-completion branch in _process.
+var _pending_tutorial := false
 
 
 func start(g: Node2D, vp: Vector2) -> void:
@@ -115,6 +123,38 @@ func start(g: Node2D, vp: Vector2) -> void:
 	_name_btn.pressed.connect(game._on_open_rename)
 	add_child(_name_btn)
 
+	# Least prominent of the four, by design — the same lesson the death
+	# screen's own "Replay tutorial" button already offers, just reachable
+	# without having to die first.
+	_tutorial_btn = _make_button("Play Tutorial", false)
+	_tutorial_btn.position = Vector2(vp.x * 0.2, vp.y * 0.6 + 202.0)
+	_tutorial_btn.size = Vector2(vp.x * 0.6, 46.0)
+	_tutorial_btn.pressed.connect(_on_tutorial)
+	add_child(_tutorial_btn)
+
+	# No login means no password reset either — this code (see
+	# game.recovery_code / server/leaderboard/README.md's `/recover`
+	# section) is the one thing that lets a player pick this same identity
+	# back up on a different device, so it needs to actually be visible
+	# somewhere a first-timer will see it, not buried behind a rename tap.
+	# Small and muted on purpose — informational, not another action.
+	_code_label = Label.new()
+	_code_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_code_label.add_theme_font_size_override("font_size", 12)
+	_code_label.position = Vector2(0.0, vp.y * 0.6 + 258.0)
+	_code_label.size = Vector2(vp.x, 20.0)
+	add_child(_code_label)
+
+	_restore_btn = Button.new()
+	_restore_btn.text = "Played before? Restore account"
+	_restore_btn.flat = true
+	_restore_btn.add_theme_color_override("font_color", Palette.SCORE)
+	_restore_btn.add_theme_font_size_override("font_size", 13)
+	_restore_btn.position = Vector2(0.0, vp.y * 0.6 + 280.0)
+	_restore_btn.size = Vector2(vp.x, 30.0)
+	_restore_btn.pressed.connect(game._on_open_recover)
+	add_child(_restore_btn)
+
 
 ## Kept live rather than set once — a rename opened from here (see
 ## game._on_open_rename) leaves this menu open underneath it, so the label
@@ -129,6 +169,11 @@ func _process(delta: float) -> void:
 		if _name_btn != null:
 			_name_btn.text = _name_label()
 		_stats_label.text = _stats_text()
+		# Live-read like _name_btn above — picks up the code changing after a
+		# Restore (see game._on_account_recovered) without this menu having
+		# to listen for that separately.
+		_code_label.text = ("Your recovery code: %s" % game.recovery_code) \
+			if not game.recovery_code.is_empty() else ""
 		return
 
 	_fade_t += delta
@@ -139,8 +184,14 @@ func _process(delta: float) -> void:
 	_play_btn.modulate.a = a
 	_board_btn.modulate.a = a
 	_name_btn.modulate.a = a
+	_tutorial_btn.modulate.a = a
+	_code_label.modulate.a = a
+	_restore_btn.modulate.a = a
 	if _fade_t >= FADE_TIME:
-		game.start_run(0)
+		if _pending_tutorial:
+			game._on_replay_tutorial()
+		else:
+			game.start_run(0)
 		queue_free()  # takes _heart and every other child down with it
 
 
@@ -187,9 +238,21 @@ func _make_button(text: String, primary: bool) -> Button:
 
 
 func _on_play() -> void:
+	_start_fade(false)
+
+
+## Same fade-and-handoff as Play, just ending in game._on_replay_tutorial()
+## (wipes the tut_*/tutorial_done flags first) instead of a plain
+## start_run(0) — see the fade-completion branch in _process.
+func _on_tutorial() -> void:
+	_start_fade(true)
+
+
+func _start_fade(tutorial: bool) -> void:
 	if _fading:
 		return
 	_fading = true
+	_pending_tutorial = tutorial
 	# mouse_filter (not .disabled) so nothing else can re-trigger these mid-fade
 	# — .disabled would swap in the engine's default disabled theme for a frame
 	# before the manual alpha fade below catches up, since normal/hover/pressed
@@ -197,3 +260,5 @@ func _on_play() -> void:
 	_play_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_board_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_name_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tutorial_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_restore_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE

@@ -21,19 +21,21 @@ const SlashScene := preload("res://scripts/slash.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
+const RecoverPromptScene := preload("res://scripts/recover_prompt.gd")
 const MainMenuScene := preload("res://scripts/main_menu.gd")
 
 const SAVE_PATH := "user://vein.cfg"
 
-## POST /score, POST /name, POST /rank, POST /run/start, and POST
-## /run/deliver on server/leaderboard's AWS backend (Lambda + API Gateway,
-## see there) — printed by server/leaderboard/deploy.sh on each deploy. Same
-## host, five routes.
+## POST /score, POST /name, POST /rank, POST /run/start, POST /run/deliver,
+## and POST /recover on server/leaderboard's AWS backend (Lambda + API
+## Gateway, see there) — printed by server/leaderboard/deploy.sh on each
+## deploy. Same host, six routes.
 const LEADERBOARD_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/score"
 const NAME_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/name"
 const RANK_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/rank"
 const RUN_START_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/run/start"
 const DELIVER_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/run/deliver"
+const RECOVER_URL := "https://k5uxthoqdk.execute-api.eu-north-1.amazonaws.com/recover"
 ## HTTPRequest has no timeout by default (0 = wait forever) — a flaky mobile
 ## connection or a WebView that silently never completes the request (both
 ## reported on real phones) left lb_state/name_state/rank_state stuck on
@@ -557,11 +559,23 @@ var best := 0
 var lifetime_beats := 0
 var beat_best_this_run := false
 ## Arcade-style leaderboard identity (see server/leaderboard/README.md) — no
-## login, just a random ID generated once on first launch and a name typed
-## once at the very first launch (see name_prompt.gd, shown from _ready()),
-## both persisted the same way best/lifetime_beats are.
+## login, just a random ID generated once on first launch and a random funny
+## name claimed automatically the very first launch (see
+## _start_random_name_claim, called from _ready()) — no more "type something
+## before you're even in the game" friction. Both persisted the same way
+## best/lifetime_beats are. A player can still change the name whenever they
+## want from the main menu (see _on_open_rename), which reuses the same
+## keyboard prompt this used to force on everyone up front.
 var player_id := ""
 var player_name := ""
+## Short human-typeable secret the server hands back the first time a name
+## is ever claimed for this player_id (see server/leaderboard/README.md's
+## `/recover` section) — the one thing that lets a player pick their
+## identity back up on a different device instead of starting over as a
+## fresh random name (see _on_open_recover/_recover_account). Persisted the
+## same as player_id/player_name; empty until the first successful /name
+## response sets it.
+var recovery_code := ""
 
 ## This run's leaderboard result — submitted automatically the moment the
 ## Heart stops (see _submit_score, called from _on_stopped), not behind a
@@ -616,6 +630,42 @@ var name_suggestions: Array = []
 ## network. Cleared at the top of every new attempt.
 var name_error := ""
 var _name_http: HTTPRequest
+
+## Account-recovery result (see _recover_account, called from
+## recover_prompt.gd) — same live-state-read pattern as name_state above.
+## "idle" until a lookup is in flight, then "checking"/"ok"/"not_found"/
+## "error". Only ever reads, never writes player_id/player_name itself — the
+## caller applies the recovered identity once it sees "ok" (see
+## recover_prompt.gd's confirmed signal / _on_account_recovered).
+var recover_state := "idle"
+var recovered_player_id := ""
+var recovered_name := ""
+var _recover_http: HTTPRequest
+
+## First-launch identity, now automatic — see _start_random_name_claim,
+## called from _ready() instead of showing name_prompt.gd. Kept short
+## (longest possible combo is well under server/leaderboard/submit.js's
+## MAX_NAME_LEN=20) so the locally-shown name during the claim round trip
+## can never end up mismatched against a server-side truncation.
+const NAME_ADJECTIVES := [
+	"rusty", "leaky", "swollen", "twitchy", "clogged", "wobbly", "feral",
+	"cranky", "soggy", "crusty", "jittery", "gassy", "drowsy", "spicy",
+	"greasy", "salty", "grumpy", "sneaky", "wonky", "clammy", "queasy",
+	"brittle", "frantic", "rowdy", "zesty", "sturdy", "plucky", "shifty",
+]
+const NAME_NOUNS := [
+	"vein", "pulse", "heart", "clot", "vessel", "artery", "plasma",
+	"aorta", "gland", "spleen", "kidney", "liver", "valve", "nerve",
+	"tendon", "node",
+]
+var _claiming_random_name := false
+var _random_name_attempt := ""
+var _random_name_used_suggestion := false
+## See the returning-player branch in _ready() — a silent background re-fetch
+## of an already-claimed name's recovery_code, polled the same way
+## _claiming_random_name is, just to persist the result once it lands rather
+## than leaving it to happen to get saved by some later, unrelated event.
+var _fetching_recovery_code := false
 
 ## Read-only leaderboard-rank lookup for the main menu (see _fetch_rank,
 ## called from main_menu.gd's start()) — same live-state-read pattern as
@@ -796,26 +846,104 @@ func _ready() -> void:
 		start_run(0)
 		_maybe_attach_harness()
 		return
-	# First launch ever (or a save from before names existed): get a name
-	# BEFORE anything else, not behind a death-screen tap — "at the
-	# beginning game should get user's name for the first time and then
-	# proceed to game" was explicit direction. Every launch after this one
-	# has player_name already saved and goes straight to the main menu
-	# instead — no more auto-starting a run for returning players now that
-	# there's a menu to land on.
+	# First launch ever (or a save from before names existed): claim a random
+	# funny name automatically instead of making the player type one before
+	# they've even seen the game — "let's remove the initial username
+	# taking, and give users' random unique funny names" (they can still
+	# change it later from the main menu — see _on_open_rename). Every
+	# launch after this one has player_name already saved and goes straight
+	# to the main menu instead — no more auto-starting a run for returning
+	# players now that there's a menu to land on.
 	if player_name.is_empty():
-		var prompt := NamePromptScene.new()
-		modal_layer.add_child(prompt)
-		prompt.confirmed.connect(_on_first_name_confirmed)
-		prompt.start(self, design_size())
+		_start_random_name_claim()
 	else:
+		# A returning player whose save predates recovery_code (every account
+		# that existed before this feature shipped) has an already-claimed
+		# name but no code saved locally yet — even after the one-time
+		# server-side backfill, THIS device never fetched it. Silent,
+		# fire-and-forget: re-claiming the name a player already has is a
+		# no-op server-side (see submit.js's handleName), just a vehicle to
+		# read back whatever recovery_code already exists for them. No UI
+		# watches this; main_menu.gd's own live-read of game.recovery_code
+		# (same pattern as its name label) picks it up the moment it lands.
+		if recovery_code.is_empty():
+			_fetching_recovery_code = true
+			_claim_name(player_name)
 		_on_open_main_menu()
 
 
-func _on_first_name_confirmed(name_text: String) -> void:
-	player_name = name_text
-	_store_save()
-	_on_open_main_menu()
+## Kicks off the first-launch identity claim — see _tick_random_name_claim
+## (polled from _process()) for how it resolves. Reuses _claim_name, the
+## exact same server round trip name_prompt.gd's typed-name flow already
+## used, so a random name is just as uniquely reserved as a typed one ever
+## was.
+func _start_random_name_claim() -> void:
+	_claiming_random_name = true
+	_random_name_used_suggestion = false
+	_random_name_attempt = _generate_random_name()
+	_claim_name(_random_name_attempt)
+
+
+func _generate_random_name() -> String:
+	var a: String = NAME_ADJECTIVES[randi() % NAME_ADJECTIVES.size()]
+	var n: String = NAME_NOUNS[randi() % NAME_NOUNS.size()]
+	return "%s_%s%d" % [a, n, randi() % 100]
+
+
+## Polled every frame from _process() while _claiming_random_name is true.
+## "taken" is vanishingly rare (a two-word-plus-number space this size
+## colliding on the very first roll) but not impossible, and the server
+## already hands back a guaranteed-free variation on a 409 (see submit.js's
+## handleName) — reuse that rather than re-rolling blind. "error" (no
+## network, or NAME_URL unset for local dev) falls back to the name locally,
+## unconfirmed: server/leaderboard/README.md's "Arcade-style, on purpose"
+## section already treats name uniqueness as best-effort, only ever enforced
+## at the moment a /name call actually lands, so this is consistent with the
+## existing posture rather than a new gap — and blocking a first launch
+## entirely on network being up would be a far worse failure mode than an
+## occasional unconfirmed name.
+func _tick_random_name_claim() -> void:
+	match name_state:
+		"checking":
+			pass
+		"ok":
+			_claiming_random_name = false
+			player_name = _random_name_attempt
+			_store_save()
+			_on_open_main_menu()
+		"taken":
+			if not _random_name_used_suggestion and not name_suggestions.is_empty():
+				_random_name_used_suggestion = true
+				_random_name_attempt = str(name_suggestions[0])
+				_claim_name(_random_name_attempt)
+			else:
+				_claiming_random_name = false
+				player_name = _random_name_attempt
+				_store_save()
+				_on_open_main_menu()
+		"error":
+			_claiming_random_name = false
+			player_name = _random_name_attempt
+			_store_save()
+			_on_open_main_menu()
+
+
+## Polled every frame from _process() while _fetching_recovery_code is true
+## — see the returning-player branch in _ready(). Mutually exclusive with
+## _claiming_random_name (one requires an empty player_name, the other a
+## non-empty one), so both never race the same _name_http/name_state at
+## once despite sharing them. Silent either way: the main menu is already
+## open by the time this resolves (or fails), so there is nothing to react
+## to on screen — just persist a code if one came back, and reset name_state
+## so it doesn't read as a stale leftover to whatever polls it next (e.g. a
+## rename opened moments later).
+func _tick_recovery_code_fetch() -> void:
+	if name_state == "checking":
+		return
+	_fetching_recovery_code = false
+	if name_state == "ok" and not recovery_code.is_empty():
+		_store_save()
+	name_state = "idle"
 
 
 ## Desktop windows launch at project.godot's fixed window_width/height_override,
@@ -861,6 +989,7 @@ func _load_save() -> void:
 		tutorial_done = bool(cfg.get_value("run", "tutorial_done", false))
 		player_id = str(cfg.get_value("run", "player_id", ""))
 		player_name = str(cfg.get_value("run", "player_name", ""))
+		recovery_code = str(cfg.get_value("run", "recovery_code", ""))
 	# First launch ever, or a save from before the leaderboard existed —
 	# every player needs SOME id before they can post a score, and it has
 	# to be stable across runs, so it's generated once here rather than at
@@ -888,6 +1017,7 @@ func _store_save() -> void:
 	cfg.set_value("run", "tutorial_done", tutorial_done)
 	cfg.set_value("run", "player_id", player_id)
 	cfg.set_value("run", "player_name", player_name)
+	cfg.set_value("run", "recovery_code", recovery_code)
 	cfg.save(SAVE_PATH)
 
 
@@ -1362,6 +1492,16 @@ func _on_rename_confirmed(name_text: String) -> void:
 	_store_save()
 
 
+## Opens the recovery-code entry prompt (see recover_prompt.gd) from the main
+## menu's "Restore account" link — swaps this device's identity for
+## whichever player_id the code belongs to (see _on_account_recovered).
+func _on_open_recover() -> void:
+	var prompt := RecoverPromptScene.new()
+	modal_layer.add_child(prompt)
+	prompt.confirmed.connect(_on_account_recovered)
+	prompt.start(self, design_size())
+
+
 ## Claims or changes player_name against the leaderboard backend's uniqueness
 ## check (see server/leaderboard/submit.js's /name route) — used by
 ## name_prompt.gd for both the first-launch claim and rename. Same
@@ -1397,6 +1537,11 @@ func _on_name_request_completed(result: int, response_code: int, _headers: Packe
 		return
 	if response_code == 200:
 		name_state = "ok"
+		# Set on every successful claim, not just the first — handleName never
+		# reissues an existing code (see its own comment), so this just keeps
+		# re-saving the same value on a rename and actually sets it the one
+		# time it matters, the very first claim.
+		recovery_code = str(parsed.get("recovery_code", recovery_code))
 	elif response_code == 409:
 		name_state = "taken"
 		name_suggestions = parsed.get("suggestions", [])
@@ -1406,6 +1551,72 @@ func _on_name_request_completed(result: int, response_code: int, _headers: Packe
 		# see name_error's own header comment.
 		name_error = str(parsed.get("error", ""))
 		name_state = "error"
+
+
+## Looks up an existing player_id/name/best_score by recovery code (see
+## server/leaderboard/README.md's `/recover` section) — used by
+## recover_prompt.gd. Read-only: never touches player_id/player_name/
+## recovery_code itself, so a wrong or abandoned attempt can never clobber
+## the identity already active on this device. The caller applies the
+## result once it sees "ok" — see recover_prompt.gd's confirmed signal.
+func _recover_account(code: String) -> void:
+	recover_state = "checking"
+	recovered_player_id = ""
+	recovered_name = ""
+	if RECOVER_URL.is_empty():
+		recover_state = "error"
+		return
+	if _recover_http == null:
+		_recover_http = HTTPRequest.new()
+		_recover_http.timeout = HTTP_TIMEOUT
+		add_child(_recover_http)
+		_recover_http.request_completed.connect(_on_recover_request_completed)
+	var body := JSON.stringify({"recovery_code": code})
+	var err := _recover_http.request(
+		RECOVER_URL, ["Content-Type: application/json"], HTTPClient.METHOD_POST, body)
+	if err != OK:
+		recover_state = "error"
+
+
+func _on_recover_request_completed(result: int, response_code: int, _headers: PackedStringArray,
+		body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS:
+		recover_state = "error"
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		recover_state = "error"
+		return
+	if response_code == 200:
+		recovered_player_id = str(parsed.get("player_id", ""))
+		recovered_name = str(parsed.get("name", ""))
+		# The local "best" is a device-side vanity readout (see main_menu.gd's
+		# _stats_text); the server's best_score for the identity being
+		# recovered is the real one. max(), not overwrite, so recovering on a
+		# device that already has a higher LOCAL best (e.g. re-recovering the
+		# same account after playing a few runs here first) never regresses
+		# what's shown.
+		best = maxi(best, int(parsed.get("best_score", 0)))
+		recover_state = "ok"
+	elif response_code == 404:
+		recover_state = "not_found"
+	else:
+		recover_state = "error"
+
+
+## Applies a successfully recovered identity — swaps this device's random
+## player_id/player_name for the recovered ones and persists. recovery_code
+## itself is untouched (it already belongs to recovered_player_id, and
+## handleName never reissues it — see submit.js's own comment), so the same
+## code keeps working for a THIRD device later too.
+func _on_account_recovered() -> void:
+	player_id = recovered_player_id
+	player_name = recovered_name
+	_store_save()
+	# The main menu's rank readout was fetched for whatever player_id this
+	# device had a moment ago — re-fetch now that it's a different identity,
+	# same call the menu's own start() already makes on open.
+	_fetch_rank()
 
 
 ## Read-only "where do I stand" lookup (see server/leaderboard/submit.js's
@@ -3064,6 +3275,10 @@ func _remove_vein(v: Vein, surgical := false) -> void:
 # --- Sim --------------------------------------------------------------------
 
 func _process(delta: float) -> void:
+	if _claiming_random_name:
+		_tick_random_name_claim()
+	if _fetching_recovery_code:
+		_tick_recovery_code_fetch()
 	# A frame hitch must not teleport the sim — see Beat.MAX_DELTA.
 	delta = minf(delta, Beat.MAX_DELTA)
 	_rescue = maxf(0.0, _rescue - delta * 2.2)

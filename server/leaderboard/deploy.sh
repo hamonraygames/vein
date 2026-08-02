@@ -177,7 +177,7 @@ if [[ -z "$INTEGRATION_ID" || "$INTEGRATION_ID" == "None" ]]; then
 		--payload-format-version "2.0" --query IntegrationId --output text)"
 fi
 
-for route in "POST /score" "POST /name" "POST /rank" "POST /run/start" "POST /run/deliver"; do
+for route in "POST /score" "POST /name" "POST /rank" "POST /run/start" "POST /run/deliver" "POST /recover"; do
 	ROUTE_EXISTS="$(aws apigatewayv2 get-routes --region "$REGION" --api-id "$API_ID" \
 		--query "Items[?RouteKey=='$route'].RouteId" --output text)"
 	if [[ -z "$ROUTE_EXISTS" || "$ROUTE_EXISTS" == "None" ]]; then
@@ -219,6 +219,12 @@ aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
 	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/run/deliver" \
 	>/dev/null 2>&1 || true
 
+aws lambda add-permission --region "$REGION" --function-name "$FUNCTION_NAME" \
+	--statement-id "vein-leaderboard-apigw-recover" --action lambda:InvokeFunction \
+	--principal apigateway.amazonaws.com \
+	--source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/*/recover" \
+	>/dev/null 2>&1 || true
+
 ENDPOINT="$(aws apigatewayv2 get-api --region "$REGION" --api-id "$API_ID" --query ApiEndpoint --output text)"
-echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank, POST $ENDPOINT/run/start, POST $ENDPOINT/run/deliver"
-echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL/RANK_URL/RUN_START_URL/DELIVER_URL constants."
+echo "==> Done: POST $ENDPOINT/score, POST $ENDPOINT/name, POST $ENDPOINT/rank, POST $ENDPOINT/run/start, POST $ENDPOINT/run/deliver, POST $ENDPOINT/recover"
+echo "    Put that URL in scripts/game.gd's LEADERBOARD_URL/NAME_URL/RANK_URL/RUN_START_URL/DELIVER_URL/RECOVER_URL constants."

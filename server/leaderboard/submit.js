@@ -62,6 +62,30 @@ const MAX_NAME_LEN = 20;
 const MAX_ID_LEN = 64;
 
 const RUN_ID_LEN = 32; // crypto.randomBytes(16).toString('hex')
+
+// A short, human-typeable secret a player can carry to a new device to
+// reclaim their existing player_id/name/best_score — see handleRecover. Not
+// a password (nothing here has one), just proof-of-continuity: whoever
+// types it gets treated as the player who first claimed it. Lowercase
+// letters + digits only, matching what the in-game onscreen keyboard can
+// type (see cleanName's comment) — no `_-.` here, since a code meant to be
+// read/typed off a screen shouldn't lean on characters that are easy to
+// mistype or ambiguous read aloud. 8 chars from a 36-symbol alphabet is
+// ~2.8e12 combinations, comfortably unguessable for what this actually
+// protects (bragging-rights leaderboard identity, not anything with real
+// stakes riding on it — same posture as the rest of this file's auth, see
+// README.md's "Arcade-style, on purpose").
+const RECOVERY_CODE_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+const RECOVERY_CODE_LEN = 8;
+
+function generateRecoveryCode() {
+	const bytes = crypto.randomBytes(RECOVERY_CODE_LEN);
+	let out = '';
+	for (let i = 0; i < RECOVERY_CODE_LEN; i++) {
+		out += RECOVERY_CODE_ALPHABET[bytes[i] % RECOVERY_CODE_ALPHABET.length];
+	}
+	return out;
+}
 // How much score a run_id's elapsed real time (server clock only, never
 // anything the client claims) is allowed to plausibly represent. Now a
 // backstop on the derived validated_score (see handleScore) rather than the
@@ -192,22 +216,58 @@ async function handleName(payload) {
 
 	// UpdateItem creates the row if it doesn't exist yet — lets a brand-new
 	// player claim a name before ever finishing a run. best_score/total_runs
-	// default to 0 and has_played to false ONLY the first time this row is
-	// touched (if_not_exists), so a later real score write's own math (and
-	// the leaderboard scan's sort, which assumes every row has a numeric
-	// best_score) never sees an undefined field.
-	await ddb.send(new UpdateCommand({
+	// default to 0, has_played to false, and recovery_code to a freshly
+	// generated one, ONLY the first time this row is touched (if_not_exists)
+	// — a rename must never reissue the code (it's the one thing tying a
+	// player's identity together across devices, see handleRecover) or every
+	// device they'd already written the old code down on would silently stop
+	// working. ReturnValues gets back whichever code actually ended up
+	// stored (the fresh one on a first claim, the existing one on a rename)
+	// so it can be handed back in the response either way.
+	const updated = await ddb.send(new UpdateCommand({
 		TableName: PLAYERS_TABLE,
 		Key: { player_id: playerId },
 		UpdateExpression: 'SET #n = :name, '
 			+ 'best_score = if_not_exists(best_score, :zero), '
 			+ 'total_runs = if_not_exists(total_runs, :zero), '
-			+ 'has_played = if_not_exists(has_played, :false)',
+			+ 'has_played = if_not_exists(has_played, :false), '
+			+ 'recovery_code = if_not_exists(recovery_code, :code)',
 		ExpressionAttributeNames: { '#n': 'name' },
-		ExpressionAttributeValues: { ':name': requested, ':zero': 0, ':false': false },
+		ExpressionAttributeValues: {
+			':name': requested, ':zero': 0, ':false': false, ':code': generateRecoveryCode(),
+		},
+		ReturnValues: 'ALL_NEW',
 	}));
 
-	return respond(200, { ok: true, name: requested });
+	return respond(200, {
+		ok: true, name: requested, recovery_code: updated.Attributes.recovery_code,
+	});
+}
+
+// POST /recover — trade a recovery code (see generateRecoveryCode's comment)
+// for the player_id/name it belongs to, so a player can pick their existing
+// identity back up on a new device instead of starting over as a fresh
+// random name. Read-only: never bumps total_runs/totalPlayers the way
+// /score does, matching /rank's posture (a device switch is not a run).
+async function handleRecover(payload) {
+	const code = String(payload.recovery_code || '').trim().toLowerCase();
+	if (code.length === 0 || code.length > RECOVERY_CODE_LEN) {
+		return respond(400, { error: 'bad_code' });
+	}
+
+	// Same "simplest correct thing at this scale" scan the name/score paths
+	// already use (see the Scale note in README.md) — recovery is a rare,
+	// one-off action per player, not a hot path, so this doesn't need its
+	// own GSI any more than those do.
+	const all = await ddb.send(new ScanCommand({ TableName: PLAYERS_TABLE }));
+	const match = (all.Items || []).find((p) => String(p.recovery_code || '') === code);
+	if (!match) {
+		return respond(404, { error: 'code_not_found' });
+	}
+
+	return respond(200, {
+		ok: true, player_id: match.player_id, name: match.name || '', best_score: match.best_score || 0,
+	});
 }
 
 // POST /run/start — called by game.gd's start_run() the instant a run
@@ -699,6 +759,9 @@ exports.handler = async (event) => {
 	}
 	if (path.endsWith('/rank')) {
 		return handleRank(payload);
+	}
+	if (path.endsWith('/recover')) {
+		return handleRecover(payload);
 	}
 	return handleScore(payload);
 };
