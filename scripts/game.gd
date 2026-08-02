@@ -3310,9 +3310,26 @@ func _process(delta: float) -> void:
 		target_drain = 0.2
 	_drain_amt = Vein._smooth(_drain_amt, target_drain, 1.6, delta)
 	_death_amt = Vein._smooth(_death_amt, 1.0 if not alive else 0.0, 1.1, delta)
-	drain.material.set_shader_parameter("drain", _drain_amt)
-	drain.material.set_shader_parameter("warm", _rescue)
-	drain.material.set_shader_parameter("death", _death_amt)
+	# drain.gdshader samples hint_screen_texture — a full-screen post-process
+	# pass, not a normal draw, so Godot has to render the scene to an
+	# intermediate buffer first and run this as a second pass over every
+	# pixel on screen. That ran EVERY frame for the entire life of a run
+	# even at drain=warm=death=0.0 (the ordinary healthy-play case, most of
+	# any run), paying for a full-screen shader pass — the single most
+	# expensive thing in this file, running constantly — to draw literally
+	# nothing different from the scene underneath it. Hiding the ColorRect
+	# below this epsilon skips the whole pass; it re-shows itself the
+	# instant any of the three actually starts moving. _drain_amt/_death_amt
+	# approach their targets exponentially (see Vein._smooth) so they only
+	# ever get asymptotically close to 0, never land on it exactly — the
+	# epsilon is what a `> 0.0` check would miss.
+	const DRAIN_VISIBLE_EPS := 0.003
+	drain.visible = _drain_amt > DRAIN_VISIBLE_EPS or _rescue > DRAIN_VISIBLE_EPS \
+		or _death_amt > DRAIN_VISIBLE_EPS
+	if drain.visible:
+		drain.material.set_shader_parameter("drain", _drain_amt)
+		drain.material.set_shader_parameter("warm", _rescue)
+		drain.material.set_shader_parameter("death", _death_amt)
 
 	if _touching and not _moved and not _dilating:
 		_touch_time += delta
@@ -3693,15 +3710,27 @@ func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
 ## to done, which is what makes it land on one shared tick. Used to hold a
 ## raging node's own collapse back until the whole island is spent — see
 ## _tick_lifecycle below.
-func _island_ready_to_collapse(n: VNode) -> bool:
+##
+## `cache` is a per-_tick_lifecycle-call memo (node -> ready), populated for
+## EVERY member of the island in one pass, not just `n` — without it, a large
+## island sitting in this wait state had every one of its members redo the
+## same full BFS over `veins`, from scratch, every single frame, for however
+## many seconds the wait lasted (whichever member finishes last paces the
+## whole island — see above), since _tick_lifecycle calls this once per
+## waiting node. One BFS per island per tick, not one per waiting member per
+## tick, is what this cache buys back.
+func _island_ready_to_collapse(n: VNode, cache: Dictionary) -> bool:
+	if cache.has(n):
+		return cache[n]
 	var visited := {n: true}
 	var island: Array[VNode] = [n]
+	var ready := true
 	var qi := 0
 	while qi < island.size():
 		var cur: VNode = island[qi]
 		qi += 1
 		if not cur.corrupted or cur.collapse_ratio() < 1.0:
-			return false
+			ready = false
 		for v in veins:
 			if v.a != cur and v.b != cur:
 				continue
@@ -3710,7 +3739,9 @@ func _island_ready_to_collapse(n: VNode) -> bool:
 				continue
 			visited[o] = true
 			island.append(o)
-	return true
+	for m in island:
+		cache[m] = ready
+	return ready
 
 
 ## Wells nobody ever wired in wither away; rot nobody ever cut collapses
@@ -3732,6 +3763,7 @@ func _island_ready_to_collapse(n: VNode) -> bool:
 ## raging-red) until every member has, then the whole island collapses on
 ## the same tick.
 func _tick_lifecycle(_delta: float) -> void:
+	var island_ready_cache := {}
 	for n in nodes.duplicate():
 		if not is_instance_valid(n) or n not in nodes:
 			continue
@@ -3739,7 +3771,7 @@ func _tick_lifecycle(_delta: float) -> void:
 			withered += 1
 			_remove_node(n)
 		elif n.collapse_ratio() >= 1.0:
-			if n.depth < 0 and not _island_ready_to_collapse(n):
+			if n.depth < 0 and not _island_ready_to_collapse(n, island_ready_cache):
 				continue
 			collapsed += 1
 			var burst: Node2D = BurstScene.new()
