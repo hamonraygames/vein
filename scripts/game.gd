@@ -821,6 +821,22 @@ func _end_dilation() -> void:
 
 
 func _ready() -> void:
+	# No cap existed anywhere in the project (grepped project.godot and every
+	# script — nothing sets Engine.max_fps). VSync alone still lets a 90/120Hz
+	# phone render at its full native refresh rate, and every VNode/Vein on
+	# the board redraws unconditionally every single frame (their own
+	# _process() calls queue_redraw() with no "did anything actually change"
+	# guard — continuous pulse/glitch/flow animation is core to this game's
+	# whole diegetic-UI identity, not incidental). That is real, sustained,
+	# always-on CPU (per-node trig for jitter/glitch) and GPU (draw calls)
+	# work that scales with BOTH board size and refresh rate, running the
+	# entire time a run is alive, not just during any one mechanic. Reported:
+	# "why did my phone get hot... I've been facing this before as well." 60
+	# is a deliberately ordinary choice, not tuned against this specific
+	# report — VEIN's own rhythm mechanic already reads off Beat.phase
+	# (interpolated time), not raw frame count, so nothing about hit windows
+	# or animation smoothness depends on running faster than this.
+	Engine.max_fps = 60
 	_fit_desktop_window()
 	drag_layer.draw.connect(_draw_drag)
 	death_ui.hide()
@@ -3596,7 +3612,20 @@ func _start_poison_dart(target: VNode, vein: Vein, forward: bool) -> void:
 	# reads whatever was stored there at CALL time, not definition time.
 	var pulse_ref: Array = [Callable()]
 	pulse_ref[0] = func() -> void:
-		if not is_instance_valid(vein) or not is_instance_valid(target):
+		# target.corrupted matters here, not just validity — without it, a
+		# vein whose target had ALREADY turned kept firing a new dart every
+		# RAGE_DART_INTERVAL regardless, since the only thing that ever
+		# stopped it was the vein itself finally getting freed — which,
+		# since a raging node no longer collapses alone (see
+		# _island_ready_to_collapse), can now be many seconds after this
+		# particular target died, for however long the REST of a large
+		# island takes to finish. A big disconnected cut could leave dozens
+		# of already-spent veins each still spawning darts every 0.1s for
+		# seconds on end — real, sustained, unbounded draw work. Reported:
+		# "why did my phone get hot, isn't vein supposed to be a low[-power]
+		# game?" The attack succeeded the moment the target turned; nothing
+		# past that point should still be firing at it.
+		if not is_instance_valid(vein) or not is_instance_valid(target) or target.corrupted:
 			return
 		var dart: Node2D = PoisonDartScene.new()
 		vein_layer.add_child(dart)
