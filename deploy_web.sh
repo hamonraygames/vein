@@ -26,10 +26,31 @@ aws s3 sync . "s3://$BUCKET/" --delete \
   --exclude "*.wasm" --exclude "*.pck" --exclude "*.js" --exclude "*.png" --exclude "*.html" \
   --cache-control "public, max-age=3600, must-revalidate"
 
-aws s3 cp index.wasm "s3://$BUCKET/index.wasm" \
-  --content-type "application/wasm" --cache-control "public, max-age=3600, must-revalidate"
-aws s3 cp index.pck "s3://$BUCKET/index.pck" \
-  --content-type "application/octet-stream" --cache-control "public, max-age=3600, must-revalidate"
+# Pre-gzipped, not left to CloudFront's own auto-compression — its default
+# compressible-MIME list does not include application/wasm or
+# application/octet-stream (confirmed against the live distribution: it was
+# serving these two fully uncompressed despite Compress=true), so on-the-fly
+# compression never applied to the two files where it actually matters.
+# index.wasm gzips from ~39.5MB down to ~10.1MB (a WASM binary compresses
+# unusually well — 74% smaller), which is a real chunk of what "opening
+# VEIN downloads the whole thing again" costs on a slow/metered mobile
+# connection. index.pck barely benefits (~2%, it's mostly already-compressed
+# textures/audio) but costs nothing extra to also gzip here rather than
+# special-case it out. Uploaded under the SAME key (still /index.wasm, not
+# /index.wasm.gz) with an explicit --content-encoding — every browser
+# capable of running this WASM build already sends `Accept-Encoding: gzip`
+# and decompresses transparently before Godot's own loader ever sees the
+# bytes, same as how compressed JS/CSS already works on every ordinary
+# website.
+gzip -kf index.wasm
+gzip -kf index.pck
+aws s3 cp index.wasm.gz "s3://$BUCKET/index.wasm" \
+  --content-type "application/wasm" --content-encoding gzip \
+  --cache-control "public, max-age=3600, must-revalidate"
+aws s3 cp index.pck.gz "s3://$BUCKET/index.pck" \
+  --content-type "application/octet-stream" --content-encoding gzip \
+  --cache-control "public, max-age=3600, must-revalidate"
+rm -f index.wasm.gz index.pck.gz
 for f in index.js index.audio.worklet.js index.audio.position.worklet.js; do
   aws s3 cp "$f" "s3://$BUCKET/$f" \
     --content-type "application/javascript" --cache-control "public, max-age=3600, must-revalidate"
