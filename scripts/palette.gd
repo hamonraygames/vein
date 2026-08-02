@@ -51,6 +51,16 @@ const HEXAGON := Color("8f97a8")  # hexagon  — pale slate
 const VOID := Color("6f5bd6")
 const VOID_DIM := Color("2a2145")
 
+## A raging node (corrupted AND orphaned — actively attacking its remaining
+## neighbours, see game.gd's _tick_corruption/_start_poison_dart), and any
+## neighbour it just turned. Deliberately the Heart's own red rather than a
+## new hue — red was reserved for the Heart alone specifically because it
+## reads as danger/alarm, and a raging node IS that same alarm: not a
+## passive corpse anymore, an active attacker. Shape still tells the Heart
+## apart from everything else, so "shape always encodes meaning" still
+## holds even with two red things on screen.
+const RAGE := HEART
+
 ## Veins carry the whole read of the board, so they cannot be near-background.
 ## The first pass had them at #2c262e-#4a3f48 against a #0d0d10 canvas, which
 ## vanished on a phone in daylight — you could not see your own network.

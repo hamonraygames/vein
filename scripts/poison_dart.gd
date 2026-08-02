@@ -1,13 +1,26 @@
 extends Node2D
-## A visible poison dot travelling from a raging corrupted node to the
-## neighbour it is about to hit — see game.gd's _start_poison_burst.
+## A visible poison dot travelling from a raging corrupted node to ONE
+## neighbour over ONE vein — see game.gd's _start_poison_dart. That neighbour
+## does not end the attack: the moment it turns, IT fires its own dart onward
+## to its own other neighbours, and so on — a relay hopping node to node
+## through the whole disconnected island, not a single node computing every
+## downstream target up front. Each hop is its own dart on its own vein, so
+## the poison visibly passes through every node on the way, rather than
+## stopping at the first one.
+##
+## Travels at Vein.SPEED — the same px/sec every ordinary resource dot rides
+## — instead of a fixed duration. A fixed duration made a short hop crawl and
+## a long one teleport; matching the real flow speed is what makes every hop
+## of the relay read as the same poison moving at the same pace.
 ##
 ## Rides the vein's own curve (see _point_at), not a straight line between
-## the two node positions — that read as "shooting" the neighbour. Drawn to
+## the two node positions — that read as "shooting" the target. Shaped to
 ## match vein.gd's own _draw_poison_dot as closely as this self-contained
-## scene can (same writhing jitter, pulsing halo, thorn spikes, VOID
-## colour) so it reads as the same poison the rest of the game already
-## shows, not a lookalike.
+## scene can (same writhing jitter, pulsing halo, thorn spikes) but coloured
+## Palette.RAGE, not VOID — this dart only ever exists mid rage-attack, and
+## the neighbour it's flying toward already renders that same red the
+## instant it turns (see VNode._draw_necrotic's raging tint), so the attack
+## in flight and the target it's about to hit read as the one threat.
 ##
 ## Deliberately its OWN reliable system rather than a real Vein.inject() —
 ## that was tried and reverted: a real injected dot only travels a vein's
@@ -16,16 +29,19 @@ extends Node2D
 ## harmless pass-through for a non-Heart destination, see game._deliver) —
 ## so the visual dot and the actual kill ended up decoupled, unreliable,
 ## and firing in ways that did not match what was on screen. This scene is
-## purely cosmetic; game.gd's own timer decides who actually dies and when.
+## purely cosmetic; game.gd's own timer decides who actually turns and when.
 
-const TRAVEL_TIME := 0.22
+## Floor under the computed travel time so two nodes sitting almost on top of
+## each other don't produce a divide-by-near-zero instant flash.
+const MIN_TRAVEL_TIME := 0.08
 
 var _vein: Vein
-## True if `vein.a` is the attacker — vein.pts always runs geometrically
-## a->b regardless of the vein's own flow direction (see vein.gd's rebuild),
-## so this is what decides whether travelling attacker->target walks pts
-## forward or backward.
+## True walks the vein's own pts forward (a->b), false walks it backward.
+## vein.pts always runs geometrically a->b regardless of the vein's own flow
+## direction (see vein.gd's rebuild), so this is what decides which way THIS
+## hop is actually walked.
 var _forward := true
+var _travel_time := MIN_TRAVEL_TIME
 var _t := 0.0
 var _seed := 0.0
 
@@ -33,6 +49,7 @@ var _seed := 0.0
 func spawn(vein: Vein, forward: bool) -> void:
 	_vein = vein
 	_forward = forward
+	_travel_time = maxf(vein.length / Vein.SPEED, MIN_TRAVEL_TIME)
 	_seed = randf() * 1000.0
 	z_index = 20
 
@@ -44,7 +61,7 @@ func _process(delta: float) -> void:
 		queue_free()
 		return
 	_t += delta
-	if _t >= TRAVEL_TIME:
+	if _t >= _travel_time:
 		queue_free()
 		return
 	queue_redraw()
@@ -67,7 +84,15 @@ func _point_at(u: float) -> Vector2:
 
 
 func _draw() -> void:
-	var p := clampf(_t / TRAVEL_TIME, 0.0, 1.0)
+	if not is_instance_valid(_vein):
+		# _process() already frees the dart the frame AFTER the vein dies,
+		# but queue_redraw() defers to the render pass later in the SAME
+		# frame — the vein can still go from valid to freed in between
+		# (e.g. its far node collapsing mid-frame), which _process() alone
+		# never catches. Confirmed via --probe: "Invalid access to property
+		# or key 'pts' on a base object of type 'previously freed'."
+		return
+	var p := clampf(_t / _travel_time, 0.0, 1.0)
 	# Ease-in: a slow wind-up, a fast strike — reads as a lunge, not a dot
 	# gliding evenly across.
 	var eased := p * p
@@ -75,13 +100,18 @@ func _draw() -> void:
 	var pos := _point_at(u)
 
 	# Same writhe as vein.gd's _draw_poison_dot: a small jittering offset and
-	# pulsing halo/thorns, phase-offset per dart (_seed) so a burst of two or
-	# three doesn't writhe in lockstep.
+	# pulsing halo/thorns, phase-offset per dart (_seed) so several hops in
+	# flight at once don't writhe in lockstep.
 	var t := float(Time.get_ticks_msec()) * 0.001
 	var jitter := Vector2(sin(t * 13.0 + _seed), cos(t * 17.0 + _seed * 1.3)) * 2.2
 	var jp := pos + jitter
 	var pulse := 0.5 + 0.5 * sin(t * 9.0 + _seed)
-	var c := Palette.VOID
+	# Palette.RAGE, not Palette.VOID — this dart only ever exists as a rage
+	# attack (see game.gd's _start_poison_dart), and the target it's flying
+	# toward already renders red the instant it turns (see VNode's
+	# raging-tint in _draw_necrotic); the attack in flight should read as
+	# the same threat, not the ordinary passive-poison violet.
+	var c := Palette.RAGE
 	var halo := c
 	halo.a = 0.12 + pulse * 0.18
 	draw_circle(jp, 9.0 + pulse * 2.0, halo)

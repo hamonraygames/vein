@@ -417,40 +417,37 @@ const AIRBORNE_AT := 0.38         ## intensity floor before blight can jump gaps
 const AIRBORNE_RADIUS := 190.0
 const AIRBORNE_CHANCE := 0.35     ## per spread-tick, once AIRBORNE_AT is crossed
 const AIRBORNE_CHANCE_MAX := 0.6  ## ...climbing toward this past EXERTION_SPAN
-## How fast a corrupted node with no path to the Heart spreads to whichever
-## neighbours it is still wired to — see _tick_corruption. Flat and fast,
-## unlike SPREAD_TIME/SPREAD_TIME_LATE above: this is meant to read as a
-## rage, not a tightening-over-the-run threat, so it does not scale with
-## intensity or pressure the way those do.
-const ORPHAN_SPREAD_TIME := 0.4
 ## Hard ceiling on how many nodes _tick_corruption can turn INSTANTLY in a
 ## single call — the airborne-jump path only now (vein-adjacency spread
-## resolves through the deferred _start_poison_burst instead, capped
-## separately by MAX_PENDING_POISON_BURSTS below). A circuit breaker, not a
-## tuning knob — the airborne fix in _tick_corruption addresses the actual
-## runaway feedback loop a real report traced to (rage spread + airborne
-## jump + the no-debounce same-family respawn all feeding each other, "the
-## whole screen suddenly went poisonous" and the phone got hot), but this
-## caps the worst case regardless of whatever interaction finds the next
-## way in.
+## resolves through the deferred _start_poison_dart instead, which is NOT
+## capped — see there for why the whole reachable island deliberately gets a
+## dart, no truncation). A circuit breaker, not a tuning knob — the airborne
+## fix in _tick_corruption addresses the actual runaway feedback loop a real
+## report traced to (rage spread + airborne jump + the no-debounce
+## same-family respawn all feeding each other, "the whole screen suddenly
+## went poisonous" and the phone got hot), but this caps the worst case
+## regardless of whatever interaction finds the next way in.
 const MAX_CORRUPTIONS_PER_TICK := 6
-## A raging node's attack on a neighbour — see _start_poison_burst. Multiple
-## fast hits instead of one instant one, both because it reads as an actual
-## attack landing rather than a silent flip, and because it slows the
-## overall rage cascade down slightly (playtest: one hit killing instantly
-## made it feel faster than intended even after ORPHAN_SPREAD_TIME/
-## MAX_CORRUPTIONS_PER_TICK above were already tuned down).
-const RAGE_BURST_COUNT := 3
-const RAGE_BURST_GAP := 0.12
-## Mirrors poison_dart.gd's own TRAVEL_TIME — duplicated rather than read
+## Mirrors poison_dart.gd's own MIN_TRAVEL_TIME — duplicated rather than read
 ## off PoisonDartScene directly so this stays a plain, easily-verified
-## constant; keep both in sync if either changes. How long after the LAST
-## dart is fired before the target actually dies.
-const RAGE_DART_TRAVEL_TIME := 0.22
-## How many targets can be mid-burst (see _start_poison_burst) at once — a
-## second circuit breaker alongside MAX_CORRUPTIONS_PER_TICK, this time for
-## the deferred/timer-based path rather than the same-frame one.
-const MAX_PENDING_POISON_BURSTS := 6
+## constant; keep both in sync if either changes. A dart's actual travel
+## time is distance/Vein.SPEED (the same speed every ordinary resource dot
+## rides — see _start_poison_dart), this is only the floor under it.
+const MIN_RAGE_DART_TRAVEL_TIME := 0.08
+## Gap between successive dart spawns on one attack's vein — see
+## _start_poison_dart. Purely cosmetic, and deliberately open-ended rather
+## than a fixed count or a count capped to one target's travel_time: "I want
+## them flowing from the source... the source and closer shapes shouldn't
+## vanish sooner, when the last one got poisonous all shapes and lines
+## vanish together." A 3-dart burst read as one discrete event; even
+## spawning "however many fit in travel_time" (5-6 for a typical hop) still
+## stopped the moment that ONE neighbour turned. Now the pulse keeps going
+## for as long as the vein and the node at the far end still exist — which,
+## since a raging node no longer collapses alone (see
+## _island_ready_to_collapse), is the island's WHOLE remaining lifetime, not
+## one hop's travel time. The kill itself is unaffected: still one
+## resolve, still fires at travel_time, same as before.
+const RAGE_DART_INTERVAL := 0.1
 
 ## How fast a tool spends its reserve per smelt, at intensity 0 — see
 ## VNode.depletion_rate. Playtest: a Forge could go necrotic within the
@@ -655,9 +652,9 @@ var dropped := 0
 var poisoned := 0
 ## Wells that ran dry and turned this run.
 var corruptions := 0
-## Nodes currently mid-burst as a poison-rage target (see
-## _start_poison_burst) — excluded from being picked as a NEW target so two
-## attackers never pile separate bursts onto the same node.
+## Nodes with a poison dart in flight toward them (see _start_poison_dart)
+## — excluded from being picked as a NEW target so two attackers never both
+## send a dart at the same node.
 var _poison_pending := {}
 ## Wells withered from neglect, and rot collapsed outright. Both remove the
 ## node itself, so `nodes` undercounts everything that ever appeared once
@@ -900,6 +897,8 @@ func _store_save() -> void:
 ##
 ##   --probe=N [--speed=X]        headless balance run
 ##   --shot=PATH [--after=S] [--speed=X]   render a frame (needs a window)
+##   --rage [--speed=X] [--every=S]        watch the poison-rage flood on
+##                                         loop (needs a window)
 ##
 ## Loaded dynamically so an exported build without tests/ still runs.
 func _maybe_attach_harness() -> void:
@@ -908,6 +907,7 @@ func _maybe_attach_harness() -> void:
 	var speed := 0.0
 	var after := 20.0
 	var cap := 0
+	var every := 0.0
 
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("--probe"):
@@ -920,6 +920,8 @@ func _maybe_attach_harness() -> void:
 			speed = float(a.get_slice("=", 1))
 		elif a.begins_with("--after="):
 			after = float(a.get_slice("=", 1))
+		elif a.begins_with("--every="):
+			every = float(a.get_slice("=", 1))
 
 	if probe_runs > 0:
 		# The tutorial's grace window would silently change probe balance —
@@ -945,6 +947,16 @@ func _maybe_attach_harness() -> void:
 		var c: Node = _load_harness("res://tests/chain_stress.gd")
 		if c != null:
 			add_child(c)
+	elif "--rage" in OS.get_cmdline_user_args():
+		_harness_active = true
+		tutorial.enabled = false
+		var r: Node = _load_harness("res://tests/rage_lab.gd")
+		if r == null:
+			return
+		r.speed = speed if speed > 0.0 else 1.0
+		if every > 0.0:
+			r.every = every
+		add_child(r)
 	elif shot_path != "":
 		_harness_active = true
 		# `--tutorial` forces the hints on regardless of the save, so they
@@ -3182,46 +3194,50 @@ func _tick_corruption(delta: float) -> void:
 	spread_time = maxf(SPREAD_TIME_FLOOR, spread_time - maxf(pressure() - 1.0, 0.0) * 0.8)
 	# A corrupted node still wired to the Heart is already being punished the
 	# ordinary way — its own VOID buffer flows downhill and poisons the Heart
-	# directly every beat (see VNode._emit/_push_from_nodes). Cut its Heart
-	# vein and that outlet is gone: it goes into a RAGE instead, tearing
-	# through whatever it is still wired to at ORPHAN_SPREAD_TIME — a flat,
-	# fast interval, deliberately NOT scaled down from spread_time (half of a
-	# slow number is still slow; "a save when the heart is nearly gone must
-	# feel enormous" applies just as hard the other direction). One neighbour
-	# per firing still (see below), but each freshly-turned neighbour is
-	# itself orphaned and starts its own rage clock immediately, so a limb of
-	# several nodes chain-reacts through the whole thing in a couple of
-	# seconds, not a slow bleed one node at a time.
+	# directly every CORRUPT_PERIOD (see VNode._emit/_push_from_nodes). Cut
+	# its Heart vein and that outlet is gone: it goes into a RAGE instead,
+	# turning on whatever it is still wired to — AT THE SAME CADENCE, reusing
+	# VNode.CORRUPT_PERIOD rather than a separate faster number. Direct
+	# feedback: "a poisonous shape connected to the Heart produces poison
+	# dots toward the Heart — when it gets disconnected, [it should attack]
+	# at the same rate [as] the poison dots that go to the Heart."
+	# One flood per firing (see below) reaches every node still wired to
+	# it, direct or indirect, so a whole limb still turns over in one go —
+	# just paced to the ordinary poison cadence instead of a bespoke rage
+	# clock.
 	var airborne := exert >= AIRBORNE_AT
 	var airborne_chance := minf(
 		AIRBORNE_CHANCE_MAX, AIRBORNE_CHANCE + maxf(pressure() - 1.0, 0.0) * 0.1)
 
 	# Airborne-jump targets only — those still corrupt instantly (see below),
-	# vein-adjacency targets now go through _start_poison_burst instead (see
-	# its own comment for why a single instant dart was replaced).
+	# vein-adjacency targets now go through _start_poison_dart instead (see
+	# its own comment for why an instant flip was replaced with a travelling
+	# dart).
 	var newly: Array[VNode] = []
 	for n in nodes:
 		if not n.corrupted:
 			continue
-		# A hard floor under BOTH timers below, reusing VNode.CORRUPT_PERIOD
-		# (the cadence a corrupted node already emits its own poison at)
-		# rather than a separate made-up number — the node is already
-		# "actually dangerous" the moment it produces its first poison dot,
-		# so that is also the earliest it makes sense for it to turn on its
-		# neighbours. Without this floor, a node that sat
-		# corrupted-but-connected for a couple of seconds (spread_accum
-		# quietly climbing toward the slow spread_time threshold) could have
-		# its accumulated timer already past the much shorter
-		# ORPHAN_SPREAD_TIME the instant it got disconnected, so the very
-		# act of cutting it loose triggered an immediate attack with zero
-		# warning. Playtest: "when they got poisonous it should give you a
-		# little buffer to disconnect it, just like before when it first
-		# produces a poisonous dot — I don't want a lot of time, but not
-		# instant either."
+		# spread_accum runs in parallel with corrupt_age from the moment of
+		# corruption (NOT only once the floor below clears) — an orphaned
+		# node's threshold is VNode.CORRUPT_PERIOD, the same value as the
+		# floor, so if this only started counting once the floor cleared it
+		# would need a further full CORRUPT_PERIOD on top of it, past
+		# ORPHAN_COLLAPSE_TIME (1.6s): the node would collapse from neglect
+		# before ever landing a single attack. Counting from corruption
+		# itself is what makes the floor and the threshold land on the same
+		# frame, so a node turns on its neighbours the instant it's allowed
+		# to, at the same cadence it already emits its own poison at.
+		n.spread_accum += delta
+		# A node is already "actually dangerous" the moment it produces its
+		# first poison dot (VNode.CORRUPT_PERIOD after corrupting) — that is
+		# also the earliest it makes sense for it to turn on its neighbours.
+		# Playtest: "when they got poisonous it should give you a little
+		# buffer to disconnect it, just like before when it first produces a
+		# poisonous dot — I don't want a lot of time, but not instant
+		# either."
 		if n.corrupt_age < VNode.CORRUPT_PERIOD:
 			continue
-		var t: float = ORPHAN_SPREAD_TIME if n.depth < 0 else spread_time
-		n.spread_accum += delta
+		var t: float = VNode.CORRUPT_PERIOD if n.depth < 0 else spread_time
 		if n.spread_accum < t:
 			continue
 		n.spread_accum = 0.0
@@ -3231,9 +3247,18 @@ func _tick_corruption(delta: float) -> void:
 		# not one victim per tick while its neighbours sit untouched.
 		# Playtest: "it only kills the nearest neighbour — no, it should
 		# kill all the connected neighbours, the whole disconnected island."
-		# Each one still takes its own multi-hit burst to actually die (see
-		# _start_poison_burst), so this is "attack everyone at once," not
-		# "kill everyone instantly."
+		# This only starts the attack on n's DIRECT neighbours — each one is
+		# a relay, not a dead end: the moment its own dart lands and it
+		# turns, _start_poison_dart fires fresh darts from IT to its own
+		# neighbours in turn, and so on, so the poison keeps travelling
+		# node-to-node until it runs out of island, all the way to the
+		# leaves at the far end. Playtest, after a version that instead
+		# pre-computed every downstream target from n and fired simultaneous
+		# darts at all of them: "the poisonous dot don't stop at direct
+		# neighbours — [it should] go through them to reach all other
+		# connected shapes." A relay is what that actually looks like: the
+		# dot passing through each node on the way, not several darts
+		# fanning out from the same origin at once.
 		#
 		# ANY non-Heart neighbour, not just a Well — restricting this to
 		# Kind.WELL meant a corrupted Well whose only live neighbours were
@@ -3243,21 +3268,19 @@ func _tick_corruption(delta: float) -> void:
 		# freely. Reported: "only noncircle shapes... start shooting back at
 		# neighbours... circles just don't." The Heart itself is the one
 		# real exclusion — corruption has no meaning there. Also excludes
-		# anything already mid-burst (_poison_pending) so two attackers can't
-		# both pile a burst onto the same target.
+		# anything already with a dart in flight (_poison_pending) so two
+		# attackers can't both target the same node.
 		for v in veins:
-			if _poison_pending.size() >= MAX_PENDING_POISON_BURSTS:
-				break
 			var o := v.other(n)
 			if o != null and not o.corrupted and o.kind != VNode.Kind.HEART \
 					and not _poison_pending.has(o) and o not in newly:
-				_start_poison_burst(n, o, v)
+				_start_poison_dart(o, v, v.a == n)
 
 		# Airborne is a slow, occasional "roaming blight" (see the file
 		# comment), gated to the ORIGINAL spread_time cadence only — NOT the
-		# fast ORPHAN_SPREAD_TIME rage path. Letting it roll on the fast path
-		# too was a real bug: every orphaned node in a rage cluster rolled
-		# independently every 0.4s, so a cluster of even a handful of nodes
+		# fast orphan rage path. Letting it roll on the fast path too was a
+		# real bug: every orphaned node in a rage cluster rolled
+		# independently every tick, so a cluster of even a handful of nodes
 		# had a near-certain chance SOME jump would land almost every tick —
 		# and since a jump can land on another node that is ALSO orphaned
 		# (post-rage, a big chunk of the board can be), that node immediately
@@ -3287,43 +3310,86 @@ func _tick_corruption(delta: float) -> void:
 		burst.spawn([n.position], [VNode.Res.VOID], rng.randi(), Color(0, 0, 0, 0), exert)
 
 
-## A raging node's attack on one neighbour — RAGE_BURST_COUNT fast hits
-## (RAGE_BURST_GAP apart) instead of one instant hit that killed the target
-## the same frame it was picked. Playtest: "it just kills them with one
-## poisonous dot... send more dots, like a burst, and after two-three fast
-## dots they die" — one hit reading as an instant flip lost both the sense
-## of an actual attack landing AND made the whole rage cascade feel faster
-## than intended.
+## A raging node's attack on one direct neighbour — an open-ended stream of
+## darts over the SAME vein, but the target still turns the moment
+## travel_time elapses, not once the stream itself stops. Playtest, after a
+## 3-hit-to-kill burst was tried once already: "don't even kill them faster,
+## just poison dots — when [one] reaches a neighbour, make it poisonous."
+## That verdict stands; the VISUAL went through two more tries after that. A
+## fixed 3-dart burst read as one discrete event regardless of distance.
+## Capping the stream to "however many darts fit in one target's
+## travel_time" (5-6 for a typical hop) was closer, but still stopped the
+## instant that ONE neighbour turned: "I want them flowing from the source...
+## the source and closer shapes shouldn't vanish sooner, when the last one
+## got poisonous all shapes and lines vanish together." The pulse below
+## keeps going for as long as the vein and the far node still exist, which —
+## since a raging node no longer collapses on its own (see
+## _island_ready_to_collapse) — is the WHOLE island's remaining lifetime,
+## not one hop's travel time. travel_time itself (and therefore when the
+## target turns) is still computed once, off the vein alone, same as before
+## — only the visual keeps running past that point.
 ##
 ## `vein` is the live connection between them — the darts ride its actual
-## curve (see poison_dart.gd), not a straight line cutting across the board.
-## A real Vein.inject() dot was tried here instead and reverted: it only
-## travels a vein's fixed flow direction, and only resolves anything once it
-## arrives through the ordinary delivery pipeline, which just treats VOID as
-## harmless pass-through for a non-Heart destination — so the visible dot
-## and the actual kill ended up decoupled and unreliable, which is exactly
-## what broke. poison_dart.gd is purely cosmetic and drawn to match vein.gd's
-## own _draw_poison_dot; this function alone decides who actually dies and
-## when, so the two can never disagree. `target` is marked _poison_pending
-## for the whole burst so no second attacker can pile another burst onto it
-## in the meantime (see the candidate loop in _tick_corruption above), and
-## the resolve step re-checks is_instance_valid + not already corrupted,
-## since a corrupted node can still be cut, collapse, or get caught by the
-## OTHER spread path (airborne) before its own burst finishes.
-func _start_poison_burst(attacker: VNode, target: VNode, vein: Vein) -> void:
+## curve (see poison_dart.gd), not a straight line cutting across the board,
+## and take vein.length/Vein.SPEED to arrive — the same speed every ordinary
+## resource dot rides. A real Vein.inject() dot was tried here instead and
+## reverted: it only travels a vein's fixed flow direction, and only
+## resolves anything once it arrives through the ordinary delivery pipeline,
+## which just treats VOID as harmless pass-through for a non-Heart
+## destination — so the visible dot and the actual kill ended up decoupled
+## and unreliable, which is exactly what broke. poison_dart.gd is purely
+## cosmetic and drawn to match vein.gd's own _draw_poison_dot; this function
+## alone decides who actually turns and when, so the two can never disagree.
+## `target` is marked _poison_pending for the whole flight so no second
+## attacker can also target it in the meantime (see the candidate loop in
+## _tick_corruption above), and the resolve step re-checks is_instance_valid
+## + not already corrupted, since a corrupted node can still be cut,
+## collapse, or get caught by the OTHER spread path (airborne) before its
+## own dart lands.
+##
+## THE RELAY: the moment `target` turns, it does not just sit there — it
+## immediately fires its own darts at its own remaining live neighbours,
+## the same way it was just reached through one of ITS neighbours. That is
+## what makes the poison travel node-to-node through the whole disconnected
+## island instead of stopping at whichever node happened to trigger it.
+## Playtest, after a version that instead pre-computed every downstream
+## target from the ORIGINAL raging node and fired simultaneous darts at all
+## of them: "the poisonous dot don't stop at direct neighbours — [it should]
+## go through them to reach all other connected shapes." Several darts
+## converging on different destinations from the same single origin, all at
+## once, did not read as that; a relay — each hop only ever knowing about
+## its own immediate neighbours — does, and it is also simpler: no
+## precomputed path, no BFS, just "arrive, turn, attack whoever is still
+## next to you."
+func _start_poison_dart(target: VNode, vein: Vein, forward: bool) -> void:
 	_poison_pending[target] = true
-	for i in RAGE_BURST_COUNT:
-		get_tree().create_timer(i * RAGE_BURST_GAP).timeout.connect(func() -> void:
-			if not is_instance_valid(attacker) or not is_instance_valid(target) \
-					or not is_instance_valid(vein) or target.corrupted:
-				return
-			var dart: Node2D = PoisonDartScene.new()
-			vein_layer.add_child(dart)
-			dart.spawn(vein, vein.a == attacker)
-		)
+	var travel_time := maxf(vein.length / Vein.SPEED, MIN_RAGE_DART_TRAVEL_TIME)
 
-	var total := (RAGE_BURST_COUNT - 1) * RAGE_BURST_GAP + RAGE_DART_TRAVEL_TIME
-	get_tree().create_timer(total).timeout.connect(func() -> void:
+	# The continuous visual — self-reschedules every RAGE_DART_INTERVAL for
+	# as long as both ends are still around, with no upper bound baked in.
+	# It keeps running past the kill below (a raging node stays red and
+	# connected long after it first turns, until its whole island collapses
+	# together), which is what makes the vein read as an ongoing flow
+	# instead of a burst that happens to stop once. `pulse_ref` — a
+	# one-element Array rather than a plain Callable var — is the only way
+	# to actually make this self-referencing: a GDScript closure captures a
+	# local var's VALUE at the moment the lambda is defined, so a bare
+	# `var pulse: Callable; pulse = func(): ... .connect(pulse)` bakes in
+	# whatever `pulse` was (null, since the assignment isn't finished yet)
+	# and every dart after the first silently failed to reschedule. An
+	# Array is captured BY REFERENCE, so `pulse_ref[0]` inside the lambda
+	# reads whatever was stored there at CALL time, not definition time.
+	var pulse_ref: Array = [Callable()]
+	pulse_ref[0] = func() -> void:
+		if not is_instance_valid(vein) or not is_instance_valid(target):
+			return
+		var dart: Node2D = PoisonDartScene.new()
+		vein_layer.add_child(dart)
+		dart.spawn(vein, forward)
+		get_tree().create_timer(RAGE_DART_INTERVAL).timeout.connect(pulse_ref[0])
+	pulse_ref[0].call()
+
+	get_tree().create_timer(travel_time).timeout.connect(func() -> void:
 		_poison_pending.erase(target)
 		if not is_instance_valid(target) or target.corrupted:
 			return
@@ -3334,7 +3400,18 @@ func _start_poison_burst(attacker: VNode, target: VNode, vein: Vein) -> void:
 			Input.vibrate_handheld(140)
 		var burst: Node2D = BurstScene.new()
 		vein_layer.add_child(burst)
-		burst.spawn([target.position], [VNode.Res.VOID], rng.randi(), Color(0, 0, 0, 0), intensity())
+		# Explicitly typed rather than inline array literals — inside a
+		# lambda (unlike a plain function body) GDScript does not always
+		# infer Array[Vector2]/Array[int] from a bare `[x]` literal at the
+		# call site, and passing the untyped Array through errors at runtime.
+		var pts: Array[Vector2] = [target.position]
+		var kinds: Array[int] = [VNode.Res.VOID]
+		burst.spawn(pts, kinds, rng.randi(), Color(0, 0, 0, 0), intensity())
+		for v2 in veins:
+			var o2 := v2.other(target)
+			if o2 != null and not o2.corrupted and o2.kind != VNode.Kind.HEART \
+					and not _poison_pending.has(o2):
+				_start_poison_dart(o2, v2, v2.a == target)
 	)
 
 
@@ -3351,10 +3428,57 @@ func _nearest_orphan_well(from: Vector2, within: float) -> VNode:
 	return best
 
 
+## True once EVERY node still reachable from `n` over live veins (the same
+## disconnected island the rage relay walks — see _start_poison_dart) has
+## BOTH corrupted AND individually passed its own collapse_ratio — i.e. the
+## whole island is not just fully turned but fully past its own
+## ORPHAN_COLLAPSE_TIME. Checking collapse_ratio here too, not just
+## `corrupted`, matters: without it, the LAST node to turn would still make
+## everyone else wait for exactly IT to reach 1.0, but only once THAT one
+## timer expires — the freshest member, not the whole island, would be
+## setting the pace, and it would still lag noticeably behind the rest. This
+## way the whole island's collapse is paced by whichever member is closest
+## to done, which is what makes it land on one shared tick. Used to hold a
+## raging node's own collapse back until the whole island is spent — see
+## _tick_lifecycle below.
+func _island_ready_to_collapse(n: VNode) -> bool:
+	var visited := {n: true}
+	var island: Array[VNode] = [n]
+	var qi := 0
+	while qi < island.size():
+		var cur: VNode = island[qi]
+		qi += 1
+		if not cur.corrupted or cur.collapse_ratio() < 1.0:
+			return false
+		for v in veins:
+			if v.a != cur and v.b != cur:
+				continue
+			var o := v.other(cur)
+			if o == null or visited.has(o) or o.kind == VNode.Kind.HEART:
+				continue
+			visited[o] = true
+			island.append(o)
+	return true
+
+
 ## Wells nobody ever wired in wither away; rot nobody ever cut collapses
 ## outright. Both remove the node itself (see _remove_node), which is what
 ## keeps the board turning over instead of only ever accumulating — every
 ## object that appears either gets used, gets cut, or eventually leaves.
+##
+## A RAGING node (depth < 0 — orphaned) is the one exception to "collapses
+## on its own the moment ITS collapse_ratio hits 1.0": it waits for
+## _island_ready_to_collapse too. Nodes only turn on their own local
+## schedule (the rage relay reaches the ones nearest the trigger first — see
+## _start_poison_dart), so without this, the ones closest to where the rage
+## started were hitting ORPHAN_COLLAPSE_TIME and vanishing — vein and all —
+## while the far end of the same island was still mid-attack. Playtest: "the
+## lines between them only die when all are poisonous... right now the
+## closer lines die faster... when all are poisonous all die together
+## shapes and lines." A node whose island isn't done yet just sits at its
+## already-passed collapse_ratio (harmlessly clamped at 1.0, still drawn
+## raging-red) until every member has, then the whole island collapses on
+## the same tick.
 func _tick_lifecycle(_delta: float) -> void:
 	for n in nodes.duplicate():
 		if not is_instance_valid(n) or n not in nodes:
@@ -3363,6 +3487,8 @@ func _tick_lifecycle(_delta: float) -> void:
 			withered += 1
 			_remove_node(n)
 		elif n.collapse_ratio() >= 1.0:
+			if n.depth < 0 and not _island_ready_to_collapse(n):
+				continue
 			collapsed += 1
 			var burst: Node2D = BurstScene.new()
 			vein_layer.add_child(burst)

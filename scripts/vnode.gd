@@ -311,9 +311,24 @@ func _process(delta: float) -> void:
 	var wr := wither_ratio()
 	if wr > WITHER_WARN_AT:
 		fade = 1.0 - (wr - WITHER_WARN_AT) / (1.0 - WITHER_WARN_AT)
-	var cr := collapse_ratio()
-	if cr > COLLAPSE_FADE_AT:
-		fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
+	# RAGING (depth < 0) is the one case that skips the collapse fade
+	# entirely — game.gd no longer removes an orphaned node on its own
+	# collapse_ratio (see _island_ready_to_collapse: it waits for the whole
+	# still-connected island to finish), but this fade curve is driven by
+	# THIS node's own corrupt_age regardless, with no way to know about that
+	# wait. Left alone, a node that turned early faded to fully invisible by
+	# its own COLLAPSE_FADE_AT/ORPHAN_COLLAPSE_TIME and then sat there
+	# see-through for however much longer the rest of the island took —
+	# LOOKING like it had already died well before it actually was removed.
+	# Playtest: "still the source and closer shapes die sooner." Staying
+	# fully opaque the whole time it rages, and only vanishing at the actual
+	# synchronized removal, is what makes that removal read as sudden and
+	# simultaneous instead of each one having visibly been fading out on its
+	# own schedule the entire time.
+	if depth >= 0:
+		var cr := collapse_ratio()
+		if cr > COLLAPSE_FADE_AT:
+			fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
 	modulate.a = clampf(fade, 0.0, 1.0)
 
 	queue_redraw()
@@ -753,6 +768,17 @@ func _draw_ring(r: float, col: Color) -> void:
 ## corpse on the board wearing the identical violet. The violet pull keeps
 ## "this is rot" legible at a glance even for a resource whose colour reads
 ## close to it already.
+##
+## RAGING (depth < 0 — orphaned, so actively attacking whatever it's still
+## wired to, see game.gd's _tick_corruption/_start_poison_dart) overrides all
+## of that with a flat Palette.RAGE instead: a corpse quietly poisoning the
+## Heart and an active attacker are different threats, and direct feedback
+## asked for the difference to be visible — "when the rage starts, the
+## poisonous shapes turn red, and others that get poisonous turn red too."
+## A freshly-turned victim is already orphaned the instant it corrupts (it
+## was only ever reached because it was still wired to something raging), so
+## this same depth check is exactly the "just got poisonous" moment too —
+## no separate flag needed.
 func _draw_necrotic(r: float) -> void:
 	var ms := Time.get_ticks_msec()
 	# Coarse time buckets so the glitch STUTTERS between held poses instead
@@ -764,7 +790,8 @@ func _draw_necrotic(r: float) -> void:
 	if g > 0.62:
 		jit = Vector2(_noise01(frame * 13 + 5) - 0.5, _noise01(frame * 17 + 9) - 0.5) * r * 0.55
 
-	var tint := _corrupt_tint.lerp(Palette.VOID, 0.3).darkened(0.35)
+	var raging := depth < 0
+	var tint := Palette.RAGE.darkened(0.15) if raging else _corrupt_tint.lerp(Palette.VOID, 0.3).darkened(0.35)
 	var tint_dim := tint.darkened(0.4)
 
 	var fill := tint_dim
