@@ -47,7 +47,7 @@ const HTTP_TIMEOUT := 12.0
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 11
+const TUNING_VERSION := 12
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 ## Was 4, which undercut VEIN.md's own pitch ("start with 5, earn more at
@@ -295,15 +295,21 @@ const START_FUEL := FUEL_CAP
 ## within 2%. 0.19 was tried first and rejected: avg matched (175) but one
 ## seed's min collapsed to 90 (was 140), the exact "steeper base quietly
 ## guts an unlucky opening" failure this file already warned about above.
-const APPETITE_BASE := 0.17
-## Was 0.013. Real playtest feedback: the CLOTH (square) craving at t=37 was
-## landing at a punishing drain rate — appetite by then is already
-## APPETITE_BASE + this*37, and it keeps compounding for the rest of the run.
-## Cut ~15% so the climb past the square tier is survivable slack again
-## rather than a wall; APPETITE_BASE (the opening) is untouched on purpose,
-## same reasoning as the START_FUEL note above — this only softens the
-## late-game slope, not the first-beat gut check.
-const APPETITE_RATE := 0.011    # per second
+##
+## RAISED 0.17 -> 0.24 (feedback: "to not make the initial game too easy we
+## can start at a faster rate but the gradual raise be very softer"). The
+## 0.19 rejection above was measured against the OLD retroactive curve (see
+## appetite()), where a soft opening was the only slack a run had against a
+## brutal late game. With that curve fixed and APPETITE_RATE cut below, the
+## late game is far gentler, so the opening can afford to carry more of the
+## difficulty — which is exactly the trade asked for. The two curves cross
+## at around t=37 (the CLOTH flip): harder than the shipped build for the
+## whole learning phase, softer than it forever after.
+const APPETITE_BASE := 0.24
+## Was 0.013, then 0.011, now 0.006 — "we should slow the rate more ... the
+## gradual raise be very softer." This is the long-run slope and nothing
+## else; the opening is APPETITE_BASE's job, and it absorbed the difference.
+const APPETITE_RATE := 0.006    # per second
 
 ## Seconds of exertion before the heart is fully racing.
 ##
@@ -1227,6 +1233,7 @@ func start_run(run_seed: int) -> void:
 	_sync_flash = 0.0
 	_bad_tempo_flash = 0.0
 	_appetite_clock = 0.0
+	_appetite_growth = 0.0
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
@@ -1833,9 +1840,39 @@ const APPETITE_WAVE_PERIOD := 17.0
 ## already carry the tuned "first ten seconds" grace on their own.
 const TEACHING_APPETITE_MULT := 0.4
 
+## THE PENTAGON SPIKE. This used to read:
+##
+##     var rate := APPETITE_RATE * lerpf(TEACHING_APPETITE_MULT, 1.0, _hardcore_ramp())
+##     var base := APPETITE_BASE + rate * _appetite_clock
+##
+## which multiplies the CURRENT rate by the TOTAL elapsed clock — so the
+## teaching discount was never a discount on the seconds it applied to, it
+## was a loan against the whole run, called in all at once the moment
+## _hardcore_ramp() started moving. And _hardcore_ramp() starts moving
+## exactly when PRISM unlocks. Reported, twice, in exactly those terms: "the
+## heart goes fast when we reach the pentagon."
+##
+## Measured on the shipped constants (0.17/0.011, PRISM at t=100, 60s ramp):
+## appetite went 0.61 -> 1.93 across the ramp window, x3.16. Of that, only
+## 0.011*60 = 0.66 is real elapsed time at the full rate; the rest was the
+## 2.5x teaching multiplier being applied retroactively to the 100 seconds
+## that had ALREADY been played at the discounted rate. TEACHING_PRESSURE_MULT
+## above claims "nothing about the tuned LATE curve changes — this only
+## compresses how much of it you feel while still climbing to PRISM," which
+## is what the design intended and not what this arithmetic did.
+##
+## Integrating the rate instead makes the multiplier affect only the seconds
+## it was actually in force. Same two constants, same teaching discount, same
+## full-strength late slope — but no step, because nothing is recomputed
+## retroactively. On the shipped constants this alone takes the ramp-window
+## jump from x3.16 to x1.76; with APPETITE_RATE cut to 0.006 it is x1.52.
+##
+## _appetite_clock is still the wave's phase clock below — the wave is a
+## function of when you are, not of how much has accumulated.
+var _appetite_growth := 0.0
+
 func appetite() -> float:
-	var rate := APPETITE_RATE * lerpf(TEACHING_APPETITE_MULT, 1.0, _hardcore_ramp())
-	var base := APPETITE_BASE + rate * _appetite_clock
+	var base := APPETITE_BASE + _appetite_growth
 	var wave := sin(_appetite_clock * TAU / APPETITE_WAVE_PERIOD) * APPETITE_WAVE_AMP * intensity()
 	return maxf(0.02, base + wave)
 
@@ -1882,6 +1919,13 @@ func _tut_gates_spawns() -> bool:
 func _tick_escalation(delta: float) -> void:
 	run_time += delta
 	_appetite_clock += delta
+	# Accumulate the drain slope as it is actually in force, rather than
+	# rescaling the whole elapsed clock by the current multiplier every frame
+	# — see appetite()/_appetite_growth for why that difference IS the
+	# pentagon spike. Reads _hardcore_ramp() one frame stale (PRISM can unlock
+	# further down this same tick), which is irrelevant against a 60s ramp.
+	_appetite_growth += APPETITE_RATE \
+		* lerpf(TEACHING_APPETITE_MULT, 1.0, _hardcore_ramp()) * delta
 	# The demand SCHEDULE runs on time-since-first-feed, not run_time — see
 	# _heart_fed_ever. Everything else (appetite, spawns, corruption) still
 	# escalates on real run_time regardless of engagement; only the "what does
