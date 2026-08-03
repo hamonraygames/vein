@@ -68,7 +68,6 @@ const VOICES := 12
 ## about it the way it does for those.
 const VOICE := {
 	"new_highscore": "res://assets/audio/voice/new_highscore.ogg",
-	"congratulations": "res://assets/audio/voice/congratulations.ogg",
 	"power_up": "res://assets/audio/voice/power_up.ogg",
 	"level_up": "res://assets/audio/voice/level_up.ogg",
 	# Still unrecorded — callout.gd's pools reference these; they play

@@ -47,7 +47,6 @@ const POOLS := {
 	"best": {
 		"entries": [
 			{"text": "NEW HIGH SCORE", "voice": "new_highscore"},
-			{"text": "CONGRATULATIONS", "voice": "congratulations"},
 		],
 		"color": "warm",
 	},

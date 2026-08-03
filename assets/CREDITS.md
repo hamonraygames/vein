@@ -59,7 +59,6 @@ key list and which ones are still silent.
 | File | Source | Author | License | Status |
 |---|---|---|---|---|
 | `audio/voice/new_highscore.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`best`) |
-| `audio/voice/congratulations.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`best`) |
 | `audio/voice/power_up.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`combo`) |
 | `audio/voice/level_up.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`combo`) |
 

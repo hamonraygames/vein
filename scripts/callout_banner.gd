@@ -17,7 +17,7 @@ const LIFE := POP_TIME + HOLD_TIME + FADE_TIME
 const SIZE := 62
 ## Safety clamp against the fixed 540-wide design canvas (see game.gd's
 ## design_size()) — this scene has no reference to that function, and a
-## longer line ("CONGRATULATIONS") at the overshoot peak's ~2x size would
+## longer line ("NEW HIGH SCORE") at the overshoot peak's ~2x size would
 ## otherwise run off both edges of the screen. 480 leaves a margin on either
 ## side, matching how EDGE_MARGIN_X-style constants elsewhere keep content
 ## clear of the canvas edge.
