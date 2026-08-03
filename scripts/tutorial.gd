@@ -81,7 +81,12 @@ func reset() -> void:
 		# are lifted, so let demand and the cut lesson proceed immediately.
 		step = Step.WATCH
 		if game.tut_chain:
-			_demand_flip_time = game.run_time
+			# Same DEMAND_GRACE as the natural _after_chain() path — this was
+			# game.run_time with no grace, so a death after learning CONNECT+
+			# CHAIN but before finishing the Forge lesson resumed with the
+			# Heart already demanding a triangle on the very first frame,
+			# before the two starter Wells were even reconnected.
+			_demand_flip_time = game.run_time + DEMAND_GRACE
 		if game.tut_forge:
 			_cut_inject_time = game.run_time + CUT_GRACE
 	else:
