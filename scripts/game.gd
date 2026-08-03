@@ -1122,10 +1122,30 @@ func _load_save() -> void:
 	# every /name and /score call the server ever saw from them failed with
 	# "bad player_id", and there was no way to ever recover from it client-side.
 	if cfg.load(SAVE_PATH) == OK:
-		# Lifetime beats survive a rebalance; a best score does not.
 		lifetime_beats = int(cfg.get_value("run", "lifetime", 0))
-		if int(cfg.get_value("run", "tuning", 0)) == TUNING_VERSION:
-			best = int(cfg.get_value("run", "best", 0))
+		# THE BEST SCORE NO LONGER GETS WIPED BY A REBALANCE.
+		#
+		# This used to be gated on `tuning == TUNING_VERSION`, so every bump
+		# silently reset best to 0. The intent was sound and is still true —
+		# a best set on an easier curve is a wall, not a target — but the
+		# cure was worse than the disease. TUNING_VERSION went 9 -> 15 in a
+		# single afternoon of balancing, wiping every player's record six
+		# times over, and the player-visible result was "the new high score
+		# text is bs, it shows at the start of the game even though my high
+		# score is +1000": best was 0, so the first delivery beat it.
+		#
+		# For a game that is supposed to be worth returning to, silently
+		# deleting the player's one long-horizon achievement every time we
+		# retune is corrosive in a way an out-of-reach target is not — they
+		# still have their number, they just have to grow into it again. And
+		# the current rebalance moved scores UP (probed ceiling 1893 ->
+		# 2335), so existing bests are comfortably beatable anyway.
+		#
+		# The alternative worth building later, if an unreachable best ever
+		# actually becomes the problem: keep a best PER tuning version as the
+		# live target and an all-time best alongside it, so nothing is ever
+		# destroyed and nothing is ever unfair. See FOREVER.md.
+		best = int(cfg.get_value("run", "best", 0))
 		seen_forge = bool(cfg.get_value("run", "seen_forge", false))
 		seen_loom = bool(cfg.get_value("run", "seen_loom", false))
 		seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
@@ -1153,6 +1173,9 @@ func _store_save() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("run", "best", best)
 	cfg.set_value("run", "lifetime", lifetime_beats)
+	# Still recorded, though nothing reads it any more (see _load_save for why
+	# the wipe was removed) — it says which curve a saved best was set on,
+	# which is exactly what a future per-version best would need.
 	cfg.set_value("run", "tuning", TUNING_VERSION)
 	cfg.set_value("run", "seen_forge", seen_forge)
 	cfg.set_value("run", "seen_loom", seen_loom)
@@ -4201,7 +4224,15 @@ func _pop_gain(kind: int, gain: float, at: Vector2, out_dir: Vector2, off_demand
 		if score >= _next_milestone_callout:
 			_next_milestone_callout += MILESTONE_CALLOUT_STEP
 			Callout.fire("milestone", vein_layer, design_size() * 0.5)
-		if not _best_callout_fired and score > best:
+		# `best > 0` matters: without it this fires on the FIRST DELIVERY of
+		# any run where best is 0, because 1 > 0. Reported as "the new high
+		# score text is bs, it shows at the start of the game even though my
+		# high score is +1000" — best had been wiped to 0 (see _load_save),
+		# so the game congratulated the player on beating a record it had
+		# just deleted, five seconds into the run. It would also have hit
+		# every genuinely new player on their first-ever delivery, where
+		# "NEW HIGH SCORE" is technically true and completely meaningless.
+		if not _best_callout_fired and best > 0 and score > best:
 			_best_callout_fired = true
 			Callout.fire("best", vein_layer, design_size() * 0.5, true)
 	var col: Color
