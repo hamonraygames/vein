@@ -49,18 +49,14 @@ far from where it was recorded.
 
 ## Voice (callouts)
 
-Milestone callouts (see `scripts/callout.gd`) pair a big on-screen text pop
-with an optional voice line. A few generic ones below are real CC0 voice-over
-takes; most of the pool (the funnier, VEIN-specific lines like "juicy" or
-"give me more") has no matching real recording yet and plays text-only until
-someone records them — see `scripts/audio.gd`'s `VOICE` dict for the full
-key list and which ones are still silent.
+None. Milestone callouts (see `scripts/callout.gd`) are text-only.
 
-| File | Source | Author | License | Status |
-|---|---|---|---|---|
-| `audio/voice/new_highscore.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`best`) |
-| `audio/voice/power_up.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`combo`) |
-| `audio/voice/level_up.ogg` | [Voiceover Pack](https://kenney.nl/assets/voiceover-pack) (Male) | Kenney Vleugels (Kenney.nl) | CC0 | **in use** (`combo`) |
+They used to pair the on-screen text pop with a spoken CC0 voice-over clip
+(Kenney's [Voiceover Pack](https://kenney.nl/assets/voiceover-pack): "new
+high score", "power up", "level up", "congratulations"). Those were removed
+as annoying, and the clips deleted rather than left unreferenced — this
+project exports with `export_filter="all_resources"`, so an orphaned `.ogg`
+still ships inside the `.pck` and costs every web player the download.
 
 ## Fonts
 

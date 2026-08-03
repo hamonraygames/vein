@@ -10,7 +10,20 @@ extends Node2D
 ## A bright core over a wider, dimmer glow, both fading fast — reads as a
 ## flash of motion rather than a static mark.
 
-const LIFE := 0.16
+## Was 0.16 — "the sliding to cut animation should be a little bit longer,
+## right now it's hard to see it." At a tenth of a second the streak was
+## essentially a single-frame flicker: it fired, and the vein was already
+## gone, so the gesture never got to teach itself (which is this whole
+## node's reason to exist).
+##
+## Lengthened with a HOLD rather than by just stretching the linear fade,
+## because tripling a straight fade turns a slash into a lingering smear —
+## the opposite of the "flash of motion rather than a static mark" this is
+## going for. The streak now sits at FULL brightness for the first stretch,
+## which is what actually makes it register, then eases out over the rest.
+const LIFE := 0.40
+## Fraction of LIFE held at full brightness before the fade starts.
+const HOLD := 0.3
 
 var _from := Vector2.ZERO
 var _to := Vector2.ZERO
@@ -32,7 +45,9 @@ func _process(delta: float) -> void:
 
 
 func _draw() -> void:
-	var fade := 1.0 - clampf(_t / LIFE, 0.0, 1.0)
+	# smoothstep returns 0 for the whole HOLD window, then eases 0->1 across
+	# the remainder, so `fade` is a flat 1.0 and then a soft tail — see LIFE.
+	var fade := 1.0 - smoothstep(HOLD, 1.0, clampf(_t / LIFE, 0.0, 1.0))
 	var glow := Palette.SCORE
 	glow.a = fade * 0.35
 	draw_line(_from, _to, glow, 9.0 * fade + 2.0, true)

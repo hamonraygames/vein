@@ -1,17 +1,14 @@
 extends Node
 ## Fun, loud, deliberately NOT diegetic milestone reactions — a big on-screen
-## text pop plus an optional voice line (see audio.gd's play_voice) for a
-## combo streak, a score milestone, a narrow escape, or a new personal best.
-## Autoload so any part of game.gd can fire one without threading a
-## reference through.
+## text pop for a combo streak, a score milestone, a narrow escape, or a new
+## personal best. Autoload so any part of game.gd can fire one without
+## threading a reference through.
 ##
-## Every category is a POOL of PAIRED {text, voice} entries — text and voice
-## are picked TOGETHER as one unit, never independently. An earlier version
-## kept two separate arrays and rolled each on its own, which could show
-## "NICE" while playing a "level up!" clip — text and voice from two
-## unrelated categories of feeling. `voice` is "" for an entry with no real
-## recording yet (see audio.gd's VOICE comment); Callout never substitutes a
-## mismatched clip just to have SOME sound play.
+## These were text + a spoken voice line, paired so the two could never
+## mismatch. The voice half is gone entirely ("get rid of all text sounds,
+## they're annoying, just keep the text"), which collapses each pool from
+## {text, voice} dictionaries to plain strings and takes the pairing problem
+## with it.
 ##
 ## Picking WHETHER a category-crossing moment fires at all is also
 ## randomised (see FIRE_CHANCE) — a callout on every single threshold, every
@@ -19,35 +16,25 @@ extends Node
 
 const CalloutBannerScene := preload("res://scripts/callout_banner.gd")
 
+## Text only. Every entry used to carry a "voice" key naming a spoken clip
+## played alongside the banner; those are gone — "get rid of all text sounds,
+## they're annoying, just keep the text" — along with the whole voice pool in
+## audio.gd that served them.
 const POOLS := {
 	"combo": {
-		"entries": [
-			{"text": "POWER UP", "voice": "power_up"},
-			{"text": "ON FIRE", "voice": ""},
-			{"text": "UNSTOPPABLE", "voice": ""},
-		],
+		"entries": ["POWER UP", "ON FIRE", "UNSTOPPABLE"],
 		"color": "score",
 	},
 	"milestone": {
-		"entries": [
-			{"text": "LEVEL UP", "voice": "level_up"},
-			{"text": "KEEP GOING", "voice": ""},
-			{"text": "FEED IT", "voice": ""},
-		],
+		"entries": ["LEVEL UP", "KEEP GOING", "FEED IT"],
 		"color": "score",
 	},
 	"rescue": {
-		"entries": [
-			{"text": "THAT WAS CLOSE", "voice": ""},
-			{"text": "SAVED", "voice": ""},
-			{"text": "PHEW", "voice": ""},
-		],
+		"entries": ["THAT WAS CLOSE", "SAVED", "PHEW"],
 		"color": "warm",
 	},
 	"best": {
-		"entries": [
-			{"text": "NEW HIGH SCORE", "voice": "new_highscore"},
-		],
+		"entries": ["NEW HIGH SCORE"],
 		"color": "warm",
 	},
 }
@@ -86,26 +73,22 @@ func fire(category: String, layer: Node2D, at: Vector2, force := false) -> void:
 	_last_at = now
 
 	var pool: Dictionary = POOLS[category]
-	var entry: Dictionary = _pick(category, pool["entries"])
+	var text: String = _pick(category, pool["entries"])
 	var col: Color = Palette.WARM if pool.get("color", "") == "warm" else Palette.SCORE
 
 	var banner: Node2D = CalloutBannerScene.new()
 	layer.add_child(banner)
-	banner.spawn(entry["text"], at, col)
-
-	var voice: String = entry.get("voice", "")
-	if not voice.is_empty():
-		Audio.play_voice(voice)
+	banner.spawn(text, at, col)
 
 
 ## Rerolls once on an immediate repeat rather than tracking full history —
 ## each pool is small enough that one reroll all but rules out showing the
 ## same entry twice back to back.
-func _pick(category: String, options: Array) -> Dictionary:
+func _pick(category: String, options: Array) -> String:
 	if options.size() <= 1:
 		return options[0]
-	var choice: Dictionary = options[_rng.randi() % options.size()]
-	if choice["text"] == _last_text.get(category, ""):
+	var choice: String = options[_rng.randi() % options.size()]
+	if choice == _last_text.get(category, ""):
 		choice = options[_rng.randi() % options.size()]
-	_last_text[category] = choice["text"]
+	_last_text[category] = choice
 	return choice

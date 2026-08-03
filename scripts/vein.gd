@@ -105,7 +105,13 @@ var wrong_flow := false
 ## (a stale or wrong-shape one carries nothing). Every cut now shrinks and
 ## fades in place first, localized to the exact line the player tapped, so
 ## the action always visibly registers regardless of what it was carrying.
-const DIE_TIME := 0.22
+## Lengthened 0.22 -> 0.34 alongside slash.gd's LIFE, for the same "hard to
+## see it" report and because the two are halves of one event: with the
+## streak now lasting 0.40s, a 0.22s retract meant the vein had already
+## vanished while the slash that cut it was still glowing over empty space.
+## Purely cosmetic either way — game.gd drops the vein from `veins` and from
+## the graph the instant it is cut, so nothing in the sim waits on this.
+const DIE_TIME := 0.34
 var _dying := false
 var _die_t := 0.0
 

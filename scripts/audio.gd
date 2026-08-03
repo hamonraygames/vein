@@ -57,35 +57,12 @@ const SFX := {
 ## allocating a player per note would stutter on a mid-range phone.
 const VOICES := 12
 
-## Milestone callout voice lines (see scripts/callout.gd — the only thing
-## that calls play_voice). Unlike SFX above, most of these keys are
-## DELIBERATELY unmapped: they are the funny, VEIN-specific lines ("juicy",
-## "give me more", ...) callout.gd's pools reference, and there is no real
-## recorded take for them yet — someone still needs to record one (see
-## assets/CREDITS.md's Voice section for which keys already have a real CC0
-## clip vs. which are silent placeholders). A missing key is NOT a bug the
-## way a missing SFX/TRACK path would be, so _ready() below does not warn
-## about it the way it does for those.
-const VOICE := {
-	"new_highscore": "res://assets/audio/voice/new_highscore.ogg",
-	"power_up": "res://assets/audio/voice/power_up.ogg",
-	"level_up": "res://assets/audio/voice/level_up.ogg",
-	# Still unrecorded — callout.gd's pools reference these; they play
-	# text-only until a real clip lands at the path below.
-	"juicy": "res://assets/audio/voice/juicy.ogg",
-	"delicious": "res://assets/audio/voice/delicious.ogg",
-	"unforgettable": "res://assets/audio/voice/unforgettable.ogg",
-	"give_me_more": "res://assets/audio/voice/give_me_more.ogg",
-	"dont_stop": "res://assets/audio/voice/dont_stop.ogg",
-	"phew": "res://assets/audio/voice/phew.ogg",
-	"close_one": "res://assets/audio/voice/close_one.ogg",
-	"godlike": "res://assets/audio/voice/godlike.ogg",
-	"kidding_me": "res://assets/audio/voice/kidding_me.ogg",
-}
-## Small dedicated pool, separate from the SFX one above — a callout is rare
-## (see callout.gd's MIN_GAP) and must never lose its voice line because a
-## busy beat's feed notes ate every SFX voice.
-const VOICE_VOICES := 3
+## The spoken callout lines ("NEW HIGH SCORE", "POWER UP", ...) used to play a
+## voice clip alongside the on-screen text. Removed outright — "get rid of all
+## text sounds, they're annoying, just keep the text." The banners still fire
+## exactly as before (see callout.gd); they are simply silent now, which also
+## puts them back in line with VEIN.md's own audio direction, where the only
+## voice the game has is the heartbeat and the notes quantized to it.
 
 var intensity := 0.0
 
@@ -93,9 +70,6 @@ var _track: AudioStreamPlayer
 var _voices: Array[AudioStreamPlayer] = []
 var _next_voice := 0
 var _streams := {}
-var _voice_players: Array[AudioStreamPlayer] = []
-var _next_voice_player := 0
-var _voice_streams := {}
 var _ready_ok := false
 
 
@@ -125,19 +99,6 @@ func _ready() -> void:
 		v.bus = "Master"
 		add_child(v)
 		_voices.append(v)
-
-	# See VOICE's own comment — a missing entry here is the expected state
-	# for a line nobody has recorded yet, not a broken reference, so this
-	# loop stays quiet where the SFX one above does not.
-	for key in VOICE:
-		var vs: AudioStream = load(VOICE[key])
-		if vs != null:
-			_voice_streams[key] = vs
-	for i in VOICE_VOICES:
-		var vp := AudioStreamPlayer.new()
-		vp.bus = "Master"
-		add_child(vp)
-		_voice_players.append(vp)
 
 	_ready_ok = not _streams.is_empty()
 	Beat.beat.connect(_on_beat)
@@ -295,18 +256,3 @@ func sync_hit(combo: int, perfect: bool) -> void:
 	play("refined" if perfect else "raw", db, pitch)
 
 
-## A milestone callout's voice line (see callout.gd) — a no-op for any key
-## with no real recording yet (see VOICE's own comment), same "missing asset
-## is just silence" contract play() already has for SFX. Its own player
-## pool, deliberately separate from swallow()/sync_hit()'s so a rare callout
-## voice line can never lose a race against a busy beat's feed notes for a
-## free voice.
-func play_voice(key: String, db: float = -4.0) -> void:
-	if not _voice_streams.has(key):
-		return
-	var v := _voice_players[_next_voice_player]
-	_next_voice_player = (_next_voice_player + 1) % _voice_players.size()
-	v.stream = _voice_streams[key]
-	v.volume_db = db
-	v.pitch_scale = 1.0
-	v.play()
