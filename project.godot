@@ -71,5 +71,13 @@ pointing/emulate_touch_from_mouse=true
 [rendering]
 
 renderer/rendering_method="mobile"
-anti_aliasing/quality/msaa_2d=2
+; Was 2 (4x MSAA). This multiplies whatever the framebuffer already costs, and
+; on the web build that framebuffer is large — see the devicePixelRatio clamp
+; in web/telegram_shell.html for the full reasoning. Halving samples here and
+; capping DPR there compound: together they cut roughly 4.5x off the per-frame
+; fill/bandwidth the shipped build was paying on a DPR-3 phone.
+; 2x is enough to keep the vein curves and node polygons smooth, because the
+; 540x1170 design canvas is still being supersampled ~1.44x into the clamped
+; DPR-2 framebuffer before MSAA is applied at all.
+anti_aliasing/quality/msaa_2d=1
 environment/defaults/default_clear_color=Color(0.051, 0.051, 0.063, 1)

@@ -116,6 +116,50 @@ body {
 		</div>
 
 		<script>
+// Caps the render resolution. This is the single biggest cost in the whole
+// build on a phone, and it is invisible from inside the game — it is decided
+// here, before Godot ever boots.
+//
+// The Web preset exports with html/canvas_resize_policy=2 ("Adaptive"), and
+// Godot's default display/window/dpi/allow_hidpi is TRUE, so the engine sizes
+// its framebuffer at window.innerWidth/Height * window.devicePixelRatio (see
+// godot_js_display_pixel_ratio_get). On a current phone DPR is 3, so a
+// 390x844 CSS viewport became a 1170x2532 framebuffer — NINE times the pixels
+// — and MSAA then multiplies samples on top of that. Every fragment of every
+// vein, node, dot and glow is paid for at that resolution, every frame, for
+// the entire run. That is the "phone gets hot and slow" report: it is fill
+// rate and memory bandwidth, not game logic, and no amount of script-level
+// optimisation touches it (the earlier pass audited every _process/_draw and
+// found nothing comparable, because the cost was never in the scripts).
+//
+// Clamping to 2 rather than turning HiDPI off entirely, deliberately: the
+// design canvas is 540x1170 (see project.godot) and stretch/mode is
+// canvas_items, so the board is rendered into whatever framebuffer this
+// yields. At DPR 1 that framebuffer is SMALLER than the design canvas (390 <
+// 540) — the game would render below its own authored resolution and get
+// upscaled, which is visibly soft and would break VEIN.md's "screenshots
+// should be beautiful enough to be the marketing." At DPR 2 it is 780x1688,
+// still a 1.44x supersample of the design canvas, so the vector edges stay
+// crisp while costing 2.25x less than DPR 3. The step from 2x to 3x is
+// close to imperceptible at phone viewing distance; the cost is not.
+//
+// A getter (not a one-time assignment) because Godot re-reads this on every
+// resize, and Telegram's WebView fires those often (see viewportChanged
+// below).
+(function () {
+	const MAX_DPR = 2;
+	if ((window.devicePixelRatio || 1) <= MAX_DPR) {
+		return;
+	}
+	Object.defineProperty(window, 'devicePixelRatio', {
+		configurable: true,
+		get: function () {
+			return MAX_DPR;
+		},
+	});
+}());
+		</script>
+		<script>
 // Runs before the engine script so the Telegram chrome (top bar, swipe-to-
 // close) is out of the way before the WASM payload even starts loading.
 // Safe to run unconditionally: outside Telegram, window.Telegram.WebApp is
