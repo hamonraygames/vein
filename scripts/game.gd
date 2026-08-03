@@ -47,10 +47,13 @@ const HTTP_TIMEOUT := 12.0
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 9
+const TUNING_VERSION := 11
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
-const START_BUDGET := 4
+## Was 4, which undercut VEIN.md's own pitch ("start with 5, earn more at
+## milestones") — real playtest feedback said the opening felt vein-starved
+## before a single Forge even existed. Back to the doc's number.
+const START_BUDGET := 5
 ## Was a flat 5.0 that never grew while appetite (fuel burned per beat) climbs
 ## toward ~2.9 by late-game — the buffer against a single missed beat shrank
 ## to almost nothing exactly when supply gets hardest to keep up with. Real
@@ -150,6 +153,18 @@ const DEMAND_TIERS := [
 	{"at": 100.0, "res": VNode.Res.PRISM},
 	{"at": 200.0, "res": VNode.Res.HEXAGON},
 ]
+
+## Feedback: the teaching-tier flips landed at the exact same _demand_clock
+## second every single run — every OTHER clock in this file (Wells, Forges,
+## Looms, budget, even the post-teaching rotation gap) goes through _jitter,
+## this was the one schedule that didn't. Applied once per tier, at the
+## moment the PREVIOUS tier lands, not re-rolled every frame — see
+## _next_tier_time/_tier_time_idx and _tick_escalation. Kept tighter than the
+## rotation-phase jitter (0.3-0.35): this schedule is still the TEACHING
+## curve everything else's lead times (FIRST_FORGE_TIME etc.) are pinned
+## against, so it shouldn't drift far enough to make a tool arrive after the
+## demand that needs it.
+const TEACHING_TIER_JITTER := 0.15
 
 ## Once every tier above has been introduced, demand stops marching forward
 ## and starts jumping randomly among everything unlocked so far — the Heart
@@ -281,7 +296,14 @@ const START_FUEL := FUEL_CAP
 ## seed's min collapsed to 90 (was 140), the exact "steeper base quietly
 ## guts an unlucky opening" failure this file already warned about above.
 const APPETITE_BASE := 0.17
-const APPETITE_RATE := 0.013    # per second
+## Was 0.013. Real playtest feedback: the CLOTH (square) craving at t=37 was
+## landing at a punishing drain rate — appetite by then is already
+## APPETITE_BASE + this*37, and it keeps compounding for the rest of the run.
+## Cut ~15% so the climb past the square tier is survivable slack again
+## rather than a wall; APPETITE_BASE (the opening) is untouched on purpose,
+## same reasoning as the START_FUEL note above — this only softens the
+## late-game slope, not the first-beat gut check.
+const APPETITE_RATE := 0.011    # per second
 
 ## Seconds of exertion before the heart is fully racing.
 ##
@@ -749,6 +771,12 @@ var _demand_tier_idx := 0
 ## Successful (kind == demand) deliveries since the tier at _demand_tier_idx
 ## became active — reset to 0 on every advance (see _deliver/_tick_escalation).
 var _current_demand_deliveries := 0
+## Jittered stand-in for DEMAND_TIERS[_demand_tier_idx + 1].at — see
+## TEACHING_TIER_JITTER. Rolled once when _demand_tier_idx changes, tracked
+## via _tier_time_idx so re-reading it every frame in _tick_escalation
+## doesn't reroll a fresh random threshold every frame.
+var _next_tier_time := 0.0
+var _tier_time_idx := -1
 var _next_rotate_time := INF
 ## Pre-rolled outcome of the NEXT rotation flip, rolled DEMAND_TELL_LEAD
 ## seconds early so the Heart can telegraph it (see _tick_escalation and
@@ -1189,6 +1217,7 @@ func start_run(run_seed: int) -> void:
 	_next_rotate_demand = -1
 	_heart_fed_ever = false
 	_demand_clock = 0.0
+	_tier_time_idx = -1
 	_prism_unlocked_at = INF
 	_no_move_time = 0.0
 	rescues = 0
@@ -1884,7 +1913,10 @@ func _tick_escalation(delta: float) -> void:
 			# _demand_tier_idx's own header above for why).
 			if _demand_tier_idx < DEMAND_TIERS.size() - 1:
 				var next_tier: Dictionary = DEMAND_TIERS[_demand_tier_idx + 1]
-				if _demand_clock >= next_tier.at and _current_demand_deliveries >= 1:
+				if _tier_time_idx != _demand_tier_idx:
+					_next_tier_time = _jitter(next_tier.at, TEACHING_TIER_JITTER)
+					_tier_time_idx = _demand_tier_idx
+				if _demand_clock >= _next_tier_time and _current_demand_deliveries >= 1:
 					_demand_tier_idx += 1
 					_current_demand_deliveries = 0
 			want = DEMAND_TIERS[_demand_tier_idx].res
