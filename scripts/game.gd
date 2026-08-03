@@ -47,7 +47,7 @@ const HTTP_TIMEOUT := 12.0
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 13
+const TUNING_VERSION := 14
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 ## Was 4, which undercut VEIN.md's own pitch ("start with 5, earn more at
@@ -146,12 +146,26 @@ const CRUCIBLE_GAP := 70.0
 ## HEXAGON entry is the actual fifth tier the doc always promised, landing
 ## comfortably inside the EXERTION_SPAN=200 window (see pressure()) rather
 ## than past the point anyone survives to feel it.
+## SPACED OUT (feedback: "we get to heart wants pentagon very fast — at 200
+## points we go to pentagon, it's very quick"). These are seconds on
+## _demand_clock, which only starts at the first feed, so they are already
+## "seconds of actual play" rather than wall clock — the ladder was simply
+## too steep past the tutorial. CLOTH 37 -> 50 and PRISM 100 -> 155 roughly
+## double the time spent at the square, which is the tier where a player is
+## first running a real Well->Forge->Loom chain and where the deep-chain
+## skill actually gets learned; arriving at pentagon before that is solid is
+## what made it feel both sudden AND lethal. HEXAGON follows it out to keep
+## a comparable gap behind it.
+##
+## Tool lead times still clear these comfortably — FIRST_KILN_TIME is 40
+## against a PRISM flip now at 155, FIRST_CRUCIBLE_TIME 95 against HEXAGON
+## at 290 — so every tier is still introduced well before it is demanded.
 const DEMAND_TIERS := [
 	{"at": 0.0, "res": VNode.Res.RAW},
 	{"at": 14.0, "res": VNode.Res.REFINED},
-	{"at": 37.0, "res": VNode.Res.CLOTH},
-	{"at": 100.0, "res": VNode.Res.PRISM},
-	{"at": 200.0, "res": VNode.Res.HEXAGON},
+	{"at": 50.0, "res": VNode.Res.CLOTH},
+	{"at": 155.0, "res": VNode.Res.PRISM},
+	{"at": 290.0, "res": VNode.Res.HEXAGON},
 ]
 
 ## Feedback: the teaching-tier flips landed at the exact same _demand_clock
@@ -334,9 +348,16 @@ const APPETITE_RATE := 0.006    # per second
 ## Cut 200 -> 165 purely to compensate for that. At 200 the integrated curve
 ## did not reach full exertion until t=285, past where most runs end, so the
 ## endgame the whole design is built around ("collapse is the content") would
-## simply never arrive. 165 puts full racing at t=250 — still 50s later than
-## the old curve managed, so PRISM's generous window survives intact, while
-## the climax stays reachable by a run that earns it.
+## simply never arrive.
+##
+## Left at 165 when DEMAND_TIERS was spaced out afterwards, deliberately, even
+## though that pushed PRISM — and so _hardcore_ramp's start — ~55s later
+## again. Probed rather than assumed: full racing now lands around t=280 and
+## long runs do still reach it (the 469-beat seed did), while a run that dies
+## near pentagon dies at ~0.33 intensity, which is exactly the "pentagon
+## should not be the lethal part" the spacing was for. Cutting this further
+## to force the climax earlier would only re-steepen the curve that every
+## recent change has been flattening.
 const EXERTION_SPAN := 165.0
 
 ## Missed feedings before the beat stops for good. DYING/FATAL both raised a
