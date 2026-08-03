@@ -47,7 +47,7 @@ const HTTP_TIMEOUT := 12.0
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 12
+const TUNING_VERSION := 13
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 ## Was 4, which undercut VEIN.md's own pitch ("start with 5, earn more at
@@ -322,7 +322,22 @@ const APPETITE_RATE := 0.006    # per second
 ## back out so PRISM has a real, generous window to be enjoyed at moderate
 ## intensity before the late curve bites — see HARDCORE_RAMP_TIME below for
 ## the other half of this fix.
-const EXERTION_SPAN := 200.0
+##
+## NOTE the headline above is no longer literally true, and the constant now
+## means something slightly different: since pressure() integrates rather
+## than rescaling the whole clock (see there), this is the denominator of the
+## accumulation RATE, not the wall-clock time to full exertion. The teaching
+## discount is now permanent for the seconds it covered instead of being
+## repaid at pentagon, so full racing lands LATER than this number, not on
+## it.
+##
+## Cut 200 -> 165 purely to compensate for that. At 200 the integrated curve
+## did not reach full exertion until t=285, past where most runs end, so the
+## endgame the whole design is built around ("collapse is the content") would
+## simply never arrive. 165 puts full racing at t=250 — still 50s later than
+## the old curve managed, so PRISM's generous window survives intact, while
+## the climax stays reachable by a run that earns it.
+const EXERTION_SPAN := 165.0
 
 ## Missed feedings before the beat stops for good. DYING/FATAL both raised a
 ## notch alongside FUEL_CAP/APPETITE above — more real seconds of grace before
@@ -1234,6 +1249,7 @@ func start_run(run_seed: int) -> void:
 	_bad_tempo_flash = 0.0
 	_appetite_clock = 0.0
 	_appetite_growth = 0.0
+	_pressure_growth = 0.0
 	run_time = 0.0
 	_next_well_time = FIRST_WELL_TIME
 	_next_forge_time = FIRST_FORGE_TIME
@@ -1805,8 +1821,34 @@ const TEACHING_PRESSURE_MULT := 0.35
 ## pentagon for a while.
 const HARDCORE_RAMP_TIME := 60.0
 
+## THE OTHER HALF OF THE PENTAGON SPIKE, and the one that is literally "the
+## heart goes fast" — this is what sets the heartbeat's BPM, via
+## intensity() -> Beat.set_exertion() -> lerpf(BPM_CALM, BPM_MAXED, ...).
+##
+## It used to read:
+##
+##     return run_time / EXERTION_SPAN * lerpf(TEACHING_PRESSURE_MULT, 1.0, _hardcore_ramp())
+##
+## the identical retroactive shape appetite() had: the CURRENT teaching
+## multiplier applied to the TOTAL elapsed clock, so the 0.35 -> 1.0 swing
+## (x2.86, even sharper than appetite's x2.5) was charged against every
+## second already played the moment PRISM unlocked. Measured on the shipped
+## constants, the heartbeat went 77.5 -> 118.8 BPM across the 60s ramp
+## window: +41 BPM, arriving exactly at pentagon. Integrating instead makes
+## that +13 BPM before EXERTION_SPAN's compensating cut above, ~+16 after.
+##
+## Fixing appetite() alone did not resolve the report, because the two are
+## different systems — that one is fuel burned per beat, this one is how fast
+## the beats come. Both had the same bug; only one had been fixed.
+##
+## This also silently stepped everything ELSE gated on pressure() at the same
+## instant — corruption spread time, tool depletion, the live-Well cap, the
+## demand-rotation gap — which is why pentagon read as a cliff rather than as
+## a tempo change alone.
+var _pressure_growth := 0.0
+
 func pressure() -> float:
-	return run_time / EXERTION_SPAN * lerpf(TEACHING_PRESSURE_MULT, 1.0, _hardcore_ramp())
+	return _pressure_growth
 
 
 ## 0 while PRISM has never been unlocked, ramping 0->1 over HARDCORE_RAMP_TIME
@@ -1926,6 +1968,10 @@ func _tick_escalation(delta: float) -> void:
 	# further down this same tick), which is irrelevant against a 60s ramp.
 	_appetite_growth += APPETITE_RATE \
 		* lerpf(TEACHING_APPETITE_MULT, 1.0, _hardcore_ramp()) * delta
+	# Same treatment, same reason — see pressure(). This one drives the actual
+	# heartbeat tempo, so its step was the audible half of the pentagon spike.
+	_pressure_growth += delta / EXERTION_SPAN \
+		* lerpf(TEACHING_PRESSURE_MULT, 1.0, _hardcore_ramp())
 	# The demand SCHEDULE runs on time-since-first-feed, not run_time — see
 	# _heart_fed_ever. Everything else (appetite, spawns, corruption) still
 	# escalates on real run_time regardless of engagement; only the "what does
