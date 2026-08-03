@@ -47,7 +47,7 @@ const HTTP_TIMEOUT := 12.0
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 14
+const TUNING_VERSION := 15
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 ## Was 4, which undercut VEIN.md's own pitch ("start with 5, earn more at
@@ -102,6 +102,13 @@ const CUT_BLEED_BY_DOT := 0.35
 ## connect+chain lessons are done (see tutorial.gd), so the Forge is never a
 ## surprise there either.
 const FIRST_FORGE_TIME := 9.0
+## NOTE these gaps are throughput constants wearing a spawn constant's
+## clothes: every tool dies by USE (vnode.gd's FORGE_YIELD/LOOM_YIELD/
+## KILN_YIELD), so a tier's sustained rate is its yield divided by how fast a
+## spent one is replaced — i.e. by this. Tightening them (22/36/50/70 ->
+## 17/27/38/52) alongside raised tool caps was tried as the fix for the score
+## ceiling and REJECTED — see MAX_LIVE_FORGES for the measurement and why
+## more tools made the game harder rather than easier.
 const FORGE_GAP := 22.0
 const FIRST_LOOM_TIME := 22.0
 const LOOM_GAP := 36.0
@@ -399,10 +406,33 @@ const WELL_GAP_MIN := 2.5
 
 const FIRST_BUDGET_TIME := 8.0
 const BUDGET_GAP_START := 12.0
-## Was 3.5 — with more Wells, longer reach, and deeper lineages all landing at
-## once (this pass), the player needs veins to keep pace for longer, not have
-## budget growth taper off early.
-const BUDGET_GAP_GROWTH := 2.5  # ...while veins arrive slower and slower
+## THE VEIN INCOME CURVE, and the single biggest reason a run has a ceiling.
+##
+## The gap between budget grants GROWS by this every time one lands, so vein
+## income decays forever: at 2.5 the grants fell at t=8, 20, 34, 51, 71, 93,
+## 118, 145, 174, 206, 240, 277 — decelerating without limit, so budget grows
+## roughly with the square root of time while appetite grows linearly. Probed
+## against six seeds, every single run died holding 16 or 17 veins. Not a
+## range — the same number, every time, which is the signature of a wall the
+## board imposes rather than one the player runs into.
+##
+## That is the "user doesn't have tools" half of "we die around 1000, a little
+## more a little less, making vein a game you won't come back to." You cannot
+## play a topology game strategically when the number of lines you are allowed
+## to own is fixed by the clock and identical in every run. Mini Metro — the
+## explicit comparison — hands you new lines and carriages on a steady
+## cadence for as long as you survive; it never quietly stops paying you.
+##
+## Growth cut to 1.0 and, more importantly, the gap now CAPS (see
+## BUDGET_GAP_MAX). Income still slows early, which is what keeps the opening
+## from drowning a new player in choices, but it flattens into a steady drip
+## instead of asymptoting to nothing.
+const BUDGET_GAP_GROWTH := 1.0
+## Hard ceiling on the gap above — past this, veins arrive on a fixed cadence
+## forever. This is what actually removes the ceiling: a run that survives
+## twice as long now genuinely gets more to work with, so skill has somewhere
+## to express itself instead of everyone converging on the same board.
+const BUDGET_GAP_MAX := 18.0
 
 ## How close a node (or its fallback/clamped position) may sit to the
 ## screen's edge, in design_size() units. X stays modest — the sides are
@@ -444,6 +474,26 @@ const TOOL_IDEAL_HEART_DIST := 195.0
 ## triangles and squares" — tools never die, so without a cap every gap tick
 ## added scenery forever. Enough for one canonical of each plus exotics, early
 ## on while a new player still needs a clutter-free board.
+## RAISING THESE WAS TRIED AND REJECTED. Recorded because the reasoning for
+## trying it is sound and someone will reach for it again.
+##
+## These caps, times each tool's yield over its replacement gap, look like the
+## board's maximum sustainable fuel rate — and since appetite grows linearly
+## forever, that crossing looks like where every run must end. So 4/3/3/2 with
+## tightened gaps (see FORGE_GAP) was the obvious answer to the score ceiling.
+## Measured over six seeds it made things WORSE: avg score 1636 -> 1007, and
+## runs got SHORTER, not longer.
+##
+## Why: a tool is not only a throughput slot, it is also the board's main
+## poison source. Spent tools go necrotic with stronger rot than a Well (see
+## vnode.gd's POISON_POT_BY_KIND), so more tool slots plus faster replacement
+## means more corruption arriving sooner. Adding supply added threat faster
+## than it added supply.
+##
+## The caveat that keeps this from being conclusive: the probe bot barely
+## cuts rot, and cutting rot is exactly the skill extra tools would reward.
+## For a player who does cut, more tools may well be the win it looks like.
+## It cannot be settled with this instrument — it needs real play.
 const MAX_LIVE_FORGES := 3
 const MAX_LIVE_LOOMS := 2
 const MAX_LIVE_KILNS := 2
@@ -453,15 +503,27 @@ const MAX_LIVE_KILNS := 2
 ## reaction speed, not a hard ceiling that leaves the rarest tier permanently
 ## one corruption away from a dead lineage.
 const MAX_LIVE_CRUCIBLES := 1
-## How many extra live-tool slots intensity adds on top of the base cap
-## above, once pressure() climbs past 1.0 — same "the world keeps getting
-## meaner past EXERTION_SPAN" idiom as SPREAD_TIME_LATE/AIRBORNE_CHANCE_MAX.
-## Runs are 3-8 minutes (VEIN.md) and pressure hits 1.0 around EXERTION_SPAN
-## (200s) once fully hardcore, so this only shows up in the intense back half
-## of a longer run — the low base caps still do their early clutter-control
-## job untouched for a new player.
+## How many extra live-tool slots intensity adds on top of the base caps
+## above — same "the world keeps getting meaner past EXERTION_SPAN" idiom as
+## SPREAD_TIME_LATE/AIRBORNE_CHANCE_MAX.
 const EXTRA_LIVE_CAP := 2
-## Pressure units past 1.0 needed to reach the full EXTRA_LIVE_CAP headroom.
+## Where on the pressure curve those extra slots start arriving. Was an
+## inline literal 1.0 in _max_live_for; named here because it is currently
+## DEAD and that should be visible rather than buried in an expression.
+##
+## It was written when pressure() hit 1.0 around EXERTION_SPAN=200, inside a
+## normal run. Since pressure() was fixed to integrate rather than rescale
+## the whole clock retroactively, 1.0 now lands near t=280 and full ramp
+## (1.0 + CAP_RAMP_SPAN = 2.2) somewhere past t=480 — so in practice every
+## run is now played start to finish at the base caps and this ramp never
+## fires at all.
+##
+## Deliberately NOT moved down yet. Doing so is the same "more tools" lever
+## the caps above tested and it measured worse; unlike those, it is at least
+## restricted to the late game where the board has thinned out. It is a real
+## unresolved decision, not an oversight — it wants real play to settle.
+const CAP_RAMP_AT := 1.0
+## Pressure units past CAP_RAMP_AT needed to reach full EXTRA_LIVE_CAP.
 const CAP_RAMP_SPAN := 1.2
 
 ## Rot that is never cut does not get to sit there forever as free clutter,
@@ -2119,7 +2181,7 @@ func _tick_escalation(delta: float) -> void:
 	if run_time >= _next_budget_time:
 		budget += 1
 		_next_budget_time += _jitter(_budget_gap, 0.15)
-		_budget_gap += BUDGET_GAP_GROWTH
+		_budget_gap = minf(BUDGET_GAP_MAX, _budget_gap + BUDGET_GAP_GROWTH)
 		budget_hint.queue_redraw()
 
 
@@ -2163,7 +2225,7 @@ func _max_live_for(kind: int) -> int:
 		VNode.Kind.KILN: base = MAX_LIVE_KILNS
 		VNode.Kind.CRUCIBLE: base = MAX_LIVE_CRUCIBLES
 		_: return 0
-	var extra := floori(clampf((pressure() - 1.0) / CAP_RAMP_SPAN, 0.0, 1.0) * EXTRA_LIVE_CAP)
+	var extra := floori(clampf((pressure() - CAP_RAMP_AT) / CAP_RAMP_SPAN, 0.0, 1.0) * EXTRA_LIVE_CAP)
 	return base + extra
 
 
