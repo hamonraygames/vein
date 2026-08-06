@@ -20,11 +20,14 @@ var _size := 16
 var _dir := Vector2.UP
 var _t := 0.0
 var _font: Font
-## True for spawn_cross() — draws a vector "+" cross instead of a string.
-## Text relies on the fallback font having the glyph; a game-drawn shape
-## can't come out as a missing-character box and matches the rest of the
+## True for spawn_cross()/spawn_plus() — draws a vector mark instead of a
+## string. Text relies on the fallback font having the glyph; a game-drawn
+## shape can't come out as a missing-character box and matches the rest of the
 ## game's vector language (every in-world mark is a shape, never a glyph).
 var _cross := false
+## Rotation of the two arms: PI/4 reads as an X ("wrong"), 0 reads as a
+## + ("granted") — see spawn_cross vs spawn_plus.
+var _cross_rot := PI * 0.25
 
 
 func spawn(text: String, at: Vector2, col: Color, size := 16, dir := Vector2.UP) -> void:
@@ -47,6 +50,21 @@ func spawn_cross(at: Vector2, col: Color, size := 16, dir := Vector2.UP) -> void
 	_size = size
 	_dir = dir if dir != Vector2.ZERO else Vector2.UP
 	_cross = true
+	_cross_rot = PI * 0.25
+	position = at
+	z_index = 25
+
+
+## The upright sibling of spawn_cross: a drawn vector "+", the tithe's
+## life-granted mark at the Heart's rim (see game.gd's _tithe_arrive). A
+## numeric "+N" here would be wrong twice over — the Heart earns fuel, not
+## points, and fuel is fractional (a "+2.4" reads as a bug).
+func spawn_plus(at: Vector2, col: Color, size := 16, dir := Vector2.UP) -> void:
+	_col = col
+	_size = size
+	_dir = dir if dir != Vector2.ZERO else Vector2.UP
+	_cross = true
+	_cross_rot = 0.0
 	position = at
 	z_index = 25
 
@@ -70,10 +88,10 @@ func _draw() -> void:
 	if _cross:
 		var half := float(_size) * 0.32
 		var w := maxf(2.2, float(_size) * 0.16)
-		# Same two perpendicular arms as a "+", just rotated 45° — an X reads
-		# as "wrong" at a glance where an upright cross could pass for a plus.
-		var arm := Vector2(half, 0.0).rotated(PI * 0.25)
-		var arm2 := Vector2(half, 0.0).rotated(-PI * 0.25)
+		# Two perpendicular arms; _cross_rot decides the read — 45° is an X
+		# ("wrong"), upright is a + ("granted"). See spawn_cross/spawn_plus.
+		var arm := Vector2(half, 0.0).rotated(_cross_rot)
+		var arm2 := Vector2(half, 0.0).rotated(_cross_rot - PI * 0.5)
 		draw_line(offset - arm, offset + arm, col, w, true)
 		draw_line(offset - arm2, offset + arm2, col, w, true)
 		return

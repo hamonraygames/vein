@@ -109,6 +109,21 @@ const RUN_TTL_SECONDS = 60 * 60 * 6;
 // charset cleanName() mirrors from onscreen_keyboard.gd).
 const RES = { RAW: 0, REFINED: 1, CLOTH: 2, PRISM: 3, VOID: 4, HEXAGON: 5 };
 const FUEL_BY_RES = { 0: 1.0, 1: 3.0, 2: 7.0, 3: 15.0, 4: -2.5, 5: 31.0 };
+// The tithe — a SPEND event, not a delivery: the client reporting that the
+// player gave `cost` score back to keep the Heart alive (see game.gd's
+// TITHE_EVENT_KIND/_tithe_emit; mirrors that constant). Subtracted from
+// validated_score so the leaderboard matches the death screen. This is
+// bookkeeping, not proof of play — a client that hides its spends is just a
+// client granting itself fuel, which was never server-visible anyway; the
+// deliveries that fuel buys are still rate-checked like everyone else's.
+// The clamp is a sanity bound, not a security boundary: a spend can only
+// ever LOWER the submitting player's own score. Sized against the client's
+// proportional cost (per-dot is at least TITHE_SCORE_FRACTION — 5% — of the
+// CURRENT score, see game.gd's _tithe_emit), so it must sit above 5% of any
+// plausible run's score or clamped spends would leave validated_score HIGHER
+// than the death screen's number.
+const TITHE_KIND = 6;
+const MAX_TITHE_COST = Number(process.env.MAX_TITHE_COST) || 5000;
 const COMBO_GAIN = 0.07;
 const COMBO_CAP = 10;
 // Generous ceiling above vnode.gd's POISON_POT_BY_KIND (tops out at 2.5) —
@@ -323,6 +338,13 @@ function _validateDeliveries(deliveries) {
 	let refinedCount = 0;
 	for (const d of deliveries) {
 		const kind = Number(d && d.kind);
+		if (kind === TITHE_KIND) {
+			// A spend: negative gain, and deliberately outside the raw/refined
+			// rate counters — it is not a delivery and must not eat into the
+			// plausibility budget of the real ones riding in the same batch.
+			gain -= Math.min(Math.max(Number(d.cost) || 0, 0), MAX_TITHE_COST);
+			continue;
+		}
 		if (!Number.isInteger(kind) || !(kind in FUEL_BY_RES)) {
 			return null;
 		}

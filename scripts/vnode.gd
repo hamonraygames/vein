@@ -576,6 +576,68 @@ func _heart_points(r: float) -> PackedVector2Array:
 ## actual buffer capacity, a real balance number, untouched by it.
 const HEART_EDGES := 48
 
+# --- Scar tissue -------------------------------------------------------------
+## Permanent marks of the wounds this run survived. game.gd etches one when a
+## wound actually CLOSES — a tithe episode whose danger passed, misses clawing
+## back from DYING (see _tick_tithe_beat/_on_beat there) — never when it opens:
+## an open wound is the waterline's job, a scar is the record of having lived.
+## The tithe's interest math was already called "the scar" in its own comment
+## (TITHE_INTEREST_GROWTH); this draws it. Heart-only, purely cosmetic, and
+## cleared for free every run because start_run() rebuilds the Heart node.
+##
+## Placement is by index on a golden-angle walk, not RNG: the same wounds heal
+## into the same tissue on any machine, without touching the seeded sim rng
+## for something the sim must never depend on.
+const SCAR_GOLDEN := 2.399963
+## Beyond this the Heart reads as texture, not marks — and every seam is a
+## polygon clip per frame, so the count stays bounded on principle.
+const SCAR_MAX := 32
+
+## [{w}] — weight 0..1, how bad the wound was; sets the seam's length and ink.
+var scars: Array[Dictionary] = []
+
+
+func add_scar(weight: float) -> void:
+	if kind != Kind.HEART or scars.size() >= SCAR_MAX:
+		return
+	scars.append({"w": clampf(weight, 0.0, 1.0)})
+
+
+## Thin kinked seams across the body, in the tithe's ghost ink (Palette.SCORE),
+## never the Heart's own red — scarred tissue is score that became flesh, and
+## it should say so at a glance. Straight segments only, the same vector
+## language as every shape here. Clipped against a slightly inset silhouette
+## so no seam ever touches the outline, wherever the golden walk puts it.
+func _draw_scars(heart: PackedVector2Array, r: float) -> void:
+	if scars.is_empty():
+		return
+	var inset := PackedVector2Array()
+	for p in heart:
+		inset.append(p * 0.93)
+	for i in scars.size():
+		var w := float(scars[i].w)
+		var ang := float(i) * SCAR_GOLDEN
+		# Spread across the whole body, not clustered near the centre — a
+		# tight radius range here made every mark converge into one starburst
+		# at the tip instead of reading as scattered tissue.
+		var c := Vector2.from_angle(ang) * r * (0.32 + 0.5 * fposmod(float(i) * 0.618034, 1.0))
+		c.x *= HEART_WIDTH_MULT
+		# A direction independent of `ang` — tying it to the placement angle
+		# made every seam point toward/away from the centre, which read as
+		# spikes radiating out rather than individual wounds.
+		var dir := Vector2.from_angle(float(i) * 5.317 + 1.7)
+		var half := r * (0.05 + 0.06 * w)
+		var seam := PackedVector2Array([
+			c - dir * half,
+			c + dir.orthogonal() * half * 0.35,
+			c + dir * half,
+		])
+		var col := Palette.SCORE
+		col.a = 0.22 + 0.22 * w
+		for piece in Geometry2D.intersect_polyline_with_polygon(seam, inset):
+			draw_polyline(piece, col, 1.5, true)
+
+
 func _draw_heart_shape(r: float, col: Color) -> void:
 	var heart := _heart_points(r)
 
@@ -603,6 +665,10 @@ func _draw_heart_shape(r: float, col: Color) -> void:
 		fill.a = 0.34 + pulse * 0.34
 		for poly in Geometry2D.intersect_polygons(heart, below):
 			draw_colored_polygon(poly, fill)
+
+	# Over the waterline, under the outline: scars sit IN the flesh — the
+	# fuel level moves behind them, the border still owns the silhouette.
+	_draw_scars(heart, r)
 
 	var outline := heart.duplicate()
 	outline.append(heart[0])
