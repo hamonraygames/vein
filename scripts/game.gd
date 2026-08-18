@@ -20,6 +20,8 @@ const PoisonDartScene := preload("res://scripts/poison_dart.gd")
 const SlashScene := preload("res://scripts/slash.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const TitheScene := preload("res://scripts/tithe.gd")
+const RingTellScene := preload("res://scripts/ring_tell.gd")
+const FuseScene := preload("res://scripts/fuse.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
 const RecoverPromptScene := preload("res://scripts/recover_prompt.gd")
@@ -48,7 +50,7 @@ const HTTP_TIMEOUT := 12.0
 ## Bump whenever tuning changes what a score is worth. A best set on an easier
 ## curve is not a target, it is a wall — the 1244 from the 0.008 appetite build
 ## was unreachable after the rebalance and would just read as broken.
-const TUNING_VERSION := 15
+const TUNING_VERSION := 16
 
 # --- Tuning. Everything the balance depends on lives here. -------------------
 ## Was 4, which undercut VEIN.md's own pitch ("start with 5, earn more at
@@ -435,6 +437,19 @@ const BUDGET_GAP_GROWTH := 1.0
 ## to express itself instead of everyone converging on the same board.
 const BUDGET_GAP_MAX := 18.0
 
+## Forging a ring BURIES its veins — the budget never comes back (see
+## _fuse_ring). This is the floor that stops a player burying themselves
+## into a board they cannot connect anything on, which is precisely the
+## unrecoverable state the whole _ensure_move/_ensure_throughput layer
+## exists to prevent. A ring is simply refused — and its tell never blooms
+## — if paying for it would drop the budget below this.
+##
+## It also paces the mechanic for free, without a single extra timer: at
+## START_BUDGET (5) no ring is affordable at all, a Forge needs 7 and a
+## Crucible 10, so the first ring lands about a minute in and a hexagon
+## stays a genuine late-run commitment.
+const MIN_BUDGET_AFTER_FORGE := 4
+
 ## How close a node (or its fallback/clamped position) may sit to the
 ## screen's edge, in design_size() units. X stays modest — the sides are
 ## never covered by device chrome in portrait. Y is deliberately wider:
@@ -726,6 +741,16 @@ var veins: Array[Vein] = []
 var heart: VNode
 
 var budget := START_BUDGET
+## Vein slots spent forging rings, and the colour of the shape each one
+## bought. Buried budget is gone for the rest of the run, so the strip has
+## to keep drawing it or the cost would be invisible — see
+## budget_hint.bury(), the honest mirror of the Heart's own scars.
+var _buried := 0
+var _buried_cols: Array[Color] = []
+## Re-entrancy guard: _fuse_ring tears down nodes, and every teardown
+## rebuilds the graph, which is exactly where the tell recomputes.
+var _fusing := false
+var rings_forged := 0
 var fuel := START_FUEL
 var misses := 0
 var alive := false
@@ -876,6 +901,9 @@ var seen_forge := false
 var seen_loom := false
 var seen_kiln := false
 var seen_crucible := false
+## Has this player ever watched a ring fuse? Gates nothing mechanical —
+## the tell blooms harder the first time, which is the whole lesson.
+var seen_ring := false
 ## The Cut-the-Rope-style first-run tutorial (see tutorial.gd). Each lesson
 ## persists separately so dying mid-tutorial never re-teaches a verb already
 ## performed; tutorial_done is the aggregate that switches the whole system
@@ -997,6 +1025,11 @@ var _moved := false
 var _press_node: VNode = null
 var _press_vein: Vein = null
 
+## The ring proposal overlay (created in _ready — see RingTellScene/
+## ring_tell.gd). Purely presentational, exactly like the tithe: it is
+## told what to show by _update_ring_tell and decides nothing itself.
+var ring_tell: Node2D
+
 ## The tithe overlay (created in _ready — see TitheScene/tithe.gd) plus the
 ## hold state that drives it. `_press_tithe` is "this press is a tithe grab
 ## until proven otherwise": set on press when the offer is up and the thumb
@@ -1086,6 +1119,12 @@ func _ready() -> void:
 	# exist before the harness branch below can start_run().
 	tithe = TitheScene.new()
 	add_child(tithe)
+	# Same reasoning as the tithe above: created here, not in the .tscn, so
+	# its layering sits in code beside everything else that draws. Below the
+	# nodes (z 10) — a proposal annotates the board, it never covers it.
+	ring_tell = RingTellScene.new()
+	ring_tell.z_index = 1
+	add_child(ring_tell)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
@@ -1254,6 +1293,7 @@ func _load_save() -> void:
 		seen_loom = bool(cfg.get_value("run", "seen_loom", false))
 		seen_kiln = bool(cfg.get_value("run", "seen_kiln", false))
 		seen_crucible = bool(cfg.get_value("run", "seen_crucible", false))
+		seen_ring = bool(cfg.get_value("run", "seen_ring", false))
 		tut_connect = bool(cfg.get_value("run", "tut_connect", false))
 		tut_chain = bool(cfg.get_value("run", "tut_chain", false))
 		tut_forge = bool(cfg.get_value("run", "tut_forge", false))
@@ -1285,6 +1325,7 @@ func _store_save() -> void:
 	cfg.set_value("run", "seen_loom", seen_loom)
 	cfg.set_value("run", "seen_kiln", seen_kiln)
 	cfg.set_value("run", "seen_crucible", seen_crucible)
+	cfg.set_value("run", "seen_ring", seen_ring)
 	cfg.set_value("run", "tut_connect", tut_connect)
 	cfg.set_value("run", "tut_chain", tut_chain)
 	cfg.set_value("run", "tut_forge", tut_forge)
@@ -1401,6 +1442,16 @@ func _maybe_attach_harness() -> void:
 		if every > 0.0:
 			r.every = every
 		add_child(r)
+	elif "--ring" in OS.get_cmdline_user_args():
+		_harness_active = true
+		tutorial.enabled = false
+		var rl: Node = _load_harness("res://tests/ring_lab.gd")
+		if rl == null:
+			return
+		rl.speed = speed if speed > 0.0 else 1.0
+		if every > 0.0:
+			rl.every = every
+		add_child(rl)
 	elif neardeath > 0:
 		# Playable, but still a harness: the seeded score was never earned,
 		# so it must not write the save or reach the leaderboard —
@@ -1472,6 +1523,14 @@ func start_run(run_seed: int) -> void:
 	rng.seed = seed_used
 
 	budget = START_BUDGET
+	_buried = 0
+	_buried_cols.clear()
+	_fusing = false
+	rings_forged = 0
+	if ring_tell != null:
+		ring_tell.clear()
+	if budget_hint.has_method("reset_buried"):
+		budget_hint.reset_buried()
 	fuel = START_FUEL
 	misses = 0
 	beats = 0
@@ -2887,22 +2946,7 @@ func _spawn_node(kind: int) -> VNode:
 	var n := _make_node(kind, best)
 	if is_tool:
 		n.recipe = _roll_recipe(kind)
-	if kind == VNode.Kind.FORGE and not seen_forge:
-		seen_forge = true
-		n.teach = true
-		_store_save()
-	elif kind == VNode.Kind.LOOM and not seen_loom:
-		seen_loom = true
-		n.teach = true
-		_store_save()
-	elif kind == VNode.Kind.KILN and not seen_kiln:
-		seen_kiln = true
-		n.teach = true
-		_store_save()
-	elif kind == VNode.Kind.CRUCIBLE and not seen_crucible:
-		seen_crucible = true
-		n.teach = true
-		_store_save()
+	_mark_first_seen(n)
 	_rebuild_graph()
 	return n
 
@@ -3689,6 +3733,9 @@ func _rebuild_graph() -> void:
 	for v in veins:
 		v.update_dir()
 	budget_hint.queue_redraw()
+	# The one place the tell recomputes. Graph change only, never per frame
+	# — see Ring.find_pending on why that matters.
+	_update_ring_tell()
 
 
 func veins_used() -> int:
@@ -3734,6 +3781,183 @@ func _add_vein(a: VNode, b: VNode) -> void:
 	# tick down — the just-spent slot is the highest lit one.
 	budget_hint.flash(veins.size() - 1)
 	_rebuild_graph()
+	# A cycle can only ever appear through the edge just drawn, so this is
+	# the only place on the board that has to ask.
+	_check_ring(v)
+
+
+## Did that vein just close a circuit of orphaned Wells? If so it stops being
+## a vein and becomes a shape.
+##
+## The rule, whole: A CLOSED RING OF N ORPHANED WELLS BECOMES THE SHAPE WITH
+## N SIDES. Three circles wired into a triangle already look like a triangle,
+## so nothing here needs teaching — the topology the player drew IS the
+## answer. See ring.gd for why orphaned, why chordless, and why the smallest
+## ring wins.
+func _check_ring(v: Vein) -> void:
+	if _fusing:
+		return
+	var ring := Ring.find_closed(v, veins, budget, MIN_BUDGET_AFTER_FORGE)
+	if ring.size() >= Ring.MIN:
+		_fuse_ring(ring)
+
+
+## The trade-off, paid in full and never refunded.
+##
+## You give up N Wells — with whatever reserve they had left — and N vein
+## slots, permanently. You get the tool you needed, at a spot you chose,
+## right now, instead of waiting on a spawn clock that owes you nothing.
+##
+## Note what the budget arithmetic actually says: _remove_node hands each
+## ring vein's slot back as it drops, and then exactly that many are buried.
+## So the lines you lose are literally the lines you drew the ring with. The
+## cost is the circuit itself, not an abstract tax bolted onto it — which is
+## also why it needs no explaining beyond watching it happen once.
+func _fuse_ring(ring: Array[VNode]) -> void:
+	var n := ring.size()
+	var kind := Ring.kind_for(n)
+	if kind < 0:
+		return
+	_fusing = true
+
+	var res := Ring.res_for_kind(kind)
+	var col := Palette.of_res(res)
+	var ratio := Ring.inherited_ratio(ring)
+	var at := _clear_spot(Ring.centroid(ring), ring)
+
+	# Snapshot the circuit before anything is torn down — the effect replays
+	# the ring closing and needs the geometry that existed, riding the real
+	# Bezier each vein was drawn along rather than a straight line between
+	# centres (same reason poison_dart.gd rides vein.pts).
+	var ring_paths: Array[PackedVector2Array] = []
+	var from_pts: Array[Vector2] = []
+	for i in n:
+		from_pts.append(ring[i].position)
+		var e := _find_vein(ring[i], ring[(i + 1) % n])
+		if e != null:
+			ring_paths.append(e.pts)
+
+	# The Wells go first: _remove_node drops every vein still on them, which
+	# is what hands the slots back for the burial below to take away.
+	for w in ring:
+		_remove_node(w)
+	budget -= n
+	_buried += n
+	for _i in n:
+		_buried_cols.append(col)
+	if budget_hint.has_method("bury"):
+		budget_hint.bury(n, col)
+
+	# Created immediately, hidden, revealed by the effect on its own clock —
+	# the same split ghost_spawn.gd uses, so the rescue guarantees and the
+	# probe see the new tool the instant it exists and never wait on an
+	# animation.
+	var made := _make_node(kind, at)
+	made.recipe = _roll_recipe(kind)
+	# Inherited life is the entire anti-cheese rule — see Ring.inherited_ratio.
+	made.reserve = ratio * _yield_for(kind)
+	_mark_first_seen(made)
+	if not seen_ring:
+		seen_ring = true
+		_store_save()
+
+	var fx: Node2D = FuseScene.new()
+	vein_layer.add_child(fx)
+	fx.start(ring_paths, from_pts, at, res, made)
+
+	rings_forged += 1
+	Audio.play("smelt", -2.0, 0.7)
+	if OS.has_feature("mobile"):
+		Input.vibrate_handheld(160)
+
+	_fusing = false
+	_rebuild_graph()
+
+
+## A tool's full charge pool, by kind — the cap reserve_ratio() measures
+## against, so a forged node's inherited ratio lands on the same scale a
+## spawned one starts at.
+func _yield_for(kind: int) -> float:
+	match kind:
+		VNode.Kind.FORGE: return VNode.FORGE_YIELD
+		VNode.Kind.LOOM: return VNode.LOOM_YIELD
+		VNode.Kind.KILN: return VNode.KILN_YIELD
+		VNode.Kind.CRUCIBLE: return VNode.CRUCIBLE_YIELD
+	return VNode.WELL_YIELD
+
+
+## First-of-kind gets its recipe spelled out (see VNode.teach). Shared by the
+## two ways a tool can now arrive on the board — the spawn clock and a forged
+## ring — so a player whose FIRST Forge is one they made themselves still
+## gets the demonstration.
+func _mark_first_seen(n: VNode) -> void:
+	match n.kind:
+		VNode.Kind.FORGE:
+			if seen_forge:
+				return
+			seen_forge = true
+		VNode.Kind.LOOM:
+			if seen_loom:
+				return
+			seen_loom = true
+		VNode.Kind.KILN:
+			if seen_kiln:
+				return
+			seen_kiln = true
+		VNode.Kind.CRUCIBLE:
+			if seen_crucible:
+				return
+			seen_crucible = true
+		_:
+			return
+	n.teach = true
+	_store_save()
+
+
+## Push a forged node off anything already standing where its ring's centre
+## was. Nearly always a no-op — the centroid of a ring the player drew has
+## that ring's own members out at the rim — so this only has to handle an
+## unrelated node that happened to be sitting inside the circuit. Clamped to
+## the same EDGE_MARGIN_X/Y every other placement site respects.
+func _clear_spot(at: Vector2, exclude: Array[VNode]) -> Vector2:
+	# No shared node-to-node spacing constant exists (placement elsewhere goes
+	# through _least_crowded_spot, which maximises distance rather than
+	# enforcing a minimum), so the separation is stated in terms of the radii
+	# actually involved: two bodies plus a readable gap between them.
+	const GAP := 18.0
+	var vp := design_size()
+	var p := at
+	for _pass in 12:
+		var push := Vector2.ZERO
+		for n in nodes:
+			if n in exclude:
+				continue
+			var min_d := n.radius() + VNode.RADIUS + GAP
+			if n.kind == VNode.Kind.HEART:
+				min_d = maxf(min_d, MIN_HEART_CLEARANCE)
+			var d := p.distance_to(n.position)
+			if d >= min_d:
+				continue
+			var away := p - n.position
+			if away.length() < 0.001:
+				away = Vector2.RIGHT
+			push += away.normalized() * (min_d - d)
+		if push == Vector2.ZERO:
+			break
+		p += push
+	p.x = clampf(p.x, EDGE_MARGIN_X, vp.x - EDGE_MARGIN_X)
+	p.y = clampf(p.y, EDGE_MARGIN_Y, vp.y - EDGE_MARGIN_Y)
+	return p
+
+
+## Hand the overlay whatever ring the board is currently one vein short of.
+func _update_ring_tell() -> void:
+	if ring_tell == null:
+		return
+	if not alive or _fusing:
+		ring_tell.clear()
+		return
+	ring_tell.offer(Ring.find_pending(nodes, veins, budget, MIN_BUDGET_AFTER_FORGE), seen_ring)
 
 
 func _tempo_action() -> bool:
