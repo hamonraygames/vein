@@ -1526,6 +1526,24 @@ func start_run(run_seed: int) -> void:
 	_press_tithe_score = false
 	tithe.vanish()
 
+	# Dying (or hitting Replay) mid-drag never fires _on_release, so without
+	# this a hold that was still active when the run ended leaves _drag_from
+	# pointing at a VNode this same call is about to queue_free() above.
+	# _draw_drag only guards on `_drag_from == null or not alive` — and alive
+	# flips back to true a few lines down — so the very next frame's
+	# drag_layer redraw dereferences a freed node's `.position` every frame
+	# until something reassigns _drag_from, which is a hard "previously
+	# freed instance" script error, repeating 60x/s. _press_node/_press_vein
+	# are reset defensively too, even though _on_press already overwrites
+	# them before anything reads them, for the same "dangling reference to
+	# a node this call just freed" reason.
+	_drag_from = null
+	_press_node = null
+	_press_vein = null
+	_touching = false
+	_dilating = false
+	_moved = false
+
 	heart = _make_node(VNode.Kind.HEART, heart_spawn_pos())
 
 	# Two wells to open with, placed relative to the Heart and inside its reach:
