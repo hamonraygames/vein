@@ -1367,6 +1367,15 @@ func _maybe_attach_harness() -> void:
 		var a: Node = _load_harness("res://tests/audiocheck.gd")
 		if a != null:
 			add_child(a)
+	elif "--bench" in OS.get_cmdline_user_args():
+		_harness_active = true
+		tutorial.enabled = false
+		var b: Node = _load_harness("res://tests/bench.gd")
+		if b != null:
+			b.after = after
+			if every > 0.0:
+				b.every = every
+			add_child(b)
 	elif "--chainstress" in OS.get_cmdline_user_args():
 		_harness_active = true
 		tutorial.enabled = false
@@ -4006,7 +4015,7 @@ func _draw() -> void:
 	# just no longer draws a gauge nobody was reading.
 	var ring := Palette.HEART
 	ring.a = (1.0 - phase) * (0.22 + exert * 0.22)
-	draw_arc(centre, beat_r, 0.0, TAU, 72, ring, 1.5 + exert * 2.0, true)
+	draw_arc(centre, beat_r, 0.0, TAU, VNode.arc_points(beat_r), ring, 1.5 + exert * 2.0, true)
 
 
 ## Rot spreads down live veins. Leaving a necrotic Well wired in doesn't just
@@ -4779,7 +4788,8 @@ func _draw_drag() -> void:
 	# is no longer a second, longer reach for a tool/Heart pair to show.
 	var reach := Palette.HEART
 	reach.a = 0.10
-	drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN, 0.0, TAU, 64, reach, 1.5, true)
+	drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN, 0.0, TAU,
+		VNode.arc_points(Vein.MAX_LEN), reach, 1.5, true)
 
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
@@ -4795,4 +4805,5 @@ func _draw_drag() -> void:
 		and in_reach(_drag_from, to)
 	var ring := Palette.WARM if ok else Palette.VEIN_STRAINED
 	ring.a = 0.85
-	drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU, 28, ring, 2.0, true)
+	drag_layer.draw_arc(to.position, to.radius() + 8.0, 0.0, TAU,
+		VNode.arc_points(to.radius() + 8.0), ring, 2.0, true)

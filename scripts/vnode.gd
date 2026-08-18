@@ -128,6 +128,44 @@ const WITHER_WARN_AT := 0.6
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
 
+## How far, in DESIGN-space pixels, a drawn arc may bow away from the true
+## circle it approximates — the error budget behind arc_points() below.
+##
+## Design-space is the operative word: the 540x1170 board is stretched to
+## whatever the device is (see game.gd's design_size), which is about 2x on a
+## 1080-wide phone and ~2.4x on a large one, so this budget is multiplied by
+## that before anyone sees it. At 0.5 a Well's ring showed faint flat spots
+## under magnification; a quarter pixel keeps the worst case comfortably
+## sub-pixel on real hardware while still cutting the old hardcoded counts by
+## roughly a third. The arcs are also only 1.3-1.7px wide and antialiased, so
+## the stroke's own softness absorbs more error than this on top.
+const ARC_MAX_SAG := 0.25
+
+
+## Point count for a draw_arc of this radius spanning this many radians, sized
+## so the result still reads as a smooth curve and no finer.
+##
+## Every draw_arc here used to pass a hardcoded count — almost always 32 —
+## regardless of both radius and span. At the Well's RADIUS of 22 a
+## 32-segment circle sits about 0.1px off true: perhaps eight times more
+## geometry than the shape can actually show. Worse, a partial arc (the
+## reserve ring, which spends most of a Well's life well under a quarter
+## turn) paid the SAME 32 points for a sliver, so the shorter the arc got
+## the more oversampled it became.
+##
+## Solved from the sagitta: for a segment spanning angle t, a polyline bows
+## r*(1-cos(t/2)) away from the arc, so the widest allowed step is
+## t = 2*acos(1 - ARC_MAX_SAG/r), and the count scales with span from there.
+## Returns POINTS (segments + 1), matching draw_arc's own parameter.
+static func arc_points(r: float, span: float = TAU) -> int:
+	span = absf(span)
+	if r <= ARC_MAX_SAG or span <= 0.0:
+		return 2
+	var step := 2.0 * acos(clampf(1.0 - ARC_MAX_SAG / r, -1.0, 1.0))
+	if step <= 0.0:
+		return 65
+	return clampi(int(ceil(span / step)) + 1, 3, 65)
+
 ## What a Well produces, in seconds. Deliberately not beat-locked: wells drift
 ## against the heartbeat, so supply and demand slide in and out of phase.
 ## Was 1.45 — real playtest: circle supply couldn't keep pace with what the
@@ -331,7 +369,62 @@ func _process(delta: float) -> void:
 			fade = minf(fade, 1.0 - (cr - COLLAPSE_FADE_AT) / (1.0 - COLLAPSE_FADE_AT))
 	modulate.a = clampf(fade, 0.0, 1.0)
 
-	queue_redraw()
+	# Redraw only when this node's appearance actually CHANGED.
+	#
+	# This used to be an unconditional queue_redraw(), which meant every node
+	# on the board re-recorded its whole command list every frame — and for
+	# these shapes that is not a cheap bookkeeping step: each antialiased
+	# draw_arc/draw_polyline tessellates its geometry (plus an AA fringe) on
+	# the CPU at record time, so a full board was rebuilding thousands of
+	# triangles 60x a second to emit the exact same picture as the frame
+	# before. A Well sitting at a full reserve between emissions, which is
+	# most Wells most of the time, is a still image; it has no business
+	# costing anything to hold.
+	#
+	# The two things here that animate off a CLOCK rather than off state
+	# still redraw unconditionally, so nothing that is supposed to move
+	# stops moving: the necrotic glitch (see _draw_necrotic, which buckets
+	# Time.get_ticks_msec) and the demand tell's wobble (see _draw_demand).
+	# `teach` is included for the same reason — it runs off _teach_t.
+	# Everything else is a pure function of the state in _visual_sig below.
+	if corrupted or teach or tell_ratio > 0.0:
+		queue_redraw()
+	else:
+		var sig := _visual_sig()
+		if sig != _visual_sig_last:
+			_visual_sig_last = sig
+			queue_redraw()
+
+
+## Everything _draw (and every helper it dispatches to) reads, packed for a
+## cheap frame-to-frame equality test — see _process. Anything new that
+## _draw starts depending on has to be added here too, or the node will hold
+## a stale frame once it goes quiet. Arrays are folded in by hash() rather
+## than duplicated so this stays allocation-light.
+##
+## Two deliberate omissions, both safe:
+##   - `position`, read by _draw_necrotic to seed its glitch noise, is only
+##     ever reached when `corrupted` is true — which redraws unconditionally
+##     above, so it never depends on this signature.
+##   - `scars` is folded in by size() alone rather than by content, because
+##     add_scar only ever APPENDS and nothing mutates an existing scar's
+##     weight; a run's scars are cleared by start_run rebuilding the Heart
+##     outright. If a scar ever becomes mutable, hash the array instead.
+##
+## The derived helpers are covered by their own inputs rather than by being
+## called here: reserve_ratio() is a pure function of (corrupted, kind,
+## reserve), and radius()/buffer_cap() of kind alone — all already present.
+func _visual_sig() -> Array:
+	return [
+		kind, produces, pulse, reserve, corrupted, depth < 0, modulate.a,
+		fuel_ratio, demand, suppress_demand, tell_res, smelt_flash,
+		wears_crown, scars.size(), buffer.hash(), intake.hash(), recipe.hash(),
+	]
+
+
+## Empty on purpose: never equal to a real signature, so the first _process
+## after this node is built always draws.
+var _visual_sig_last: Array = []
 
 
 ## 0..1 toward collapse. Game reads this to know when to remove the node.
@@ -843,7 +936,8 @@ const DEMAND_GLYPH_CIRCLE_RATIO := 0.85
 func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
 	var pts := demand_glyph_points(res, s)
 	if pts.is_empty():
-		draw_arc(offset, s * DEMAND_GLYPH_CIRCLE_RATIO, 0.0, TAU, 22, c, 2.4, true)
+		draw_arc(offset, s * DEMAND_GLYPH_CIRCLE_RATIO, 0.0, TAU,
+			arc_points(s * DEMAND_GLYPH_CIRCLE_RATIO), c, 2.4, true)
 		return
 	if offset != Vector2.ZERO:
 		var shifted := PackedVector2Array()
@@ -868,14 +962,24 @@ func _draw_ring(r: float, col: Color) -> void:
 	# The ring IS the reserve. A full Well is a closed circle; a drained one is a
 	# vanishing arc. No number, and you can read your whole board's life
 	# expectancy in one glance.
-	var ghost := col
-	ghost.a = 0.11
-	draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, ghost, 1.3, true)
-
+	# The ghost is only ever VISIBLE where the reserve arc below isn't: the
+	# reserve is opaque and drawn wider (1.7 vs 1.3), so it completely covers
+	# whatever ghost sits under it. Drawing the ghost as a full circle anyway
+	# meant a brimming Well paid for two complete rings to show one — so this
+	# draws only the missing span, and the two arcs together now always add
+	# up to exactly one circle's worth of geometry instead of up to two.
 	var left := reserve_ratio()
+	var start := -PI * 0.5
+	var spent := TAU * (1.0 - left)
+	if spent > 0.001:
+		var ghost := col
+		ghost.a = 0.11
+		var g0 := start + TAU * left
+		draw_arc(Vector2.ZERO, r, g0, g0 + spent, arc_points(r, spent), ghost, 1.3, true)
+
 	if left > 0.0:
-		var start := -PI * 0.5
-		draw_arc(Vector2.ZERO, r, start, start + TAU * left, 32, col, 1.7, true)
+		var span := TAU * left
+		draw_arc(Vector2.ZERO, r, start, start + span, arc_points(r, span), col, 1.7, true)
 
 
 ## A spent node, gone necrotic — and WRONG in a way nothing healthy ever is:
@@ -925,8 +1029,8 @@ func _draw_necrotic(r: float) -> void:
 		var ghost := tint
 		ghost.a = 0.22
 		var off := Vector2(r * (0.28 + g * 0.3), 0.0).rotated(g * TAU)
-		draw_arc(jit + off, r * 0.9, 0.0, TAU, 20, ghost, 1.6, true)
-		draw_arc(jit - off, r * 0.9, 0.0, TAU, 20, ghost, 1.2, true)
+		draw_arc(jit + off, r * 0.9, 0.0, TAU, arc_points(r * 0.9), ghost, 1.6, true)
+		draw_arc(jit - off, r * 0.9, 0.0, TAU, arc_points(r * 0.9), ghost, 1.2, true)
 
 	var spikes := PackedVector2Array()
 	for i in 14:
@@ -1139,7 +1243,7 @@ func _draw_teach_demo(r: float) -> void:
 		var burst := 1.0 - (phase - 0.55) / 0.10
 		var ring := Palette.WARM
 		ring.a = burst * 0.55
-		draw_arc(Vector2.ZERO, r * 1.15, 0.0, TAU, 24, ring, 2.0 + burst * 2.0, true)
+		draw_arc(Vector2.ZERO, r * 1.15, 0.0, TAU, arc_points(r * 1.15), ring, 2.0 + burst * 2.0, true)
 	else:
 		var t2 := (phase - 0.65) / 0.35
 		var ease2 := t2 * t2
@@ -1188,7 +1292,7 @@ func _draw_recipe_slots(r: float) -> void:
 			Res.HEXAGON:
 				_draw_mini_hexagon(p, s, col, w, filled)
 			_:
-				draw_arc(p, s * 0.8, 0.0, TAU, 20, col, w, true)
+				draw_arc(p, s * 0.8, 0.0, TAU, arc_points(s * 0.8), col, w, true)
 				if filled:
 					var fill := col
 					fill.a *= 0.75
