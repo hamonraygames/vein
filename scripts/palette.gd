@@ -89,6 +89,13 @@ const SCORE := Color("ede8dc")
 const RANK_UP := Color("6fcf7a")
 const RANK_DOWN := Color("e0555a")
 
+## The #1 leaderboard crown (see leaderboard_panel.gd's row and vnode.gd's
+## Heart, which wears the same one) — another deliberate exception like
+## RANK_UP/DOWN above: this is a meta "you're first" badge, not a resource
+## on the board, so it's exempt from "every resource stays desaturated" and
+## gets to read as an actual gold.
+const GOLD := Color("f0c14b")
+
 
 static func of_res(kind: int) -> Color:
 	match kind:

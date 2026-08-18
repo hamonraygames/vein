@@ -536,6 +536,13 @@ func _draw() -> void:
 
 	_draw_buffer(r, col)
 
+	# Worn, not swapped in — the Heart stays a heart (fuel level, demand
+	# glyph, scars all still read off its own silhouette); the crown is an
+	# ornament on top of it, same as the leaderboard hangs one on the #1
+	# row instead of replacing that row's own shape.
+	if kind == Kind.HEART and wears_crown:
+		_draw_crown(r)
+
 
 ## Eighth design for this shape. Smooth heart curves are gone per explicit
 ## direction: straight lines only, sharp geometric edges, no curves at all —
@@ -595,6 +602,13 @@ const SCAR_MAX := 32
 
 ## [{w}] — weight 0..1, how bad the wound was; sets the seam's length and ink.
 var scars: Array[Dictionary] = []
+
+## Set by game.gd every frame from lb_you.rank — true only once this
+## session has actually heard back that you hold leaderboard rank 1 (see
+## leaderboard_panel.gd's own crown on that row). Heart-only, purely
+## cosmetic, and never persisted here — game.gd owns the leaderboard state,
+## this just reads it.
+var wears_crown := false
 
 
 func add_scar(weight: float) -> void:
@@ -676,6 +690,48 @@ func _draw_heart_shape(r: float, col: Color) -> void:
 
 	if not suppress_demand:
 		_draw_demand(r)
+
+
+## The same minimal, straight-edged crown leaderboard_panel.gd hangs on the
+## #1 row (own copy there, sized for a HUD row instead of the Heart) — a
+## single "W" silhouette on top (left point, valley, centre point, valley,
+## right point — the two valleys reaching all the way down to the bottom
+## line, same as the letter), each outer point then dropping straight down
+## to that bottom line instead of a separate band underneath. The centre
+## point is the tallest; the left/right points sit a little lower, so it
+## doesn't read as a flat-topped comb. Nothing sampled or curved, matching
+## every other hand-placed shape in this file.
+## The two valley points sit well clear of the bottom line (0.30 vs the
+## corners' 0.62) — they need to read as two separate dips poking up from
+## the band, not as touching/fusing into that bottom edge. (They still
+## can't be exactly flush with it in any case — that would make the edge
+## collinear with the bottom line, which Godot's polygon triangulator
+## rejects outright, logged as "triangulation failed".)
+const CROWN_POINTS: Array[Vector2] = [
+	Vector2(-1.0, 0.62), Vector2(-1.0, -0.42), Vector2(-0.5, 0.02), Vector2(0.0, -0.85),
+	Vector2(0.5, 0.02), Vector2(1.0, -0.42), Vector2(1.0, 0.62),
+]
+const CROWN_SCALE := 0.5
+## Worn at a jaunty tilt over the Heart's left lobe rather than centred and
+## upright — "a cool hat," not a formal one — per explicit direction.
+## Flip the sign to flip which way it leans.
+const CROWN_TILT_DEG := -28.0
+## In units of r: left of centre, over the left lobe itself — HEART_POINTS'
+## left peak sits at x=-0.55*HEART_WIDTH_MULT ≈ -0.65, so this needs to sit
+## close to THAT, not merely left of the Heart's own centre.
+const CROWN_OFFSET := Vector2(-0.82, -0.92)
+
+func _draw_crown(r: float) -> void:
+	var s := r * CROWN_SCALE
+	var angle := deg_to_rad(CROWN_TILT_DEG)
+	var offset := CROWN_OFFSET * r
+	var pts := PackedVector2Array()
+	for p in CROWN_POINTS:
+		pts.append(p.rotated(angle) * s + offset)
+	draw_colored_polygon(pts, Palette.GOLD)
+	var outline := pts.duplicate()
+	outline.append(pts[0])
+	draw_polyline(outline, Palette.GOLD.darkened(0.25), 2.0, true)
 
 
 ## Traces `pts` (an open, ordered polygon outline) from its first vertex

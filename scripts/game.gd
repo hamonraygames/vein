@@ -1309,6 +1309,8 @@ func _store_save() -> void:
 ##   --neardeath[=SCORE]          playable run that opens at the tithe's
 ##                                doorstep (default score 300) — hand-test
 ##                                the score-for-life rescue (needs a window)
+##   --crown                      playable run that fakes leaderboard rank 1
+##                                so the Heart wears its crown (needs a window)
 ##
 ## Loaded dynamically so an exported build without tests/ still runs.
 func _maybe_attach_harness() -> void:
@@ -1335,6 +1337,17 @@ func _maybe_attach_harness() -> void:
 			every = float(a.get_slice("=", 1))
 		elif a.begins_with("--neardeath"):
 			neardeath = int(a.get_slice("=", 1)) if a.contains("=") else 300
+
+	if "--crown" in OS.get_cmdline_user_args():
+		# Fakes holding leaderboard rank 1 without ever touching the network
+		# — for eyeballing the Heart's crown ornament (see vnode.gd's
+		# wears_crown) without needing an actual #1 score on the real board.
+		# Applied here, ahead of the harness picker below, rather than as
+		# its own branch in it, so it composes with --shot (screenshot the
+		# crowned Heart) instead of being mutually exclusive with it.
+		_harness_active = true
+		tutorial.enabled = false
+		lb_you = {"rank": 1, "score": 999999, "isBest": true}
 
 	if probe_runs > 0:
 		# The tutorial's grace window would silently change probe balance —
@@ -3889,6 +3902,13 @@ func _process(delta: float) -> void:
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
 	heart.fuel_ratio = health_ratio()
+	# lb_you only carries a real rank once this session has heard back from
+	# a submission (see _on_lb_request_completed) — before that it's still
+	# the {"rank": 0, ...} default, so the crown simply never shows until
+	# you've actually earned it. It then persists across a same-session
+	# Replay (lb_you isn't reset there), so the Heart keeps its crown into
+	# your very next run too, not just the death screen you saw it on.
+	heart.wears_crown = int(lb_you.get("rank", 0)) == 1
 	# Same escalation shape as corruption spread/airborne blight/demand
 	# rotation: near-zero at the open, ramping to full bite by EXERTION_SPAN,
 	# and still climbing past it (see pressure()) — a tool's per-smelt reserve

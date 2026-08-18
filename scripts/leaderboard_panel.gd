@@ -131,7 +131,12 @@ func _draw_row(row: Dictionary, rank: int, y: float, mine: bool) -> float:
 
 	var col := Palette.SCORE
 	col.a = 0.95 if mine else 0.7
-	_left("%d" % rank, Vector2(COL_RANK, y), 17, col)
+	if rank == 1:
+		# The crown IS rank 1's number — no "1" printed alongside it, same
+		# as nobody labels an actual crown "#1".
+		_draw_crown(Vector2(COL_RANK + 8.0, y - 6.0), 11.0)
+	else:
+		_left("%d" % rank, Vector2(COL_RANK, y), 17, col)
 	_left(_ellipsize(str(row.get("name", "?")), 16), Vector2(COL_NAME, y), 17, col)
 	_right(_commas(int(row.get("score", 0))), Vector2(COL_SCORE_R, y), 17, col)
 	_draw_chevron(Vector2(COL_CHEVRON, y), int(row.get("rankChange", 0)))
@@ -172,6 +177,28 @@ func _draw_chevron(at: Vector2, change: int) -> void:
 			at + Vector2(0.0, half_h), at + Vector2(-CHEVRON_W * 0.5, -half_h), at + Vector2(CHEVRON_W * 0.5, -half_h),
 		])
 	draw_colored_polygon(tri, col)
+
+
+## Rank 1's number, replaced outright — same straight-edged, hand-placed-
+## vertex language as every shape this game draws, and the same silhouette
+## vnode.gd's Heart wears (tilted, over its left lobe) when YOU are the
+## one holding this spot; this copy stays upright, since there's no lobe
+## here to lean over. A single "W" on top (two valleys reaching the bottom
+## line, centre point tallest, left/right points a little lower), each
+## outer point dropping straight down to that bottom line.
+const CROWN_POINTS: Array[Vector2] = [
+	Vector2(-1.0, 0.62), Vector2(-1.0, -0.42), Vector2(-0.5, 0.02), Vector2(0.0, -0.85),
+	Vector2(0.5, 0.02), Vector2(1.0, -0.42), Vector2(1.0, 0.62),
+]
+
+func _draw_crown(at: Vector2, s: float) -> void:
+	var pts := PackedVector2Array()
+	for p in CROWN_POINTS:
+		pts.append(p * s + at)
+	draw_colored_polygon(pts, Palette.GOLD)
+	var outline := pts.duplicate()
+	outline.append(pts[0])
+	draw_polyline(outline, Palette.GOLD.darkened(0.25), 1.5, true)
 
 
 func _ellipsize(s: String, max_len: int) -> String:
