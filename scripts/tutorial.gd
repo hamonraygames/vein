@@ -48,8 +48,6 @@ var _cut_armed := false
 
 @onready var game: Node2D = get_parent()
 
-const LOOP_TIME := 2.4
-const THUMB_R := 13.0
 ## The tutorial owns pacing so lessons land in order and never blindside a
 ## first-timer. Chaining auto-skips if ignored this long; the triangle demand
 ## waits this long after chaining before it arrives; a corruption is forced
@@ -549,20 +547,10 @@ func _draw_demand_match_hint() -> void:
 				nc, 2.5 + blink * 1.5)
 
 
-## A halo tracing the same shape family as `res`'s own demand glyph (see
-## VNode.demand_glyph_points) at world position `center`, radius-ish scale
-## `s` — the polygon case just needs the origin-centred points shifted into
-## place; the circular RAW/VOID case (empty points) falls back to a plain
-## arc at the identical proportion VNode itself draws that circle at.
+## Delegates to the shared vocabulary — see hint.gd on why these devices no
+## longer live here.
 func _draw_shape_halo(center: Vector2, res: int, s: float, col: Color, width: float) -> void:
-	var pts := VNode.demand_glyph_points(res, s)
-	if pts.is_empty():
-		draw_arc(center, s * VNode.DEMAND_GLYPH_CIRCLE_RATIO, 0.0, TAU, 28, col, width, true)
-		return
-	var world := PackedVector2Array()
-	for p in pts:
-		world.append(p + center)
-	draw_polyline(world, col, width, true)
+	Hint.shape_halo(self, center, res, s, col, width)
 
 
 ## The Heart's reach, so "this Well is beyond it" is visible — the far Well
@@ -574,97 +562,9 @@ func _draw_reach_hint(from: VNode) -> void:
 	Vein.draw_reach(self, from.position, 0.7)
 
 
-## A looping ghost drag: thumb fades in on the source, eases to the target
-## leaving a breadcrumb trail, a ring lands on arrival — the exact motion the
-## player's own thumb must make.
 func _draw_drag_ghost(from: Vector2, to: Vector2) -> void:
-	var p := fmod(_t, LOOP_TIME) / LOOP_TIME
-	var chord := to - from
-	var mid := (from + to) * 0.5 + chord.orthogonal().normalized() * chord.length() * 0.10
+	Hint.drag_ghost(self, from, to, _t)
 
-	var col := Palette.WARM
-	if p < 0.12:
-		col.a = p / 0.12 * 0.7
-		draw_circle(from, THUMB_R, _faint(col, 0.25))
-		draw_arc(from, THUMB_R, 0.0, TAU, 24, col, 2.0, true)
-		return
-
-	if p < 0.72:
-		var t := (p - 0.12) / 0.60
-		var eased := t * t * (3.0 - 2.0 * t)
-		var crumbs := int(eased * 9.0)
-		for i in crumbs:
-			var ct := eased * float(i + 1) / float(crumbs + 1)
-			var cp := _bezier(from, mid, to, ct)
-			var cc := Palette.WARM
-			cc.a = 0.28
-			draw_circle(cp, 2.4, cc)
-		var tip := _bezier(from, mid, to, eased)
-		col.a = 0.7
-		draw_circle(tip, THUMB_R, _faint(col, 0.25))
-		draw_arc(tip, THUMB_R, 0.0, TAU, 24, col, 2.0, true)
-		return
-
-	var t2 := (p - 0.72) / 0.28
-	col.a = (1.0 - t2) * 0.8
-	draw_arc(to, 40.0 + t2 * 18.0, 0.0, TAU, 32, col, 2.5 * (1.0 - t2) + 0.5, true)
-
-
-## A bold scissor-cross sitting directly ON the vein: this IS the "cut here"
-## instruction, full stop. Feedback: the old fingertip-and-ripple version was
-## too small and subtle to read as an instruction at all. This is unmissable —
-## two thick blades, sized well past the vein's own width, that visibly snap
-## shut on the point in a loop, with a bright snip flash at the moment of
-## closure so the exact instant to tap is obvious even at a glance.
-const CUT_ICON_CYCLE := 1.15
-const CUT_BLADE_LEN := 26.0
 
 func _draw_cut_ghost(v: Vein) -> void:
-	var at := v.sample(0.5)
-	var cyc := fmod(_t, CUT_ICON_CYCLE) / CUT_ICON_CYCLE
-	# 0 = blades open wide, 1 = fully shut. Eased so the close reads as a snap.
-	var close := clampf((cyc - 0.12) / 0.5, 0.0, 1.0)
-	close = close * close * (3.0 - 2.0 * close)
-	var half_angle := lerpf(0.95, 0.05, close)
-
-	var warm := Palette.WARM
-	var col := warm
-	col.a = 0.95
-
-	# Two blades crossing at `at`, swinging shut like open scissors. Thick and
-	# long enough to read as the whole instruction on its own, no matter what
-	# else is happening on screen.
-	for sgn in [-1.0, 1.0]:
-		var a: float = PI * 0.5 + sgn * half_angle
-		var dir := Vector2(cos(a), sin(a))
-		draw_line(at - dir * CUT_BLADE_LEN, at + dir * CUT_BLADE_LEN, col, 5.0, true)
-
-	var hinge := warm
-	hinge.a = 0.9
-	draw_circle(at, 4.5, hinge)
-
-	# The snip: once the blades are nearly shut, a bright ring and four short
-	# radiating cut-marks flash outward — the moment of the cut is loud, not a
-	# quiet detail you could miss.
-	if close > 0.82:
-		var t := (close - 0.82) / 0.18
-		var fcol := Palette.HEART
-		fcol.a = (1.0 - t) * 0.9
-		draw_circle(at, 8.0 + t * 12.0, _faint(fcol, 0.4))
-		for i in 4:
-			var ang := TAU * float(i) / 4.0 + PI * 0.25
-			var p0 := at + Vector2(cos(ang), sin(ang)) * (9.0 + t * 5.0)
-			var p1 := at + Vector2(cos(ang), sin(ang)) * (16.0 + t * 16.0)
-			var mc := fcol
-			mc.a = (1.0 - t) * 0.85
-			draw_line(p0, p1, mc, 2.4, true)
-
-
-func _bezier(a: Vector2, c: Vector2, b: Vector2, t: float) -> Vector2:
-	return a.lerp(c, t).lerp(c.lerp(b, t), t)
-
-
-func _faint(col: Color, mult: float) -> Color:
-	var f := col
-	f.a = col.a * mult
-	return f
+	Hint.cut_ghost(self, v.sample(0.5), _t)
