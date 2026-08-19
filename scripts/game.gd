@@ -21,6 +21,7 @@ const SlashScene := preload("res://scripts/slash.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
 const TitheScene := preload("res://scripts/tithe.gd")
 const RingTellScene := preload("res://scripts/ring_tell.gd")
+const CoachScene := preload("res://scripts/coach.gd")
 const FuseScene := preload("res://scripts/fuse.gd")
 const LeaderboardPanelScene := preload("res://scripts/leaderboard_panel.gd")
 const NamePromptScene := preload("res://scripts/name_prompt.gd")
@@ -710,6 +711,7 @@ const TITHE_EVENT_KIND := 6
 @onready var budget_hint: Node2D = $BudgetHint
 @onready var score_hud: Node2D = $ScoreHud
 @onready var tutorial: Node2D = $Tutorial
+var coach: Node2D = null
 @onready var replay_btn: Button = $Ui/Death/ReplayBtn
 @onready var tutorial_btn: Button = $Ui/Death/TutorialBtn
 @onready var share_btn: Button = $Ui/Death/ShareBtn
@@ -1133,6 +1135,12 @@ func _ready() -> void:
 	ring_tell = RingTellScene.new()
 	ring_tell.z_index = 1
 	add_child(ring_tell)
+	# The struggle coach (see coach.gd). Above the nodes it points at, below
+	# the tutorial's own z 18 — on the rare frames both could draw, the linear
+	# lesson wins, and the coach stands down anyway while it is active.
+	coach = CoachScene.new()
+	coach.z_index = 17
+	add_child(coach)
 	Beat.beat.connect(_on_beat)
 	Beat.stopped.connect(_on_stopped)
 	_load_save()
