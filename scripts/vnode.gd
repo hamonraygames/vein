@@ -157,39 +157,37 @@ const ARC_MAX_SAG := 0.25
 ## game already speaks (tell wobble = 20 rad/s horizontal at 0.93px, "about
 ## to change"; Vein._wrong_jiggle = 110 rad/s at 3.2px, "wrong"):
 ##
-##   STARVE — slow, growing, breathing, two-axis. NOT a horizontal shake and
-##            NOT a vibration: at these amplitudes buzz is what disappears
-##            and drift is what reads.
-##   REJECT — fast, short, purely lateral. A head-shake meaning "not that."
+##   STARVE — a horizontal waver that grows and breathes. Sustained for as
+##            long as the need goes unanswered.
+##   REJECT — the same axis, four times faster and over in ~0.4s. A
+##            head-shake meaning "not that."
+##
+## Both are horizontal: a want shaking side to side is the gesture the eye
+## already reads. They stay apart by rate and duration, not direction.
 ##
 ## All amplitudes are DESIGN-space px (540x1170), so they read at roughly 2x
 ## on a phone — see ARC_MAX_SAG above for the same caveat.
-## Grace when NOTHING on the board can answer the demand at all. Short: no
-## amount of waiting fixes that, so the instruction ("build one") should
-## arrive fast. It is a debounce, not suspense — it exists so a mid-drag
-## reroute does not flash.
+## A debounce, not suspense. Nothing is plugged in to answer this need, and no
+## amount of waiting changes that — so the only job here is to not flash while
+## the player is mid-drag rerouting something.
 const STARVE_GRACE := 1.2
-## Grace when a producer EXISTS but nothing correct is actually arriving —
-## the chain is misrouted, backed up, or being eaten in the middle. Long
-## enough that an ordinary gap between deliveries never trips it: a working
-## chain lands something every couple of seconds.
-const STARVE_GRACE_STALLED := 3.0
-## 0 -> 1 after the grace. Tuned against instrumented probe runs, not by eye:
-## at 5.0 on top of a 6.0 stalled grace the Heart needed ELEVEN seconds of
-## silence to shiver at all and never once reached the body tremble across
-## two full runs. A working chain lands something every 1-3s, so this is
-## still comfortably clear of ordinary play.
+## 0 -> 1 after the grace, so ~4.7s from onset to full agitation. Tuned
+## against instrumented probe runs rather than by eye — an earlier 6.0 grace
+## plus 5.0 ramp needed ELEVEN seconds before the Heart shivered at all and
+## never got near full agitation across two full runs.
 const STARVE_RAMP := 3.5
 ## Two incommensurate frequencies, so the shiver never settles into a clean
 ## repeating oscillation the eye can dismiss as a loop.
 ##
-## 1.4 and 2.2 Hz. The first pass used 1.5 and 2.3 RAD/s — 0.24 Hz, one full
-## cycle every four seconds — reasoning that at two pixels a buzz disappears
-## and drift is what reads. Half right: buzz does disappear, but drift that
-## slow does not read as agitation either, it reads as nothing at all, and a
-## starve spell often ended before one cycle finished. This is fast enough to
-## register as trembling and still nowhere near _wrong_jiggle's 17 Hz, which
-## is the frequency band that already means "wrong".
+## 1.4 and 2.2 Hz, summed on ONE axis. The first pass used 1.5 and 2.3 RAD/s
+## — 0.24 Hz, one full cycle every four seconds — reasoning that at two pixels
+## a buzz disappears and drift is what reads. Half right: buzz does disappear,
+## but drift that slow does not read as agitation either, it reads as nothing
+## at all, and a starve spell often ended before one cycle finished. This is
+## fast enough to register as trembling and still nowhere near _wrong_jiggle's
+## 17 Hz, the band that already means "wrong". Two incommensurate frequencies
+## rather than one so the wobble never settles into a clean repeating loop the
+## eye can dismiss.
 const STARVE_FREQ_A := 9.0
 const STARVE_FREQ_B := 13.7
 ## The breath (alpha, stroke width, scale) keeps its own much slower cadence,
@@ -197,11 +195,6 @@ const STARVE_FREQ_B := 13.7
 ## channels stay separable: a slow swell carrying a fast tremble.
 const STARVE_FREQ_BREATH := 5.0
 const STARVE_AMP_GLYPH := 3.0
-const STARVE_AMP_BODY := 2.4
-## Where the Heart's BODY joins in. The glyph carries the first half alone,
-## so the escalation has somewhere to go: a small want, then a whole organ
-## visibly shaking.
-const STARVE_BODY_AT := 0.5
 const STARVE_AMP_SLOT := 1.6
 ## Scale breath. At a tool's 7-9px mini-glyph, displacement alone is half a
 ## stroke width and invisible against the node's own outline — a shape that
@@ -578,14 +571,20 @@ func _need_anim() -> bool:
 ## offset `phase_off` radians so sibling glyphs in one row don't move as a
 ## rigid block. REJECT wins outright while it lasts: being fed the wrong
 ## thing is the more actionable message than being fed nothing.
+##
+## Horizontal only, both states. A want shaking side to side is the gesture
+## the eye already reads as refusal or agitation; the earlier two-axis version
+## wandered instead of shook. STARVE and REJECT share the axis and stay
+## distinct by rate and duration — a sustained 1.4/2.2 Hz waver that is also
+## breathing, versus a ~0.4s burst at 5.4 Hz that is not.
 func _need_offset(amp: float, phase_off: float) -> Vector2:
 	if reject > 0.0:
 		return Vector2(sin(_anim_phase * REJECT_FREQ + phase_off) * REJECT_AMP * reject, 0.0)
 	if starve <= 0.0:
 		return Vector2.ZERO
-	return Vector2(
-		sin(_anim_phase * STARVE_FREQ_A + phase_off),
-		sin(_anim_phase * STARVE_FREQ_B + phase_off + 1.1)) * amp * starve
+	var x := sin(_anim_phase * STARVE_FREQ_A + phase_off) * 0.7 \
+		+ sin(_anim_phase * STARVE_FREQ_B + phase_off + 1.1) * 0.3
+	return Vector2(x * amp * starve, 0.0)
 
 
 ## 0..1 breath factor for a starving glyph's scale, alpha and stroke width.
@@ -854,18 +853,6 @@ func _draw() -> void:
 		_draw_necrotic(r)
 		_draw_buffer(r, col)
 		return
-
-	# Past the halfway point of starvation the whole organ shakes, not just
-	# the glyph inside it — set once here so the transform carries through
-	# every draw below (body, waterline, scars, buffer pips, crown AND the
-	# demand glyph move together, which is what "the Heart trembles" has to
-	# mean; a body that shook independently of its own contents would read
-	# as a rendering bug). Below STARVE_BODY_AT the glyph carries it alone,
-	# so the escalation has somewhere to go. game._draw's beat ring sits at
-	# radius 48+ and does not visibly desync from two pixels.
-	if kind == Kind.HEART and starve > STARVE_BODY_AT:
-		var tremble := (starve - STARVE_BODY_AT) / (1.0 - STARVE_BODY_AT)
-		draw_set_transform(_need_offset(STARVE_AMP_BODY * tremble, 0.0))
 
 	match kind:
 		Kind.HEART: _draw_heart_shape(r, col)
@@ -1219,9 +1206,9 @@ func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
 
 
 ## Where the Heart's demand glyph actually IS this frame, relative to the
-## Heart's own position — the body tremble plus the glyph's own drift. Only
-## tutorial.gd needs this, so its highlight halo can track a shivering glyph
-## instead of visibly sliding off it (see _draw_demand_match_hint).
+## Heart's own position. Only tutorial.gd needs this, so its highlight halo
+## can track a jiggling glyph instead of visibly sliding off it (see
+## _draw_demand_match_hint).
 ##
 ## A getter over stored state, never a fresh clock read: the tutorial is a
 ## sibling CanvasItem calling this from its own _draw, and Godot runs every
@@ -1230,11 +1217,7 @@ func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
 func demand_glyph_offset() -> Vector2:
 	if kind != Kind.HEART or suppress_demand or starve <= 0.0:
 		return Vector2.ZERO
-	var off := _need_offset(STARVE_AMP_GLYPH, 0.6)
-	if starve > STARVE_BODY_AT:
-		var tremble := (starve - STARVE_BODY_AT) / (1.0 - STARVE_BODY_AT)
-		off += _need_offset(STARVE_AMP_BODY * tremble, 0.0)
-	return off
+	return _need_offset(STARVE_AMP_GLYPH, 0.6)
 
 
 func _draw_ring(r: float, col: Color) -> void:
