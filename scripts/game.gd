@@ -5010,10 +5010,8 @@ func _draw_drag() -> void:
 	# appears exactly when it is the question being asked, and never otherwise.
 	# One ring for every node kind now — no separate outer ring, since there
 	# is no longer a second, longer reach for a tool/Heart pair to show.
-	var reach := Palette.HEART
-	reach.a = 0.10
-	drag_layer.draw_arc(_drag_from.position, Vein.MAX_LEN, 0.0, TAU,
-		VNode.arc_points(Vein.MAX_LEN), reach, 1.5, true)
+	# Drawn as a lit area, not a hairline: see Vein.draw_reach on why.
+	Vein.draw_reach(drag_layer, _drag_from.position)
 
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position

@@ -554,12 +554,13 @@ func _draw_shape_halo(center: Vector2, res: int, s: float, col: Color, width: fl
 	draw_polyline(world, col, width, true)
 
 
-## A faint ring at the Heart's reach, so "this Well is beyond it" is visible —
-## the far Well sits outside this ring, the relay Well inside it.
+## The Heart's reach, so "this Well is beyond it" is visible — the far Well
+## sits outside the lit area, the relay Well inside it. Same drawing the live
+## drag uses (Vein.draw_reach), so the thing this lesson teaches looks
+## identical to the thing the player then meets, just dialled down: this hint
+## sits on screen for seconds at a stretch, where a drag's lasts a moment.
 func _draw_reach_hint(from: VNode) -> void:
-	var c := Palette.HEART
-	c.a = 0.10
-	draw_arc(from.position, Vein.MAX_LEN, 0.0, TAU, 64, c, 1.2, true)
+	Vein.draw_reach(self, from.position, 0.7)
 
 
 ## A looping ghost drag: thumb fades in on the source, eases to the target

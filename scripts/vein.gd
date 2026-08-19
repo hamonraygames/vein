@@ -159,6 +159,36 @@ func rebuild() -> void:
 		cum.append(length)
 
 
+## The reach limit, drawn as a lit area rather than a hairline circle.
+##
+## Playtest: "people don't understand the radius limit, the limit border is
+## very light." A 1.5px ring at 10% alpha was the faintest mark on the board,
+## and it was carrying the game's hardest constraint. What a node can reach is
+## now a faint warm wash with a soft falloff hugging its inside edge, so the
+## limit reads as a PLACE — a lit pool around the node — before the eye has to
+## go find its boundary; the boundary itself is then drawn well above the old
+## alpha on top of it. Kept static and shared so game.gd's live drag and
+## tutorial.gd's teaching hint can never drift apart.
+##
+## `strength` scales the whole thing: 1.0 while the player is actually
+## dragging and the constraint IS the question, lower for an ambient hint
+## that sits on screen for seconds at a time.
+static func draw_reach(ci: CanvasItem, center: Vector2, strength := 1.0) -> void:
+	var segs := VNode.arc_points(MAX_LEN)
+	var wash := Palette.HEART
+	wash.a = 0.045 * strength
+	ci.draw_circle(center, MAX_LEN, wash)
+	# The wash is flat, so on its own the edge is still a single hard step at
+	# the very alpha that was too weak to notice. This band thickens the last
+	# ~20px into a glow, which is what actually makes the rim findable.
+	var band := Palette.HEART
+	band.a = 0.07 * strength
+	ci.draw_arc(center, MAX_LEN - 10.0, 0.0, TAU, segs, band, 20.0, true)
+	var edge := Palette.HEART
+	edge.a = 0.42 * strength
+	ci.draw_arc(center, MAX_LEN, 0.0, TAU, segs, edge, 2.0, true)
+
+
 func other(n: VNode) -> VNode:
 	if n == a:
 		return b
@@ -331,7 +361,9 @@ func _draw() -> void:
 	var width := 3.0
 	if dir == Dir.INERT:
 		# A vein that connects nothing to nothing. It cost a budget point and it
-		# does nothing — the player should be able to see that at a glance.
+		# does nothing — the player should be able to see that at a glance,
+		# which means seeing it at all first: dimmer than a working vein, but
+		# never dimmed to the edge of the background (see Palette.VEIN_INERT).
 		col = Palette.VEIN_INERT
 	else:
 		col = Palette.VEIN_IDLE.lerp(Palette.VEIN_LIVE, _flow)

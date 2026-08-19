@@ -66,7 +66,17 @@ const RAGE := HEART
 ## vanished on a phone in daylight — you could not see your own network.
 const VEIN_IDLE := Color("4a4048")
 const VEIN_LIVE := Color("9c7a52")
-const VEIN_INERT := Color("221e24")
+## A vein that connects nothing to nothing. It was #221e24 — three shades off
+## the #0d0d10 background, i.e. the exact "vanishes on a phone in daylight"
+## failure the two colours above exist to avoid, and it landed on the worst
+## case: playtest reported that connecting two shapes not yet reachable from
+## the Heart draws a line you cannot see. Now a plain line like every other
+## vein, just the dimmest of them: it sits below VEIN_IDLE so "this does
+## nothing" still reads at a glance, but well clear of the background so the
+## connection the player just made is always there to see. (A dashed stroke
+## was tried for that second job and rejected — a broken line among solid
+## ones read as a rendering fault, not as a dead vein.)
+const VEIN_INERT := Color("3f3746")
 ## Engorged and about to burst. Darker and angrier than a live vein, never
 ## brighter — a straining vessel should read as bruised, not as energised.
 const VEIN_STRAINED := Color("6b2230")
