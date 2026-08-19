@@ -142,6 +142,66 @@ const HEART_RADIUS := 34.0
 const ARC_MAX_SAG := 0.25
 
 
+## UNMET NEED IS THE ONLY THING ON THIS BOARD THAT SHIVERS.
+##
+## Playtest's central failure: nobody grasped "feed the Heart what it wants."
+## The demand glyph sat inside the Heart perfectly still, so it read as
+## decoration rather than an instruction. A satisfied need is STILL; an
+## unsatisfied one grows visibly agitated. That rule applies recursively —
+## the Heart's demand glyph is a need, and a wired-in tool's unfilled recipe
+## slots are needs too — so the chain reads as a sentence: "nothing on this
+## board makes triangles" (Heart) vs "I make triangles but nobody feeds me
+## circles" (Forge).
+##
+## Two states, deliberately placed in the gaps of the motion vocabulary this
+## game already speaks (tell wobble = 20 rad/s horizontal at 0.93px, "about
+## to change"; Vein._wrong_jiggle = 110 rad/s at 3.2px, "wrong"):
+##
+##   STARVE — slow, growing, breathing, two-axis. NOT a horizontal shake and
+##            NOT a vibration: at these amplitudes buzz is what disappears
+##            and drift is what reads.
+##   REJECT — fast, short, purely lateral. A head-shake meaning "not that."
+##
+## All amplitudes are DESIGN-space px (540x1170), so they read at roughly 2x
+## on a phone — see ARC_MAX_SAG above for the same caveat.
+const STARVE_GRACE := 1.2
+## 0 -> 1 after the grace, so ~6.2s from onset to full agitation. The grace
+## is a debounce, not suspense: the signal driving this is graph-derived and
+## exact (see game._demand_suppliable), it just must not flash mid-reroute.
+const STARVE_RAMP := 5.0
+## Two incommensurate frequencies, so the shiver never settles into a clean
+## repeating oscillation the eye can dismiss as a loop.
+const STARVE_FREQ_A := 1.5
+const STARVE_FREQ_B := 2.3
+const STARVE_AMP_GLYPH := 2.4
+const STARVE_AMP_BODY := 2.0
+## Where the Heart's BODY joins in. The glyph carries the first half alone,
+## so the escalation has somewhere to go: a small want, then a whole organ
+## visibly shaking.
+const STARVE_BODY_AT := 0.5
+const STARVE_AMP_SLOT := 1.2
+## Scale breath. At a tool's 7-9px mini-glyph, displacement alone is half a
+## stroke width and invisible against the node's own outline — a shape that
+## changes silhouette AREA reads where one that shifts 1.2px does not.
+const STARVE_BREATH := 0.10
+## ~0.38s of visible NO, sitting next to smelt_flash's 2.4.
+const REJECT_DECAY := 2.6
+## 5.4 Hz. Deliberately not faster: Beat.MAX_DELTA is 0.25, and an oscillator
+## much above this teleports across a hitched frame instead of shaking.
+const REJECT_FREQ := 34.0
+## Just above _wrong_jiggle's 3.2, so a rejecting tool and a wrong-flowing
+## vein read as one family of "no" rather than two unrelated effects.
+const REJECT_AMP := 3.6
+## _push_from_nodes retries every frame at 60Hz, so an unthrottled re-arm
+## would re-set reject to 1.0 before the decay ever ran — seizing at maximum
+## amplitude forever instead of shaking once. This makes a repeated refusal
+## beat "no ... no ... no" instead of buzzing.
+const REJECT_COOLDOWN := 0.9
+## Sustained floor while wrong cargo is in flight toward the Heart (game.gd
+## drives this). Low on purpose: arrival is what snaps to 1.0.
+const REJECT_INFLIGHT := 0.3
+
+
 ## Point count for a draw_arc of this radius spanning this many radians, sized
 ## so the result still reads as a smooth curve and no finer.
 ##
@@ -239,6 +299,39 @@ var _corrupt_tint := Palette.VOID
 var depletion_rate := 1.0
 ## 0..1, decays. The visible "two went in, one came out" moment.
 var smelt_flash := 0.0
+
+## 0..1. How badly this node's need is going unanswered. On the Heart it is
+## mirrored in from game.gd (which owns the graph knowledge, same as
+## fuel_ratio/demand/tell_ratio already are); on a tool it is derived locally
+## from `fed` below. 0 means satisfied, or means "not the kind of thing that
+## can starve." See the STARVE_* constants for what it drives.
+var starve := 0.0
+## Seconds this node's need has gone unanswered, feeding `starve` through
+## STARVE_GRACE/STARVE_RAMP. Tools own theirs; the Heart's lives in game.gd.
+var _starve_t := 0.0
+## 0..1, decays. "That isn't what I asked for." Set at the moment a wrong
+## shape is refused or lands — see would_reject and game._push_from_nodes.
+var reject := 0.0
+var _reject_cool := 0.0
+
+## Tools only, maintained by game._rebuild_graph: does this tool have an
+## adjacent vein whose source actually makes its ingredient? A tool that is
+## wired into the chain but has nothing supplying it is starving BY
+## CONSTRUCTION — no timer needed, and no false alarm on a slow-but-working
+## exotic recipe (see the note on _starve_t in _process).
+var fed := false
+
+## Accumulated animation phase, advanced by the clamped delta rather than
+## read from Time.get_ticks_msec(). Three things depend on that difference:
+## ticks_msec ignores Engine.time_scale, so the panic pinch would slow the
+## world while the shiver kept buzzing at full speed; a hitched frame
+## (Beat.MAX_DELTA = 0.25) would teleport a fast oscillator instead of
+## shaking it; and tutorial.gd reads demand_glyph_offset() from its own
+## _draw, which must see a settled value, not a fresh clock sample. Seeded
+## per instance in _ready so eight tools don't shiver in perfect lockstep —
+## identical mini-glyphs moving as one read as a rendering artifact, not as
+## eight independent anxious objects.
+var _anim_phase := 0.0
 ## Seconds this node has been rotting its neighbours.
 var spread_accum := 0.0
 ## Seconds this node has been corrupted, total. Drives COLLAPSE_TIME.
@@ -301,6 +394,8 @@ func _ready() -> void:
 		Kind.LOOM: reserve = LOOM_YIELD
 		Kind.KILN: reserve = KILN_YIELD
 		Kind.CRUCIBLE: reserve = CRUCIBLE_YIELD
+	# Decorrelate the need shiver per instance — see _anim_phase.
+	_anim_phase = float(get_instance_id() % 1000) * 0.0137
 	Beat.beat.connect(_on_beat)
 
 
@@ -321,6 +416,10 @@ func _process(delta: float) -> void:
 	delta = minf(delta, Beat.MAX_DELTA)
 	pulse = maxf(0.0, pulse - delta * 3.2)
 	smelt_flash = maxf(0.0, smelt_flash - delta * 2.4)
+	reject = maxf(0.0, reject - delta * REJECT_DECAY)
+	_reject_cool = maxf(0.0, _reject_cool - delta)
+	_anim_phase += delta
+	_tick_starve(delta)
 	if teach:
 		_teach_t += delta
 		if _teach_t >= TEACH_REPS * TEACH_REP_TIME:
@@ -381,19 +480,96 @@ func _process(delta: float) -> void:
 	# most Wells most of the time, is a still image; it has no business
 	# costing anything to hold.
 	#
-	# The two things here that animate off a CLOCK rather than off state
-	# still redraw unconditionally, so nothing that is supposed to move
-	# stops moving: the necrotic glitch (see _draw_necrotic, which buckets
-	# Time.get_ticks_msec) and the demand tell's wobble (see _draw_demand).
-	# `teach` is included for the same reason — it runs off _teach_t.
-	# Everything else is a pure function of the state in _visual_sig below.
-	if corrupted or teach or tell_ratio > 0.0:
+	# The things here that animate off a CLOCK rather than off state still
+	# redraw unconditionally, so nothing that is supposed to move stops
+	# moving: the necrotic glitch (see _draw_necrotic, which buckets
+	# Time.get_ticks_msec), the demand tell's wobble (see _draw_demand), and
+	# the unmet-need shiver (see _need_anim). `teach` is included for the
+	# same reason — it runs off _teach_t. Everything else is a pure function
+	# of the state in _visual_sig below.
+	#
+	# _was_anim is what makes the clock-driven branch safe to LEAVE. That
+	# branch never writes _visual_sig_last, so a node whose animation ends
+	# while its state is otherwise unchanged would compare equal to the
+	# signature it had before the animation started, skip the redraw, and
+	# hold its last drawn frame — mid-offset — forever. Clearing the cached
+	# signature on the way out forces exactly one settling redraw. (The two
+	# original cases only avoided this by luck: `teach` ends on a node whose
+	# _visual_sig_last is still [] from spawn, and a tell ends by flipping
+	# demand/tell_res, both of which are IN the signature. Neither was a
+	# designed invariant.)
+	var anim := corrupted or teach or tell_ratio > 0.0 or _need_anim()
+	if anim:
+		_was_anim = true
 		queue_redraw()
 	else:
+		if _was_anim:
+			_was_anim = false
+			_visual_sig_last = []
 		var sig := _visual_sig()
 		if sig != _visual_sig_last:
 			_visual_sig_last = sig
 			queue_redraw()
+
+
+## A tool's own hunger, derived from `fed` rather than from elapsed time.
+##
+## Elapsed time is the wrong instrument here and it is worth saying why:
+## _smelt() fires the instant intake is full and immediately empties it, so a
+## HEALTHY tool's steady state is partially unfilled essentially always — an
+## exotic 4-slot Forge on a single Well sits unfilled ~4.5s of every cycle
+## while working perfectly. Any grace short enough to catch a genuinely
+## starved tool would also flag that one. `fed` asks the honest question
+## instead: is anything adjacent actually making what I eat?
+##
+## The Heart is excluded — game.gd drives its `starve` directly, because the
+## question there ("can anything on the board answer my demand?") is graph
+## knowledge this node doesn't have.
+func _tick_starve(delta: float) -> void:
+	if kind == Kind.HEART or recipe.is_empty():
+		return
+	# `visible` matters: ghost_spawn/fuse hide a node and reveal it later
+	# while _process keeps running, so without this a ring-forged Crucible
+	# would pop into existence already shivering at full amplitude, having
+	# redrawn invisibly at 60Hz the whole time it was hidden. An orphan
+	# (depth < 0) stays still too — it already has the wither fade saying
+	# "you never used me", and the shiver has to keep meaning exactly one
+	# thing: this is IN your chain and it is starving.
+	var hungry := visible and depth >= 0 and not fed and intake.size() < recipe.size()
+	_starve_t = _starve_t + delta if hungry else 0.0
+	starve = clampf((_starve_t - STARVE_GRACE) / STARVE_RAMP, 0.0, 1.0)
+
+
+## Whether this node is currently animating off the clock rather than off
+## state, and therefore has to redraw unconditionally — see _process.
+## Self-limiting by design: a satisfied board has nothing in here, so the
+## "stop redrawing unchanged nodes" win survives intact for exactly the calm
+## case it was measured on. Only the nodes actually asking for something pay.
+func _need_anim() -> bool:
+	if not visible or suppress_demand:
+		return false
+	return starve > 0.0 or reject > 0.0
+
+
+## The shared displacement behind both need states, at `amp` design-px and
+## offset `phase_off` radians so sibling glyphs in one row don't move as a
+## rigid block. REJECT wins outright while it lasts: being fed the wrong
+## thing is the more actionable message than being fed nothing.
+func _need_offset(amp: float, phase_off: float) -> Vector2:
+	if reject > 0.0:
+		return Vector2(sin(_anim_phase * REJECT_FREQ + phase_off) * REJECT_AMP * reject, 0.0)
+	if starve <= 0.0:
+		return Vector2.ZERO
+	return Vector2(
+		sin(_anim_phase * STARVE_FREQ_A + phase_off),
+		sin(_anim_phase * STARVE_FREQ_B + phase_off + 1.1)) * amp * starve
+
+
+## 0..1 breath factor for a starving glyph's scale, alpha and stroke width.
+func _need_breath() -> float:
+	if starve <= 0.0:
+		return 0.0
+	return (sin(_anim_phase * STARVE_FREQ_A) * 0.5 + 0.5) * starve
 
 
 ## Everything _draw (and every helper it dispatches to) reads, packed for a
@@ -425,6 +601,12 @@ func _visual_sig() -> Array:
 ## Empty on purpose: never equal to a real signature, so the first _process
 ## after this node is built always draws.
 var _visual_sig_last: Array = []
+
+## Whether the previous frame took the clock-driven redraw branch — see the
+## _was_anim note in _process. Deliberately NOT in _visual_sig(): a flag that
+## reads false on both sides of an animation can never make the signature
+## differ, so putting it there would fix nothing.
+var _was_anim := false
 
 
 ## 0..1 toward collapse. Game reads this to know when to remove the node.
@@ -525,6 +707,37 @@ func can_accept(kind_in: int) -> bool:
 	return buffer.size() < buffer_cap()
 
 
+## "That is not what I asked for" — strictly narrower than `not can_accept`.
+##
+## can_accept fails three ways and only ONE of them is a wrong shape. The
+## other two are congestion wearing the same mask: a tool whose intake is
+## already full of exactly the right ingredient falls through
+## _accepts_tool_input and then trips the `kind_in != produces` gate, and a
+## tool with a full output buffer refuses everything. Shaking "no" at either
+## would be a lie — the first is the OPPOSITE message, and the second is what
+## vein strain already reports.
+func would_reject(kind_in: int) -> bool:
+	if kind == Kind.HEART or corrupted or recipe.is_empty():
+		return false
+	# The two deliberate pass-throughs, same as can_accept/take: rot cannot be
+	# laundered by a tool, and a tool's own produce arriving from a sibling is
+	# a relay, not an ingredient.
+	if kind_in == Res.VOID or kind_in == produces:
+		return false
+	return not recipe.has(kind_in)
+
+
+## Fires the "no" shake, at most once per REJECT_COOLDOWN. The throttle is not
+## cosmetic: _push_from_nodes retries a blocked push every frame at 60Hz, so an
+## unthrottled re-arm would re-set `reject` to 1.0 before the decay ever ran
+## and the node would seize at full amplitude forever instead of shaking once.
+func flash_reject() -> void:
+	if _reject_cool > 0.0:
+		return
+	reject = 1.0
+	_reject_cool = REJECT_COOLDOWN
+
+
 func take(kind_in: int) -> bool:
 	if _accepts_tool_input(kind_in):
 		# Capped at the RECIPE's own size, not buffer_cap() — a Forge's cap is 3
@@ -618,6 +831,18 @@ func _draw() -> void:
 		_draw_necrotic(r)
 		_draw_buffer(r, col)
 		return
+
+	# Past the halfway point of starvation the whole organ shakes, not just
+	# the glyph inside it — set once here so the transform carries through
+	# every draw below (body, waterline, scars, buffer pips, crown AND the
+	# demand glyph move together, which is what "the Heart trembles" has to
+	# mean; a body that shook independently of its own contents would read
+	# as a rendering bug). Below STARVE_BODY_AT the glyph carries it alone,
+	# so the escalation has somewhere to go. game._draw's beat ring sits at
+	# radius 48+ and does not visibly desync from two pixels.
+	if kind == Kind.HEART and starve > STARVE_BODY_AT:
+		var tremble := (starve - STARVE_BODY_AT) / (1.0 - STARVE_BODY_AT)
+		draw_set_transform(_need_offset(STARVE_AMP_BODY * tremble, 0.0))
 
 	match kind:
 		Kind.HEART: _draw_heart_shape(r, col)
@@ -870,8 +1095,14 @@ func _draw_partial_outline(pts: PackedVector2Array, ratio: float, col: Color, wi
 ## DEMAND_TELL_LEAD), the current glyph destabilises — fading and wobbling —
 ## while the next one fades in on top of it, so the Heart visibly changes
 ## its mind a few seconds before it actually does. Outside that window
-## (always true during the teaching schedule) this draws exactly one glyph,
-## same as before.
+## (always true during the teaching schedule) this draws exactly one glyph.
+##
+## That single-glyph case is where STARVE lives: while nothing on the board
+## can answer this demand (see game._demand_suppliable), the glyph drifts,
+## breathes and dims — a want going unanswered, getting worse. The tell
+## branch is deliberately left alone; it already destabilises the glyph for
+## a different reason, and game.gd suppresses starve outright while a tell
+## is up so the two can never talk over each other.
 func _draw_demand(r: float) -> void:
 	var s := r * 0.34
 	if tell_ratio > 0.0 and tell_res != -1 and tell_res != demand:
@@ -886,7 +1117,24 @@ func _draw_demand(r: float) -> void:
 	else:
 		var c: Color = Palette.of_res(demand)
 		c.a = 0.85 + pulse * 0.15
-		_draw_demand_glyph(demand, s, c, Vector2.ZERO)
+		if starve <= 0.0:
+			_draw_demand_glyph(demand, s, c, Vector2.ZERO)
+			return
+		# Three channels at once, because at s ~= 11.6px displacement alone is
+		# too small to carry the read: it drifts, it breathes bigger and
+		# smaller (a change in silhouette AREA, which registers where a
+		# two-pixel shift does not), and its alpha pulses.
+		#
+		# PULSES, not dims. A constant fade was the obvious version and it is
+		# backwards: this glyph is the only instruction VEIN ever gives, and
+		# starving is exactly the moment the player most needs to read WHICH
+		# shape it is asking for. Oscillating instead keeps every peak fully
+		# legible while still reading as a want guttering in and out — the
+		# same trick the recipe slots use (see _draw_recipe_slots).
+		var breath := _need_breath()
+		c.a *= lerpf(1.0, lerpf(0.45, 1.0, breath), starve)
+		_draw_demand_glyph(demand, s * (1.0 + STARVE_BREATH * breath), c,
+			_need_offset(STARVE_AMP_GLYPH, 0.6))
 
 
 ## Local-space, origin-centred outline for a demand glyph at scale `s` — the
@@ -945,6 +1193,25 @@ func _draw_demand_glyph(res: int, s: float, c: Color, offset: Vector2) -> void:
 			shifted.append(p + offset)
 		pts = shifted
 	draw_polyline(pts, c, 2.4, true)
+
+
+## Where the Heart's demand glyph actually IS this frame, relative to the
+## Heart's own position — the body tremble plus the glyph's own drift. Only
+## tutorial.gd needs this, so its highlight halo can track a shivering glyph
+## instead of visibly sliding off it (see _draw_demand_match_hint).
+##
+## A getter over stored state, never a fresh clock read: the tutorial is a
+## sibling CanvasItem calling this from its own _draw, and Godot runs every
+## _process before every _draw, so what it reads here is the same settled
+## _anim_phase this node drew with.
+func demand_glyph_offset() -> Vector2:
+	if kind != Kind.HEART or suppress_demand or starve <= 0.0:
+		return Vector2.ZERO
+	var off := _need_offset(STARVE_AMP_GLYPH, 0.6)
+	if starve > STARVE_BODY_AT:
+		var tremble := (starve - STARVE_BODY_AT) / (1.0 - STARVE_BODY_AT)
+		off += _need_offset(STARVE_AMP_BODY * tremble, 0.0)
+	return off
 
 
 func _draw_ring(r: float, col: Color) -> void:
@@ -1259,21 +1526,33 @@ func _draw_teach_demo(r: float) -> void:
 ## them bigger." One glyph per recipe slot, in the slot's own resource
 ## colour, drawn dim while empty and lit once an intake item fills it — the
 ## interior IS the progress bar toward the next smelt.
+##
+## An UNFILLED slot on a starving tool (see _tick_starve) breathes that
+## existing dim/lit distinction rather than just jittering: at s = 7-9px a
+## drift of a pixel is half a stroke width and loses outright against the
+## node's own 2.6px outline, its ghost under-outline and the dots crawling
+## along the veins. Alpha, stroke width and scale all move instead, which
+## turns a difference the player is ALREADY reading into one that moves.
+## Displacement stays, as the top note that makes it read as anxious rather
+## than merely glowing. Colour is never the only channel here (see palette.gd)
+## and it still isn't — alpha is not hue.
 func _draw_recipe_slots(r: float) -> void:
 	if recipe.is_empty():
 		return
 	var n := recipe.size()
 	var s := r * (0.42 if n <= 2 else 0.32)
 	var gap := s * 2.4
-	var have := intake.duplicate()
+	# `intake` is always k copies of ONE resource, so a slot is filled purely
+	# by its index: _roll_recipe's exotic path varies the COUNT of the
+	# canonical ingredient and never the type (see its header, and
+	# CANONICAL_RECIPE). A mixed recipe cannot occur, so the old
+	# duplicate/find/remove_at bookkeeping was matching against a case the
+	# game does not have.
+	var breath := _need_breath()
 	for i in n:
 		var res: int = recipe[i]
 		var p := Vector2((float(i) - float(n - 1) * 0.5) * gap, 0.0)
-		var filled := false
-		var hi := have.find(res)
-		if hi >= 0:
-			filled = true
-			have.remove_at(hi)
+		var filled := i < intake.size()
 		# Feedback: the unfilled state read as too pale/washed-out to register
 		# as "a shape" at all, and even the filled one was thinner than it
 		# needed to be against the body fill. Sharper on both counts again —
@@ -1282,21 +1561,29 @@ func _draw_recipe_slots(r: float) -> void:
 		var col := Palette.of_res(res)
 		col.a = (1.0 if filled else 0.8) + smelt_flash * 0.1
 		var w := 2.9 if filled else 2.4
+		var ss := s
+		if not filled and (starve > 0.0 or reject > 0.0):
+			col.a = lerpf(col.a, lerpf(0.42, 0.95, breath), starve)
+			w = lerpf(w, lerpf(2.0, 3.2, breath), starve)
+			ss = s * (1.0 + STARVE_BREATH * breath)
+			# Per-slot phase offset, so the row shivers as several hungry
+			# things and not as one rigid block sliding sideways.
+			p += _need_offset(STARVE_AMP_SLOT, float(i) * 0.7)
 		match res:
 			Res.REFINED:
-				_draw_mini_tri(p, s, col, w, filled)
+				_draw_mini_tri(p, ss, col, w, filled)
 			Res.CLOTH:
-				_draw_mini_square(p, s * 0.85, col, w, filled)
+				_draw_mini_square(p, ss * 0.85, col, w, filled)
 			Res.PRISM:
-				_draw_mini_pentagon(p, s, col, w, filled)
+				_draw_mini_pentagon(p, ss, col, w, filled)
 			Res.HEXAGON:
-				_draw_mini_hexagon(p, s, col, w, filled)
+				_draw_mini_hexagon(p, ss, col, w, filled)
 			_:
-				draw_arc(p, s * 0.8, 0.0, TAU, arc_points(s * 0.8), col, w, true)
+				draw_arc(p, ss * 0.8, 0.0, TAU, arc_points(ss * 0.8), col, w, true)
 				if filled:
 					var fill := col
 					fill.a *= 0.75
-					draw_circle(p, s * 0.8, fill)
+					draw_circle(p, ss * 0.8, fill)
 
 
 ## `filled` (a slot an intake item has actually reached) gets a solid, sharp

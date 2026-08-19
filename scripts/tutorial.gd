@@ -105,6 +105,14 @@ func holds_demand() -> bool:
 	return active()
 
 
+## While true, this overlay is already blinking "the Heart wants THIS" on the
+## Heart and on every matching node. game.gd reads it to hold back the Heart's
+## own starve shiver for the duration — the two say the same sentence, and
+## three simultaneous versions of one instruction is noise, not emphasis.
+func shows_demand_hint() -> bool:
+	return active() and step in [Step.CONNECT, Step.FEED2, Step.COMBINE_LINK, Step.COMBINE_FEED]
+
+
 ## While true, game.gd suspends Well AND tool spawns. The opening stays the two
 ## starter Wells until they're connected, then the tutorial injects exactly one
 ## far Well for the chaining lesson — no flood. Lifts the moment chaining is
@@ -462,7 +470,7 @@ func _draw() -> void:
 	# opening CONNECT/FEED2 lesson, triangle once COMBINE begins (a Forge is
 	# the only thing that makes it) — same call either time, nothing here is
 	# hand-coded per shape, it just reads game.demand.
-	if step in [Step.CONNECT, Step.FEED2, Step.COMBINE_LINK, Step.COMBINE_FEED]:
+	if shows_demand_hint():
 		_draw_demand_match_hint()
 
 	match step:
@@ -527,8 +535,11 @@ func _draw_demand_match_hint() -> void:
 	# which doesn't.
 	var heart_col := col
 	heart_col.a = 0.35 + blink * 0.45
-	_draw_shape_halo(game.heart.position, game.demand, game.heart.radius() * HEART_HALO_S,
-		heart_col, 3.0 + blink * 2.0)
+	# Follows the glyph rather than the Heart's centre: if the glyph is
+	# shivering (see VNode.starve) a halo pinned to the node's position would
+	# visibly slide off the thing it is pointing at.
+	_draw_shape_halo(game.heart.position + game.heart.demand_glyph_offset(),
+		game.demand, game.heart.radius() * HEART_HALO_S, heart_col, 3.0 + blink * 2.0)
 
 	for n in game.nodes:
 		if n != game.heart and n.produces == game.demand and not n.corrupted:

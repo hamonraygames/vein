@@ -955,6 +955,14 @@ var _best_callout_fired := false
 
 ## The shape the Heart wants right now. Drawn inside it — see VNode._draw_demand.
 var demand: int = VNode.Res.RAW
+
+## Whether anything the player has actually built can answer `demand` — see
+## _demand_suppliable. Recomputed on graph change and on a demand flip only,
+## never per frame. Drives the Heart's starve shiver (VNode.starve).
+var _demand_supplied := true
+## Seconds the Heart's demand has gone unanswerable, feeding heart.starve
+## through VNode.STARVE_GRACE/STARVE_RAMP.
+var _starve_t := 0.0
 ## Every resource DEMAND_TIERS has introduced so far this run — the pool the
 ## post-teaching rotation phase draws from (see _tick_escalation).
 var _unlocked_res: Array[int] = [VNode.Res.RAW]
@@ -1613,6 +1621,7 @@ func start_run(run_seed: int) -> void:
 	_moved = false
 
 	heart = _make_node(VNode.Kind.HEART, heart_spawn_pos())
+	_starve_t = 0.0
 
 	# Two wells to open with, placed relative to the Heart and inside its reach:
 	# the first connection must be obvious, so the player learns the verb by
@@ -1703,6 +1712,13 @@ func _make_node(kind: int, pos: Vector2) -> VNode:
 
 func _on_stopped(total: int) -> void:
 	alive = false
+	# _process returns early once alive is false, so anything it drives has to
+	# be released HERE or it freezes at whatever it held — a Heart caught
+	# mid-shiver would keep trembling under the shatter and the death screen.
+	_starve_t = 0.0
+	if heart != null:
+		heart.starve = 0.0
+		heart.reject = 0.0
 	Audio.stop_all()
 	# The run can die mid panic-pinch; never leave the world dilated. Only undo
 	# our own dilation — blindly writing 1.0 here would stomp the time scale the
@@ -2564,6 +2580,8 @@ func _tick_escalation(delta: float) -> void:
 		if want != demand:
 			demand = want
 			heart.demand = want
+			# The graph did not move, but the question did — see _refresh_needs.
+			_demand_supplied = _demand_suppliable()
 			# The Heart changing its mind is the loudest event in the run:
 			# everything you built is now feeding it the wrong thing.
 			heart.pulse = 1.0
@@ -3661,6 +3679,10 @@ func _producer_kind_for_res(res: int) -> int:
 ## a spawn to reinforce a DIFFERENT critical kind) — strict same-family
 ## replacement is the whole point, not "whatever's most needed."
 func _on_node_corrupted(n: VNode) -> void:
+	# A rotted producer makes VOID now, so it can no longer answer the Heart's
+	# demand nor feed the tool downstream of it — and corruption never touches
+	# the graph, so nothing else would notice. See _refresh_needs.
+	_refresh_needs()
 	if n.kind == VNode.Kind.HEART:
 		return
 	var spawned: VNode = null
@@ -3693,6 +3715,67 @@ func _spawn_ghost(from: Vector2, spawned: VNode, kind: int) -> void:
 
 
 # --- Graph: everything flows downhill toward demand -------------------------
+
+## Is there anything on this board, wired to the Heart and still alive, that
+## makes what the Heart is asking for?
+##
+## This is the whole STARVE signal, and it is deliberately a graph question
+## rather than a timer. "Seconds since the last correct delivery" was the
+## obvious alternative and it is wrong three ways: it can only see veins that
+## end AT the Heart, so a REFINED sitting in a Forge's buffer is invisible to
+## it and a working two-hop chain with a momentary gap reads as starving; a
+## hard reset on each arrival makes the shiver sawtooth (build, snap to zero,
+## rebuild), which flickers rather than escalates; and it cannot distinguish
+## "you have no Kiln" from "your Kiln is between batches."
+##
+## The graph question gets all three right for free, at zero per-frame cost.
+## Its most valuable case is the demand flip: if you own a connected producer
+## of the new shape it stays silent (you CAN answer this — go reroute), and if
+## you do not it lights up instantly, which is the "build one" instruction. A
+## timer cannot say that sentence at all.
+##
+## One known false negative, accepted: a connected Well makes RAW while demand
+## is RAW, but a Forge downstream eats all of it, so nothing correct ever
+## actually arrives. The Heart is being fed there, just wrongly — which REJECT
+## already reports, and more accurately than starve would.
+func _demand_suppliable() -> bool:
+	for n in nodes:
+		if n.depth >= 0 and not n.corrupted and n.produces == demand:
+			return true
+	return false
+
+
+## Recomputes both need-signals — what the Heart's starve shiver reads, and
+## what every tool's does. Event-driven, never per-frame: only three things
+## can change either answer, and all three call this.
+##
+##   - the graph moved            (tail of _rebuild_graph)
+##   - the Heart wants something else  (_tick_escalation's flip)
+##   - a producer rotted          (_on_node_corrupted) — corruption does NOT
+##     rebuild the graph (depth is unchanged by it), but it flips `produces`
+##     to VOID, so the Forge that was answering the demand stops counting and
+##     the tool it was feeding stops being fed. Missing this hook was the one
+##     way these could silently go stale and quietly under-report starvation.
+func _refresh_needs() -> void:
+	_demand_supplied = _demand_suppliable()
+	# Per-tool: is anything adjacent actually making my ingredient? Recipes are
+	# homogeneous by construction — _roll_recipe's exotic path varies the COUNT
+	# only, never the type (see its header) — so recipe[0] is THE ingredient
+	# and one check covers every slot.
+	for n in nodes:
+		if n.recipe.is_empty():
+			continue
+		var want: int = n.recipe[0]
+		n.fed = false
+		for v in veins:
+			# Direction-aware, not merely adjacent: a neighbour that makes my
+			# ingredient but sits DOWNHILL of me can never hand it back up, so
+			# counting it would silence a tool that is genuinely starving.
+			var o := v.other(n)
+			if o != null and not o.corrupted and o.produces == want and v.source() == o:
+				n.fed = true
+				break
+
 
 func _rebuild_graph() -> void:
 	for n in nodes:
@@ -3732,6 +3815,9 @@ func _rebuild_graph() -> void:
 
 	for v in veins:
 		v.update_dir()
+
+	_refresh_needs()
+
 	budget_hint.queue_redraw()
 	# The one place the tell recomputes. Graph change only, never per frame
 	# — see Ring.find_pending on why that matters.
@@ -4153,6 +4239,19 @@ func _process(delta: float) -> void:
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
 	heart.fuel_ratio = health_ratio()
+	# Nothing on the board can answer the demand -> the Heart visibly starves.
+	# Suppressed in two cases, both because something else is already saying it
+	# better: during a tell the demand is about to change, so "you cannot
+	# supply this" is about to stop being true; and during the tutorial's own
+	# demand hint the shiver, the tutorial's Heart halo and its node halos
+	# would be three things saying one sentence.
+	# Explicitly typed: `tutorial` is a bare Node2D here, so the call through it
+	# is Variant and := cannot infer bool from the chain.
+	var calm: bool = _demand_supplied or heart.tell_ratio > 0.0 \
+		or (tutorial != null and tutorial.shows_demand_hint())
+	_starve_t = 0.0 if calm else _starve_t + delta
+	heart.starve = clampf(
+		(_starve_t - VNode.STARVE_GRACE) / VNode.STARVE_RAMP, 0.0, 1.0)
 	# lb_you only carries a real rank once this session has heard back from
 	# a submission (see _on_lb_request_completed) — before that it's still
 	# the {"rank": 0, ...} default, so the crown simply never shows until
@@ -4184,6 +4283,15 @@ func _process(delta: float) -> void:
 					wrong = true
 					break
 		v.wrong_flow = wrong
+		# The Heart starts refusing while the wrong cargo is still ON ITS WAY,
+		# not only when it lands — that gap is the window in which cutting the
+		# vein is still worth doing. Held at a low floor on purpose: the snap
+		# to 1.0 belongs to arrival (see _deliver). Note this also means a
+		# demand flip, which turns a whole in-flight pipeline wrong at once,
+		# holds the low shake until that pipeline drains — which is the
+		# actionable reading of exactly what just happened to it.
+		if wrong:
+			heart.reject = maxf(heart.reject, VNode.REJECT_INFLIGHT)
 		for item in v.advance(delta):
 			_deliver(item.kind, v, v.sink(), item.pot)
 
@@ -4633,6 +4741,11 @@ func _push_from_nodes() -> void:
 			# whatever is producing it (see VNode.can_accept).
 			if sink != null and not sink.can_accept(item):
 				v.note_blocked()
+				# Refused before departure. would_reject, not the can_accept
+				# result itself, decides whether this was actually the WRONG
+				# SHAPE rather than plain congestion.
+				if sink.would_reject(item):
+					sink.flash_reject()
 				continue
 			if v.inject(item, pot):
 				n.buffer.remove_at(0)
@@ -4687,6 +4800,15 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 			combo = 0
 			_combo_callout_tier = 0
 			_bad_tempo_flash = 1.0
+			# A top note on the glyph, not a sixth alarm — the burst, the
+			# cross, the dulled swallow, the broken combo and the inbound
+			# vein's own jiggle are all already firing on this same event.
+			# Throttled like every other reject: dots ride ~0.36s apart, so a
+			# stale network delivering wrong shapes back to back would re-snap
+			# to full amplitude faster than REJECT_DECAY could ever run it
+			# down, holding a permanent maximum shake instead of a readable
+			# "no ... no ... no" at the cadence of the mistakes themselves.
+			to.flash_reject()
 		elif kind == demand and kind != VNode.Res.VOID:
 			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN)
 			# Feeds the demand-tier advance gate (see _demand_tier_idx/
@@ -4715,6 +4837,9 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 		out_dir = out_dir.normalized() if out_dir.length() > 0.001 else Vector2.UP
 		_pop_gain(kind, gain, entry, out_dir, off_demand)
 	elif not to.take(kind):
+		# Refused on ARRIVAL — it travelled the whole vein to get turned away.
+		if to.would_reject(kind):
+			to.flash_reject()
 		dropped += 1
 
 
