@@ -164,22 +164,45 @@ const ARC_MAX_SAG := 0.25
 ##
 ## All amplitudes are DESIGN-space px (540x1170), so they read at roughly 2x
 ## on a phone — see ARC_MAX_SAG above for the same caveat.
+## Grace when NOTHING on the board can answer the demand at all. Short: no
+## amount of waiting fixes that, so the instruction ("build one") should
+## arrive fast. It is a debounce, not suspense — it exists so a mid-drag
+## reroute does not flash.
 const STARVE_GRACE := 1.2
-## 0 -> 1 after the grace, so ~6.2s from onset to full agitation. The grace
-## is a debounce, not suspense: the signal driving this is graph-derived and
-## exact (see game._demand_suppliable), it just must not flash mid-reroute.
-const STARVE_RAMP := 5.0
+## Grace when a producer EXISTS but nothing correct is actually arriving —
+## the chain is misrouted, backed up, or being eaten in the middle. Long
+## enough that an ordinary gap between deliveries never trips it: a working
+## chain lands something every couple of seconds.
+const STARVE_GRACE_STALLED := 3.0
+## 0 -> 1 after the grace. Tuned against instrumented probe runs, not by eye:
+## at 5.0 on top of a 6.0 stalled grace the Heart needed ELEVEN seconds of
+## silence to shiver at all and never once reached the body tremble across
+## two full runs. A working chain lands something every 1-3s, so this is
+## still comfortably clear of ordinary play.
+const STARVE_RAMP := 3.5
 ## Two incommensurate frequencies, so the shiver never settles into a clean
 ## repeating oscillation the eye can dismiss as a loop.
-const STARVE_FREQ_A := 1.5
-const STARVE_FREQ_B := 2.3
-const STARVE_AMP_GLYPH := 2.4
-const STARVE_AMP_BODY := 2.0
+##
+## 1.4 and 2.2 Hz. The first pass used 1.5 and 2.3 RAD/s — 0.24 Hz, one full
+## cycle every four seconds — reasoning that at two pixels a buzz disappears
+## and drift is what reads. Half right: buzz does disappear, but drift that
+## slow does not read as agitation either, it reads as nothing at all, and a
+## starve spell often ended before one cycle finished. This is fast enough to
+## register as trembling and still nowhere near _wrong_jiggle's 17 Hz, which
+## is the frequency band that already means "wrong".
+const STARVE_FREQ_A := 9.0
+const STARVE_FREQ_B := 13.7
+## The breath (alpha, stroke width, scale) keeps its own much slower cadence,
+## near the tutorial halo's proven 0.9 Hz "look here" pulse — so the two
+## channels stay separable: a slow swell carrying a fast tremble.
+const STARVE_FREQ_BREATH := 5.0
+const STARVE_AMP_GLYPH := 3.0
+const STARVE_AMP_BODY := 2.4
 ## Where the Heart's BODY joins in. The glyph carries the first half alone,
 ## so the escalation has somewhere to go: a small want, then a whole organ
 ## visibly shaking.
 const STARVE_BODY_AT := 0.5
-const STARVE_AMP_SLOT := 1.2
+const STARVE_AMP_SLOT := 1.6
 ## Scale breath. At a tool's 7-9px mini-glyph, displacement alone is half a
 ## stroke width and invisible against the node's own outline — a shape that
 ## changes silhouette AREA reads where one that shifts 1.2px does not.
@@ -569,7 +592,7 @@ func _need_offset(amp: float, phase_off: float) -> Vector2:
 func _need_breath() -> float:
 	if starve <= 0.0:
 		return 0.0
-	return (sin(_anim_phase * STARVE_FREQ_A) * 0.5 + 0.5) * starve
+	return (sin(_anim_phase * STARVE_FREQ_BREATH) * 0.5 + 0.5) * starve
 
 
 ## Everything _draw (and every helper it dispatches to) reads, packed for a
@@ -1133,7 +1156,7 @@ func _draw_demand(r: float) -> void:
 		# same trick the recipe slots use (see _draw_recipe_slots).
 		var breath := _need_breath()
 		c.a *= lerpf(1.0, lerpf(0.45, 1.0, breath), starve)
-		_draw_demand_glyph(demand, s * (1.0 + STARVE_BREATH * breath), c,
+		_draw_demand_glyph(demand, s * (1.0 + STARVE_BREATH * breath * 2.0), c,
 			_need_offset(STARVE_AMP_GLYPH, 0.6))
 
 

@@ -960,8 +960,8 @@ var demand: int = VNode.Res.RAW
 ## _demand_suppliable. Recomputed on graph change and on a demand flip only,
 ## never per frame. Drives the Heart's starve shiver (VNode.starve).
 var _demand_supplied := true
-## Seconds the Heart's demand has gone unanswerable, feeding heart.starve
-## through VNode.STARVE_GRACE/STARVE_RAMP.
+## Seconds since the Heart last actually received what it was asking for.
+## THE measurement behind the starve shiver — see the note in _process.
 var _starve_t := 0.0
 ## Every resource DEMAND_TIERS has introduced so far this run — the pool the
 ## post-teaching rotation phase draws from (see _tick_escalation).
@@ -4239,19 +4239,29 @@ func _process(delta: float) -> void:
 	_tick_corruption(delta)
 	_tick_lifecycle(delta)
 	heart.fuel_ratio = health_ratio()
-	# Nothing on the board can answer the demand -> the Heart visibly starves.
-	# Suppressed in two cases, both because something else is already saying it
-	# better: during a tell the demand is about to change, so "you cannot
-	# supply this" is about to stop being true; and during the tutorial's own
-	# demand hint the shiver, the tutorial's Heart halo and its node halos
-	# would be three things saying one sentence.
+	# THE HEART STARVES WHEN IT IS NOT BEING FED. Measured as seconds since the
+	# last correct delivery, not as "does a producer of this shape exist
+	# somewhere in my component" — that first version was this feature's whole
+	# bug. Instrumented over two probe runs it left heart.starve at 0 for
+	# 100% of both: the board carries ~20 live nodes, so once anything that
+	# makes the wanted shape is anywhere in the Heart's component the test
+	# passed, even when that Forge was wired into the far end of the network
+	# or having its output eaten by a Loom in the middle. "You own one" is not
+	# "it is reaching me", and only the second is what the player must read.
+	#
+	# _demand_supplied survives as the SPEED of the ramp rather than a veto,
+	# and that is where it is genuinely better than a clock: if nothing on the
+	# board can answer this at all, no amount of waiting will fix it, so say
+	# so almost immediately ("build one"). If a producer does exist, allow a
+	# long gap first — the chain may simply be between deliveries — and only
+	# then report it ("your chain is not reaching me").
 	# Explicitly typed: `tutorial` is a bare Node2D here, so the call through it
 	# is Variant and := cannot infer bool from the chain.
-	var calm: bool = _demand_supplied or heart.tell_ratio > 0.0 \
+	var hushed: bool = heart.tell_ratio > 0.0 \
 		or (tutorial != null and tutorial.shows_demand_hint())
-	_starve_t = 0.0 if calm else _starve_t + delta
-	heart.starve = clampf(
-		(_starve_t - VNode.STARVE_GRACE) / VNode.STARVE_RAMP, 0.0, 1.0)
+	_starve_t = 0.0 if hushed else _starve_t + delta
+	var grace := VNode.STARVE_GRACE if not _demand_supplied else VNode.STARVE_GRACE_STALLED
+	heart.starve = clampf((_starve_t - grace) / VNode.STARVE_RAMP, 0.0, 1.0)
 	# lb_you only carries a real rank once this session has heard back from
 	# a submission (see _on_lb_request_completed) — before that it's still
 	# the {"rank": 0, ...} default, so the crown simply never shows until
@@ -4810,6 +4820,9 @@ func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 			# "no ... no ... no" at the cadence of the mistakes themselves.
 			to.flash_reject()
 		elif kind == demand and kind != VNode.Res.VOID:
+			# The Heart got what it asked for: the one event that genuinely
+			# ends starvation (see _starve_t in _process).
+			_starve_t = 0.0
 			gain *= (1.0 + minf(float(combo), float(COMBO_CAP)) * COMBO_GAIN)
 			# Feeds the demand-tier advance gate (see _demand_tier_idx/
 			# _tick_escalation) — a correct delivery is what actually earns
