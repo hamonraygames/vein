@@ -81,7 +81,75 @@ func _ready() -> void:
 			"expect": VNode.Kind.FORGE, "close": [0, 2], "survivors": 1},
 	]
 	_assert_suggestions()
+	_assert_release()
 	_next_case()
+
+
+## The forged shape's only death, and what it gives back.
+##
+## Corruption is the whole of it — wither_ratio() is Wells-only and
+## collapse_ratio() is zero until `corrupted`, so a Forge cannot leave the
+## board any other way. Forge a triangle, rot it, and the three circles must
+## be standing where the three circles stood.
+func _assert_release() -> void:
+	for n in _game.nodes.duplicate():
+		if n != _game.heart:
+			_game._remove_node(n)
+	var spots: Array[Vector2] = []
+	var wells: Array[VNode] = []
+	_game.budget = 40
+	for i in 3:
+		var a := TAU * float(i) / 3.0 - PI * 0.5
+		var at := CENTER + Vector2(cos(a), sin(a)) * 150.0
+		spots.append(at)
+		wells.append(_game._make_node(VNode.Kind.WELL, at))
+	for i in 3:
+		_game._add_vein(wells[i], wells[(i + 1) % 3])
+
+	var made: VNode = null
+	for n in _game.nodes:
+		if n != _game.heart and n.kind == VNode.Kind.FORGE:
+			made = n
+	if made == null:
+		_fails += 1
+		print("ring_lab: FAIL  release setup never forged a shape")
+		return
+	if made.forged_from.size() != 3:
+		_fails += 1
+		print("ring_lab: FAIL  forged shape remembers %d spots, not 3"
+			% made.forged_from.size())
+
+	made.corrupt()
+
+	# _clear_spot may nudge a released Well off the exact pixel (the corrupted
+	# shape is still standing at the centroid), so this asks the question that
+	# matters: is a NEW Well standing at each place a ring member stood?
+	var back := 0
+	for spot in spots:
+		for n in _game.nodes:
+			if n.kind == VNode.Kind.WELL and not n.corrupted 					and n.position.distance_to(spot) <= 40.0:
+				back += 1
+				break
+	var ok := back == 3
+	if not ok:
+		_fails += 1
+	print("ring_lab: %s  a rotted shape gives its circles back%s"
+		% ["PASS" if ok else "FAIL", "" if ok else "  (got %d of 3)" % back])
+
+	# And it does NOT also take the ordinary same-family respawn: no second
+	# Forge anywhere on the board.
+	var forges := 0
+	for n in _game.nodes:
+		if n.kind == VNode.Kind.FORGE and not n.corrupted:
+			forges += 1
+	if forges != 0:
+		_fails += 1
+	print("ring_lab: %s  no same-family respawn on top of the release%s"
+		% ["PASS" if forges == 0 else "FAIL", "" if forges == 0 else "  (%d live)" % forges])
+
+	for n in _game.nodes.duplicate():
+		if n != _game.heart:
+			_game._remove_node(n)
 
 
 ## The tell's ranking, on one board that offers a triangle, a square and a

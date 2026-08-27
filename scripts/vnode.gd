@@ -287,6 +287,13 @@ var intake: Array[int] = []
 ## inside, not from the body colour.
 var recipe: Array[int] = []
 
+## Where the Wells stood that this shape was forged from — empty for anything
+## that spawned normally. Kept so the shape can hand them back where they were
+## when it dies (see game.gd's _release_ring): a ring is a place on the board
+## you chose and rerouted around, and answering its death with one replacement
+## somewhere else erased both the count and the layout.
+var forged_from: Array[Vector2] = []
+
 ## 0..1, decays. Drives the swell when the node emits or consumes.
 var pulse := 0.0
 

@@ -2702,26 +2702,43 @@ func _spawn_tool_slot(kind: int) -> void:
 ## callers that need to know whether a replacement actually landed (see
 ## _on_node_corrupted) read this instead of assuming a spawn happened.
 func _spawn_well() -> VNode:
+	if not _make_room_for_well():
+		return null
+	return _spawn_node(VNode.Kind.WELL)
+
+
+## A Well put back exactly where one stood, rather than wherever _spawn_node's
+## scoring would like one — the release path (see _release_ring) is entirely
+## about the place. Same cap rule; the position is the only difference.
+func _spawn_well_at(pos: Vector2) -> VNode:
+	if not _make_room_for_well():
+		return null
+	return _make_node(VNode.Kind.WELL, _clear_spot(pos, []))
+
+
+## Is there room under MAX_LIVE_WELLS, displacing the most-neglected orphan if
+## not? False means the board is full of Wells the player is actually using.
+func _make_room_for_well() -> bool:
 	var live: Array[VNode] = []
 	for n in nodes:
 		if n.kind == VNode.Kind.WELL and not n.corrupted:
 			live.append(n)
+	if live.size() < MAX_LIVE_WELLS:
+		return true
 
-	if live.size() >= MAX_LIVE_WELLS:
-		var oldest: VNode = null
-		for n in live:
-			if n.depth >= 0:
-				continue
-			if oldest == null or n.orphan_age > oldest.orphan_age:
-				oldest = n
-		# Everything is connected and we're at cap: the player has earned a full
-		# board, so skip this spawn rather than deleting something in use.
-		if oldest == null:
-			return null
-		withered += 1
-		_remove_node(oldest)
-
-	return _spawn_node(VNode.Kind.WELL)
+	var oldest: VNode = null
+	for n in live:
+		if n.depth >= 0:
+			continue
+		if oldest == null or n.orphan_age > oldest.orphan_age:
+			oldest = n
+	# Everything is connected and we're at cap: the player has earned a full
+	# board, so skip this spawn rather than deleting something in use.
+	if oldest == null:
+		return false
+	withered += 1
+	_remove_node(oldest)
+	return true
 
 
 ## What kind hands `kind` its raw material — a Forge eats from a Well, a Loom
@@ -3678,6 +3695,10 @@ func _on_node_corrupted(n: VNode) -> void:
 	_refresh_needs()
 	if n.kind == VNode.Kind.HEART:
 		return
+	# A forged shape dies back into its own circuit, which is the whole of its
+	# harakiri — see _release_ring.
+	if _release_ring(n):
+		return
 	var spawned: VNode = null
 	if n.kind == VNode.Kind.WELL:
 		spawned = _spawn_well()
@@ -3691,6 +3712,42 @@ func _on_node_corrupted(n: VNode) -> void:
 	# visual noise — the respawn itself still fires every time, just quietly.
 	if n.kind != VNode.Kind.WELL:
 		_spawn_ghost(n.position, spawned, n.kind)
+
+
+## A forged shape dying gives back the Wells it was made of, where they stood.
+##
+## The ordinary harakiri answers a death with ONE same-family replacement
+## somewhere else, and for a forged shape that is wrong twice over. It is a
+## net loss of supply — three Wells went in, one node comes back — and it
+## throws away the placement, which for a ring is the part the player
+## actually authored: they picked those spots, drew the circuit around them,
+## and rerouted the board to reach it. Handing back N Wells exactly where the
+## N Wells were conserves the count (the same N a Well-by-Well death would
+## have respawned) and keeps the shape of the board the player built.
+##
+## Corruption is the ONLY death a forged shape can have, which is why this
+## hangs off _on_node_corrupted alone: wither_ratio() is Wells-only and
+## collapse_ratio() is zero until `corrupted`, so a Forge never withers and
+## never collapses without turning first. `forged_from` is still cleared
+## here, so the later collapse can't pay out twice. Returns whether it was a
+## forged shape at all — which is what tells the caller to skip the ordinary
+## same-family respawn.
+func _release_ring(n: VNode) -> bool:
+	if n.forged_from.is_empty():
+		return false
+	var from := n.position
+	var spots := n.forged_from.duplicate()
+	n.forged_from.clear()
+	for p in spots:
+		var w := _spawn_well_at(p)
+		if w == null:
+			continue
+		corruption_respawns += 1
+		# Wells normally respawn without a ghost — twenty of them turning over
+		# all run is noise. This is the opposite case: one rare, authored
+		# event, and the scatter outward from the dying shape IS the read.
+		_spawn_ghost(from, w, VNode.Kind.WELL)
+	return true
 
 
 ## The visual bridge between a death and its replacement — see
@@ -3950,6 +4007,9 @@ func _fuse_ring(ring: Array[VNode]) -> void:
 	# animation.
 	var made := _make_node(kind, at)
 	made.recipe = _roll_recipe(kind)
+	# Where its Wells stood, so it can put them back there when it dies —
+	# see _release_ring.
+	made.forged_from = from_pts.duplicate()
 	# Inherited life is the entire anti-cheese rule — see Ring.inherited_ratio.
 	made.reserve = ratio * _yield_for(kind)
 	_mark_first_seen(made)
@@ -4225,14 +4285,25 @@ func _process(delta: float) -> void:
 		drain.material.set_shader_parameter("warm", _rescue)
 		drain.material.set_shader_parameter("death", _death_amt)
 
-	if _touching and not _moved and not _dilating:
+	# A HELD DRAG IS A HOLD. The pinch used to require a thumb that never
+	# moved, which meant the one gesture players perform constantly — dragging
+	# a line from one shape to another, hovering while they decide where it
+	# lands — was the one gesture that never revealed the mechanic. Playtest:
+	# the hold is good, but many never notice it exists. Now the same
+	# LONG_PRESS clock runs through a drag, so anyone who takes their time
+	# over a connection is taught the verb by the thing they were already
+	# doing. Quick, decisive drags are under LONG_PRESS and never slow at all.
+	#
+	# A SLICE is excluded (_moved with no _drag_from): that swipe is fast by
+	# nature and never lingers, and slow-motion cutting is a different game.
+	if _touching and not _dilating and (not _moved or _drag_from != null):
 		_touch_time += delta
 		# `not _press_tithe`: a hold on the Heart or the score-circle while
 		# the offer is up IS the tithe — the two hold-verbs must never fire
 		# together, or every tithe would also slow the world (and hide the
 		# very urgency the player is paying to escape). Holding anywhere
 		# else still dilates as always.
-		if _touch_time >= LONG_PRESS and _drag_from == null and not _press_tithe:
+		if _touch_time >= LONG_PRESS and not _press_tithe:
 			_dilating = true
 			_pre_dilation_scale = Engine.time_scale
 			Engine.time_scale = _pre_dilation_scale * DILATION
@@ -5117,8 +5188,13 @@ func _on_release(p: Vector2) -> void:
 	_press_tithe_score = false
 	if _dilating:
 		_end_dilation()
-		_drag_from = null
-		return
+		# A dilated hold that never became a drag is a pinch and nothing
+		# else — it must not also cut or connect on the way out. A dilated
+		# DRAG is a line the player deliberately took their time over, and
+		# releasing it has to draw that line or the pinch would eat the very
+		# gesture it exists to help.
+		if _drag_from == null:
+			return
 
 	if _drag_from != null:
 		var to := _node_at(p)
