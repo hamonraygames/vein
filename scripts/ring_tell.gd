@@ -9,16 +9,14 @@ extends Node2D
 ## line, and gets a triangle. The lesson and the moment of decision are the
 ## same instant — which is more than rage ever gets, and rage is understood.
 ##
-## Presentational only, exactly like tithe.gd: game.gd's _update_ring_tell
-## decides what (if anything) is proposed, this decides nothing. It is also
+## Presentational only: game.gd's _update_ring_tell decides what (if
+## anything) is proposed, this decides nothing. It is also
 ## deliberately NOT a Vein and NOT a VNode — nothing here may end up in
 ## `nodes`/`veins` and start being counted by the rescue guarantees, the
 ## budget, or the probe.
 ##
-## Ghost register borrowed wholesale from tithe.gd, which already owns
-## "proposed, not owned" on this board: the same alphas, the same bloom and
-## retract rates. A second visual language for the same idea would just be a
-## second thing to learn.
+## Ghost register: dimmer than any real vein, dashed where a real one is
+## solid, so "proposed, not owned" reads without a word.
 
 const SEG := 20
 const GROW_RATE := 2.4

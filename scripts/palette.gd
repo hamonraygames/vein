@@ -115,4 +115,5 @@ static func of_res(kind: int) -> Color:
 		3: return PRISM
 		4: return VOID
 		5: return HEXAGON
+		6: return SCORE
 	return HEART

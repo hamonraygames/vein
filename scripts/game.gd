@@ -19,7 +19,6 @@ const ShatterScene := preload("res://scripts/shatter.gd")
 const PoisonDartScene := preload("res://scripts/poison_dart.gd")
 const SlashScene := preload("res://scripts/slash.gd")
 const GhostScene := preload("res://scripts/ghost_spawn.gd")
-const TitheScene := preload("res://scripts/tithe.gd")
 const RingTellScene := preload("res://scripts/ring_tell.gd")
 const CoachScene := preload("res://scripts/coach.gd")
 const FuseScene := preload("res://scripts/fuse.gd")
@@ -624,26 +623,19 @@ const DILATION := 0.3
 const DRAG_SLOP := 12.0
 
 # --- The tithe ---------------------------------------------------------------
-## Spend score to keep the Heart alive — see tithe.gd for the presentation
-## (the score becomes a circle, a ghosted vein reaches for the Heart) and
-## _tick_tithe_beat/_tithe_emit/_tithe_arrive below for the economics. The
+## Spend score to keep the Heart alive. The score IS a shape on the board
+## (see score_node), and you spend it the only way this game asks for
+## anything: draw a line from it to the Heart. It used to be a hold on a
+## ghost that appeared only while dying — playtest: "very hard to use or even
+## notice." A verb the player already performs a hundred times a run needs no
+## teaching and cannot be missed. See _tick_tithe_beat/_tithe_emit/
+## _tithe_arrive below for the economics, which are unchanged. The
 ## score is life already lived; spending it is the Heart consuming its own
 ## past to survive the present. The exchange is deliberately LOSSY (interest
 ## > 1 and rising), so a tithe is a bridge loan: worth it only if it carries
 ## you across a temporary gap you then out-earn. Taken in a losing position
 ## it just makes death cheaper — reading which is which IS the skill.
 
-## Misses at which the offer blooms. NOT MISSES_DYING: the whole rescue
-## pipeline (grab -> one windup beat -> emit per beat -> ~1.3s fall) costs
-## 3-4 slowed beats before the first fuel lands, and DYING (4) to FATAL (8)
-## is only ~4 beats — an offer at DYING is an offer to watch yourself die
-## holding it. At 2 misses a prompt grab can land in time; a late one still
-## loses. Matches VEIN.md's near-miss doctrine: saves common early in
-## danger, rarer later.
-const TITHE_OFFER_MISSES := 2
-## The offer retracts only at 0 misses — wide hysteresis so it never flaps
-## across the 1-2 boundary while fuel wobbles around empty.
-##
 ## Beats of appetite one tithed dot refills. 2.0 means a held tithe out-earns
 ## the drain (~+1 appetite/beat net once dots are landing), so holding
 ## through a gap genuinely climbs back out instead of only slowing the fall.
@@ -658,9 +650,11 @@ const TITHE_MIN_FUEL_PER_DOT := 0.6
 ## the end closer in absolute terms. In vain, literally.
 const TITHE_INTEREST_START := 1.4
 ## Added per dot already spent this run — the scar. Later tithes buy less
-## per point (dots fall visibly dimmer — see tithe.gd's `worth`), so leaning
-## on the mechanic gets worse the more it is leaned on. No reset between
-## tithes within a run; a heavily-mortgaged Heart stays mortgaged.
+## per point, so leaning on the mechanic gets worse the more it is leaned on.
+## No reset between tithes within a run; a heavily-mortgaged Heart stays
+## mortgaged. This is now the ONLY brake on the link, and it carries more
+## weight than it used to: the score is a shape you can wire in at any time,
+## so nothing but the price stops you leaving it connected all run.
 const TITHE_INTEREST_GROWTH := 0.12
 ## A tithe is proportional or it is not a tithe. The interest price alone
 ## worked out to ~1 point per beat, which against a few-hundred score read as
@@ -672,12 +666,19 @@ const TITHE_INTEREST_GROWTH := 0.12
 ## visible bite out of what remains, so a rich run bleeds in proportion to
 ## its riches and the number is seen to fall at any scale.
 const TITHE_SCORE_FRACTION := 0.05
-## Don't bloom a circle around a score too small to matter — an offer to
-## spend 4 points is noise, and a ring around "0" is a joke at a funeral.
+## The score becomes a node once it is worth spending. A ring around "0" is
+## a joke at a funeral, and a shape you cannot afford to use is just clutter
+## with a vein slot attached. Once it appears it STAYS for the rest of the
+## run — a shape that came and went with the danger would be back to being a
+## thing you have to catch at the right moment, which is the whole problem
+## this replaced.
 const TITHE_MIN_SCORE := 10
 ## Wire-protocol kind for a spend event in /run/deliver batches — mirrors
-## server/leaderboard/submit.js's TITHE_KIND. NOT a VNode.Res member: a tithe
-## never rides a real vein or reaches _deliver; it exists only so the
+## server/leaderboard/submit.js's TITHE_KIND. It now shares its NUMBER with
+## VNode.Res.SCORE, which is a coincidence that happens to be honest (kind 6
+## means "score" on both sides) and cannot collide: _deliver returns before
+## its own append for a SCORE dot, so the only 6 ever put on the wire is this
+## one. The line below is the only place it is written. It exists so the
 ## server's validated_score can subtract what the player actually spent and
 ## the leaderboard matches the death screen. (This is bookkeeping, not proof
 ## of play: a client that hides its spends is just a client granting itself
@@ -1017,34 +1018,31 @@ var _press_node: VNode = null
 var _press_vein: Vein = null
 
 ## The ring proposal overlay (created in _ready — see RingTellScene/
-## ring_tell.gd). Purely presentational, exactly like the tithe: it is
-## told what to show by _update_ring_tell and decides nothing itself.
+## ring_tell.gd). Purely presentational: it is told what to show by
+## _update_ring_tell and decides nothing itself.
 var ring_tell: Node2D
 
-## The tithe overlay (created in _ready — see TitheScene/tithe.gd) plus the
-## hold state that drives it. `_press_tithe` is "this press is a tithe grab
-## until proven otherwise": set on press when the offer is up and the thumb
-## landed on the Heart or the score-circle, cleared the moment the gesture
-## becomes a drag (drawing a vein from the Heart must keep working) — and it
-## suppresses dilation while held, so the two hold-verbs can't fire at once.
-## `_press_tithe_score` marks a grab that started on the score-circle or the
-## ghost vein (not on any node): moving that thumb must not slice veins,
-## since the player is clearly holding the offer, not swiping the board.
-var tithe: Node2D
-var _press_tithe := false
-var _press_tithe_score := false
-## Beats this hold has lasted. Beat 1 is the windup — the circle inhales,
-## nothing is spent — so an accidental hold released within a beat costs
-## nothing and *teaches* ("what was that about to do?") instead of taxing.
-var _tithe_hold_beats := 0
+## THE SCORE, AS A NODE. A real VNode of Kind.SCORE, sitting where score_hud
+## draws the total, that you wire to the Heart with an ordinary drawn vein.
+##
+## It is deliberately NOT in `nodes`, and that is the whole trick. Every
+## spawn-placement score, corruption sweep, rescue guarantee, wither/collapse
+## pass and probe count in this file walks `nodes`; adding a permanent extra
+## member would perturb all of them and change what a seed means. Keeping it
+## out means the sim cannot see it. Being a real VNode anyway means the
+## INPUT layer can: _node_at snaps to it, _add_vein charges a budget slot for
+## the link, _vein_at and _slice_check cut it, _draw_drag previews it, and
+## Vein.advance -> _deliver carries its dots. Nothing about the connection
+## verb is special-cased; only the two ends are.
+var score_node: VNode
 ## Dots spent this run — drives the rising interest (see
 ## TITHE_INTEREST_GROWTH). Never resets mid-run.
 var _tithe_dots_spent := 0
 ## Total score given back this run — the death screen's second line.
 var _tithe_given := 0
-## _tithe_dots_spent as of the current offer's bloom — the difference at
-## retract time is what THIS episode cost, which sizes the scar it leaves on
-## the Heart (see _tick_tithe_beat and vnode.gd's add_scar).
+## _tithe_dots_spent as of the beat the Heart entered DYING — the difference
+## when it claws back to 0 is what THIS episode cost, which sizes the scar it
+## leaves on the Heart (see _on_beat and vnode.gd's add_scar).
 var _tithe_dots_at_bloom := 0
 ## Armed the beat misses reach MISSES_DYING, spent when they claw back to 0:
 ## surviving actual dying leaves its own mark even without a tithe — see
@@ -1104,15 +1102,9 @@ func _ready() -> void:
 	tutorial_btn.pressed.connect(_on_replay_tutorial)
 	share_btn.pressed.connect(_on_open_leaderboard)
 	menu_btn.pressed.connect(_on_open_main_menu)
-	# Created here rather than in the .tscn so its layering is explicit in
-	# code next to everything else that draws (tithe.gd sets z 5, under
-	# score_hud's 6 — the ring frames the numerals, never covers them). Must
-	# exist before the harness branch below can start_run().
-	tithe = TitheScene.new()
-	add_child(tithe)
-	# Same reasoning as the tithe above: created here, not in the .tscn, so
-	# its layering sits in code beside everything else that draws. Below the
-	# nodes (z 10) — a proposal annotates the board, it never covers it.
+	# Created here, not in the .tscn, so its layering sits in code beside
+	# everything else that draws. Below the nodes (z 10) — a proposal
+	# annotates the board, it never covers it.
 	ring_tell = RingTellScene.new()
 	ring_tell.z_index = 1
 	add_child(ring_tell)
@@ -1343,10 +1335,10 @@ func _store_save() -> void:
 ##   --rage [--speed=X] [--every=S]        watch the poison-rage flood on
 ##                                         loop (needs a window)
 ##   --tithelab [--speed=X]       headless tithe check — control run vs
-##                                held-tithe run on one seed (see tests/tithe_lab.gd)
-##   --neardeath[=SCORE]          playable run that opens at the tithe's
-##                                doorstep (default score 300) — hand-test
-##                                the score-for-life rescue (needs a window)
+##                                score-linked run on one seed (see tests/tithe_lab.gd)
+##   --neardeath[=SCORE]          playable run that opens two misses from
+##                                death (default score 300) — hand-test the
+##                                score-for-life rescue (needs a window)
 ##   --crown                      playable run that fakes leaderboard rank 1
 ##                                so the Heart wears its crown (needs a window)
 ##
@@ -1578,14 +1570,14 @@ func start_run(run_seed: int) -> void:
 	corruption_respawns = 0
 	_pending_deliveries.clear()
 	_deliver_flush_timer = 0.0
-	_tithe_hold_beats = 0
 	_tithe_dots_spent = 0
 	_tithe_given = 0
 	_tithe_dots_at_bloom = 0
 	_dying_scar_pending = false
-	_press_tithe = false
-	_press_tithe_score = false
-	tithe.vanish()
+	# Not in `nodes`, so the sweep above never touched it — see score_node.
+	if score_node != null:
+		score_node.queue_free()
+		score_node = null
 
 	# Dying (or hitting Replay) mid-drag never fires _on_release, so without
 	# this a hold that was still active when the run ended leaves _drag_from
@@ -1637,15 +1629,15 @@ func start_run(run_seed: int) -> void:
 
 
 ## The `--neardeath` opening position: a seeded score to spend and the Heart
-## already at TITHE_OFFER_MISSES on an empty tank, so the very first beat
-## tips it to misses + 1 and blooms the offer (see _tick_tithe_beat). For
-## hand-testing the tithe rescue — hold the score circle, watch the dots
-## fall, confirm spending score actually brings the Heart back.
+## two misses into an empty tank. For hand-testing the rescue — draw the line
+## from the score to the Heart, watch the dots fall, confirm spending score
+## actually brings it back.
 func _apply_neardeath() -> void:
 	score = _neardeath_score
 	fuel = 0.0
-	misses = TITHE_OFFER_MISSES
+	misses = 2
 	heart.fuel_ratio = health_ratio()
+	_ensure_score_node()
 
 
 ## The playfield, in design space — NOT get_viewport_rect().
@@ -1709,11 +1701,11 @@ func _on_stopped(total: int) -> void:
 	# our own dilation — blindly writing 1.0 here would stomp the time scale the
 	# dev harnesses set, which silently dropped the probe back to real time.
 	_end_dilation()
-	# No retract animation over a shattering board — and dots still falling
-	# were already paid for; they die with the Heart (foreclosure, no refund).
-	tithe.vanish()
-	_press_tithe = false
-	_press_tithe_score = false
+	# The score stops being a shape the instant there is nothing to feed —
+	# its vein went with every other one, and dots still falling were already
+	# paid for (foreclosure, no refund). Freed for real on the next start_run.
+	if score_node != null:
+		score_node.visible = false
 
 	lifetime_beats += total
 	# Best/the death screen both track `score` — what the Heart actually
@@ -2152,69 +2144,95 @@ func _on_beat(index: int) -> void:
 		return
 	elif misses >= MISSES_DYING:
 		Beat.set_state(Beat.State.DYING)
-		# Armed here, spent on the beat misses reach 0 — see below. A tithe
-		# held through the same episode already scars in _tick_tithe_beat;
-		# this only fires the beats that clawed back on their own, so a
-		# single recovery never marks the Heart twice.
-		_dying_scar_pending = true
+		# Armed on ENTRY only — re-arming every DYING beat would keep
+		# resetting the marker below and lose the episode's own cost.
+		if not _dying_scar_pending:
+			_dying_scar_pending = true
+			_tithe_dots_at_bloom = _tithe_dots_spent
 	elif misses >= MISSES_STRAINED:
 		Beat.set_state(Beat.State.STRAINED)
 	else:
 		Beat.set_state(Beat.State.HEALTHY)
 		if _dying_scar_pending:
 			_dying_scar_pending = false
-			# Compared by dots, not tithe.offered: this runs before
-			# _tick_tithe_beat below, which is the call that would retract
-			# the offer and scar for an actual spend — checking dots directly
-			# sidesteps that ordering and only fires when nothing was spent.
-			if _tithe_dots_spent == _tithe_dots_at_bloom:
-				heart.add_scar(0.5)
+			# The wound closed; it scars either way (see vnode.gd's
+			# scar-tissue block). Sized by what the episode cost — a one-dot
+			# flinch barely marks, a long drain leaves a real seam — and a
+			# flat half for clawing back on nothing but routing.
+			var episode := _tithe_dots_spent - _tithe_dots_at_bloom
+			heart.add_scar(clampf(float(episode) / 12.0, 0.3, 1.0) if episode > 0 else 0.5)
 
 	Beat.set_exertion(intensity())
 	_tick_tithe_beat()
 
 
-## The tithe's clock — everything about it is quantized to the beat, same as
-## every other emission in the game: the offer blooms on a beat, the windup
-## is a beat, dots leave on beats. See the TITHE_* constants for the design.
+## The tithe's clock — quantized to the beat, same as every other emission in
+## the game. There is no offer to bloom and no hold to time any more: the
+## score is a shape, and a shape wired to the Heart feeds it. See the TITHE_*
+## constants for the economics, which did not change.
 func _tick_tithe_beat() -> void:
-	if not tithe.offered:
-		if misses >= TITHE_OFFER_MISSES and score >= TITHE_MIN_SCORE:
-			tithe.offer()
-			_tithe_dots_at_bloom = _tithe_dots_spent
-	elif misses == 0:
-		# Danger passed: the curtain call — even mid-hold. A thumb held
-		# through full recovery must not keep draining score into a capped
-		# tank; the offer closing under the finger IS the "you're safe now"
-		# signal. In-flight dots still land (tithe.advance keeps running),
-		# and if danger returns while the thumb never lifted, the re-offer
-		# starts from its own windup beat again.
-		tithe.retract()
-		# The wound closed; it scars (see vnode.gd's scar-tissue block).
-		# Sized by what the episode cost: a one-dot flinch barely marks,
-		# a long hold leaves a real seam.
-		var episode := _tithe_dots_spent - _tithe_dots_at_bloom
-		if episode > 0:
-			heart.add_scar(clampf(float(episode) / 12.0, 0.3, 1.0))
+	_ensure_score_node()
+	var v := _score_vein()
+	if v != null:
+		_tithe_emit(v)
 
-	if not tithe.offered or not _press_tithe:
-		_tithe_hold_beats = 0
+
+## The score becomes a shape once it is worth spending, and then stays one.
+## Placed where score_hud draws the total, because the number IS the node —
+## the ring is drawn around the numerals themselves (see VNode._draw_score).
+##
+## Never appended to `nodes`. See score_node for why that is the load-bearing
+## decision here and not an oversight.
+func _ensure_score_node() -> void:
+	if score_node != null or heart == null or not alive:
 		return
-	_tithe_hold_beats += 1
-	if _tithe_hold_beats == 1:
-		# The windup: the circle inhales, the score dims, nothing is spent.
-		# One beat of grace converts an accidental hold from a stealth tax
-		# into the mechanic's own best teacher — the player flinches off
-		# having paid nothing and now knows exactly where the lever is.
-		tithe.inhale()
+	if score < TITHE_MIN_SCORE:
 		return
-	_tithe_emit()
+	score_node = VNodeScene.new()
+	score_node.kind = VNode.Kind.SCORE
+	score_node.produces = VNode.Res.SCORE
+	score_node.position = _tithe_score_pos()
+	node_layer.add_child(score_node)
+	# Under score_hud (z 6), unlike every other node (z 10, set in VNode's
+	# own _ready) — the ring is drawn AROUND the live numerals, so it and its
+	# opaque floor must sit beneath them. Set after add_child, which is what
+	# runs that _ready.
+	score_node.z_index = 5
+	_rebuild_graph()
+
+
+## The one vein that can exist between the score and the Heart, or null.
+func _score_vein() -> Vein:
+	if score_node == null or heart == null:
+		return null
+	return _find_vein(score_node, heart)
+
+
+## Is this the score's own link — the single pair on the board that ignores
+## reach, and the only pair the score node may ever join?
+static func _is_score_link(a: VNode, b: VNode) -> bool:
+	if a == null or b == null:
+		return false
+	return (a.kind == VNode.Kind.SCORE and b.kind == VNode.Kind.HEART) \
+		or (b.kind == VNode.Kind.SCORE and a.kind == VNode.Kind.HEART)
 
 
 ## One dot leaves the score. Cost is computed at emission, not arrival — the
 ## point is spent the moment it becomes blood, and a dot lost to death
 ## mid-fall was still paid for (the loan does not refund on foreclosure).
-func _tithe_emit() -> void:
+func _tithe_emit(v: Vein) -> void:
+	# The vein's own spacing rule, unmodified: a link that is already full of
+	# falling points takes no more, and nothing is charged for a dot that was
+	# never injected.
+	if not v.has_room():
+		return
+	# And nothing is spent into a full tank. The old offer could only exist
+	# while the Heart was dying, so this could not arise; a standing link can,
+	# and silently bleeding 5% of the score per beat into fuel that clamps
+	# away would be the worst kind of trap — invisible, and worse the better
+	# you are playing. The link waits instead, still costing its slot.
+	if fuel >= fuel_cap():
+		return
 	var interest := TITHE_INTEREST_START + TITHE_INTEREST_GROWTH * float(_tithe_dots_spent)
 	var fuel_gain := maxf(appetite() * TITHE_DOT_BEATS, TITHE_MIN_FUEL_PER_DOT)
 	# The fuel bought stays appetite-priced (the rescue math above is tuned to
@@ -2226,27 +2244,27 @@ func _tithe_emit() -> void:
 		int(ceil(fuel_gain * interest)),
 		int(ceil(float(score) * TITHE_SCORE_FRACTION))))
 	if score < cost:
-		# The well is dry. Emission just stalls — the offer stays up, the
-		# hold stays legal, and the empty circle over a spent score is its
-		# own statement.
+		# The well is dry. Emission just stalls — the link stays drawn, still
+		# costing its slot, and a spent score sitting there wired to a
+		# starving Heart is its own statement.
 		return
 	score -= cost
 	_tithe_dots_spent += 1
 	_tithe_given += cost
-	# Later dots are visibly worth less — same information the pops carry,
-	# told in the dot itself (see tithe.gd's `worth`).
-	var worth := clampf(TITHE_INTEREST_START / interest, 0.35, 1.0)
-	tithe.emit_dot(cost, fuel_gain, worth)
+	# `pot` is the per-dot scalar _deliver already carries end to end (it is
+	# poison potency for VOID); for SCORE it carries the fuel this particular
+	# dot bought, priced at emission. Nothing else needs to travel with it.
+	v.inject(VNode.Res.SCORE, fuel_gain)
 
 	# The −N pop: digits are the score's native language (score_hud is the
 	# one sanctioned numeral in the game), so a minus-pop AT the score is
 	# diegetic where it would be HUD anywhere else. Bruised toward
 	# VEIN_STRAINED — a loss should not wear the same ink as a gain.
-	var origin := _tithe_score_pos()
+	var origin := score_node.position
 	var toward := (heart.position - origin).normalized()
 	var pop: Node2D = FloatTextScene.new()
 	vein_layer.add_child(pop)
-	pop.spawn("-%d" % cost, origin + toward * (tithe.CIRCLE_R + 12.0),
+	pop.spawn("-%d" % cost, origin + toward * (score_node.radius() + 12.0),
 		Palette.SCORE.lerp(Palette.VEIN_STRAINED, 0.5), 20, toward)
 
 	_reverse_thump()
@@ -2282,8 +2300,8 @@ func _tithe_score_pos() -> Vector2:
 ## no demand check (this blood is always wanted), no score pop (the score
 ## already paid at emission — popping value twice would double-count it in
 ## the player's read of the exchange).
-func _tithe_arrive(d: Dictionary) -> void:
-	fuel = clampf(fuel + float(d.fuel), 0.0, fuel_cap())
+func _tithe_arrive(gain: float) -> void:
+	fuel = clampf(fuel + gain, 0.0, fuel_cap())
 	heart.pulse = 1.0
 	Audio.swallow(VNode.Res.RAW, fuel / fuel_cap(), true)
 	# A vector +, not a number — the Heart earns life, not points (see
@@ -2296,8 +2314,8 @@ func _tithe_arrive(d: Dictionary) -> void:
 	if misses >= MISSES_DYING:
 		# A near-death arrival warms the screen like any other rescue, but
 		# gentler than a real delivery's full flash — dots land every beat
-		# while held, and a strobing full-strength rescue would cheapen the
-		# one _deliver fires for an actual routed save.
+		# the link is drawn, and a strobing full-strength rescue would
+		# cheapen the one _deliver fires for an actual routed save.
 		_rescue = maxf(_rescue, 0.5)
 
 
@@ -3850,6 +3868,13 @@ func _rebuild_graph() -> void:
 	for n in nodes:
 		n.depth = -1
 		n.feed_depth = -1
+	# Outside `nodes` on purpose (see score_node), so the sweep above misses
+	# it — but its vein is a real vein in `veins`, and the BFS below walks
+	# those. Reset it here and it gets depth 1 off the Heart like anything
+	# else, which is what makes Vein.update_dir orient the link score->Heart.
+	if score_node != null:
+		score_node.depth = -1
+		score_node.feed_depth = -1
 	if heart == null:
 		return
 	heart.depth = 0
@@ -3914,6 +3939,14 @@ func _find_vein(a: VNode, b: VNode) -> Vein:
 ## TOOL_HEART_REACH); that bonus is now just baked into Vein.MAX_LEN itself,
 ## so every pair gets it.
 func in_reach(a: VNode, b: VNode) -> bool:
+	# The score is the single exemption on this board, and it has to be: it
+	# lives up in the HUD where score_hud draws it, ~430px from the Heart and
+	# permanently outside MAX_LEN. Moving it down onto the board instead
+	# would put a number back into the traffic around the Heart, which is
+	# exactly why score_hud left there. In exchange it may join NOTHING else
+	# — this is a lifeline, not a wormhole across the board.
+	if a.kind == VNode.Kind.SCORE or b.kind == VNode.Kind.SCORE:
+		return _is_score_link(a, b)
 	return a.position.distance_to(b.position) <= Vein.MAX_LEN
 
 
@@ -4298,12 +4331,7 @@ func _process(delta: float) -> void:
 	# nature and never lingers, and slow-motion cutting is a different game.
 	if _touching and not _dilating and (not _moved or _drag_from != null):
 		_touch_time += delta
-		# `not _press_tithe`: a hold on the Heart or the score-circle while
-		# the offer is up IS the tithe — the two hold-verbs must never fire
-		# together, or every tithe would also slow the world (and hide the
-		# very urgency the player is paying to escape). Holding anywhere
-		# else still dilates as always.
-		if _touch_time >= LONG_PRESS and not _press_tithe:
+		if _touch_time >= LONG_PRESS:
 			_dilating = true
 			_pre_dilation_scale = Engine.time_scale
 			Engine.time_scale = _pre_dilation_scale * DILATION
@@ -4375,13 +4403,6 @@ func _process(delta: float) -> void:
 			heart.reject = maxf(heart.reject, VNode.REJECT_INFLIGHT)
 		for item in v.advance(delta):
 			_deliver(item.kind, v, v.sink(), item.pot)
-
-	# The tithe's falling dots, advanced with the same dilation-scaled delta
-	# as everything else — the panic pinch slows the rescue too, which is
-	# honest: time dilation reads the world, it doesn't cheat it.
-	tithe.sync(_tithe_score_pos(), heart.position, heart.radius())
-	for d in tithe.advance(delta):
-		_tithe_arrive(d)
 
 	# Driven every frame, not per-beat: a dying run's beats slow way down, and
 	# the mix must keep evolving smoothly through that instead of freezing
@@ -4852,6 +4873,14 @@ func _push_from_nodes() -> void:
 func _deliver(kind: int, v: Vein, to: VNode, pot := 1.0) -> void:
 	if to == null:
 		return
+	# The score's own blood. Every rule below is about material the board
+	# produced — demand, combo, score, poison — and none of them apply to a
+	# point the player already paid for at emission. `pot` carries the fuel
+	# that dot bought (see _tithe_emit).
+	if kind == VNode.Res.SCORE:
+		if to.kind == VNode.Kind.HEART:
+			_tithe_arrive(pot)
+		return
 	if to.kind == VNode.Kind.HEART:
 		# The very first delivery of the run, of any kind — this is what starts
 		# the demand SCHEDULE's own clock (see _demand_clock / _tick_escalation).
@@ -5072,6 +5101,13 @@ func _node_at(p: Vector2) -> VNode:
 		if d <= maxf(best_d, n.radius()):
 			best_d = d
 			best = n
+	# Last, and outside the loop, because it is outside `nodes` — the ONE
+	# place in this file where that has to be spelled out, and the whole
+	# reason the score can be dragged from at all.
+	if score_node != null and score_node.visible:
+		var d := p.distance_to(score_node.position)
+		if d <= maxf(best_d, score_node.radius()):
+			best = score_node
 	return best
 
 
@@ -5141,16 +5177,6 @@ func _on_press(p: Vector2) -> void:
 	_press_node = _node_at(p)
 	_press_vein = _vein_at(p)
 	_drag_from = null
-	# A tithe grab, until proven otherwise: the offer is up and the thumb
-	# landed on the Heart (SNAP-radius, same as any node press), on the
-	# score-circle, or anywhere along the ghost vein between them. All three
-	# grab points on purpose — desperate players clutch the dying thing, their
-	# number, or the lifeline itself, and every instinct must work. If the
-	# gesture turns into a drag, the drag wins (see _on_move) — drawing a
-	# rescue vein from the Heart is exactly what the tithe must never block.
-	var tithe_grab: bool = tithe.hit(p) or tithe.hit_path(p)
-	_press_tithe = tithe.offered and (_press_node == heart or tithe_grab)
-	_press_tithe_score = tithe.offered and _press_node == null and tithe_grab
 
 
 func _on_move(p: Vector2) -> void:
@@ -5164,28 +5190,16 @@ func _on_move(p: Vector2) -> void:
 		# an edge case, since veins fan out from point-blank range.
 		_drag_from = _press_node
 		prev = _touch_start
-		# ...and a drag is never a tithe. A Heart-press that moves is the
-		# player routing (the more important verb — it keeps working exactly
-		# as before the tithe existed); emission stops, in-flight dots land.
-		_press_tithe = false
 	# A drag that did NOT start on a node is never a connection — nothing
 	# else used that gesture, so it's free to mean "slice," Fruit-Ninja
 	# style: any vein the swipe path actually crosses gets cut, on top of
 	# (not instead of) the existing stationary-tap cut in _on_release.
-	# EXCEPT a wobble off the score-circle: that thumb was holding the
-	# offer, not swiping the board, and turning its slip into cut veins
-	# would punish the exact panic the tithe exists to answer.
-	if _moved and _drag_from == null and not _press_tithe_score:
+	if _moved and _drag_from == null:
 		_slice_check(prev, p)
 
 
 func _on_release(p: Vector2) -> void:
 	_touching = false
-	# Release ends emission on the next beat tick; whatever is already
-	# falling still lands (see tithe.advance) — the same commitment rule as
-	# everything else in flight.
-	_press_tithe = false
-	_press_tithe_score = false
 	if _dilating:
 		_end_dilation()
 		# A dilated hold that never became a drag is a pinch and nothing
@@ -5222,11 +5236,17 @@ func _draw_drag() -> void:
 	# One ring for every node kind now — no separate outer ring, since there
 	# is no longer a second, longer reach for a tool/Heart pair to show.
 	# Drawn as a lit area, not a hairline: see Vein.draw_reach on why.
-	Vein.draw_reach(drag_layer, _drag_from.position)
+	# The score has no reach — it joins one node, at any distance (see
+	# in_reach) — so drawing a ring it doesn't obey would be a lie about the
+	# only constraint this overlay exists to state.
+	var scoring := _drag_from.kind == VNode.Kind.SCORE
+	if not scoring:
+		Vein.draw_reach(drag_layer, _drag_from.position)
 
 	var to := _node_at(_drag_pos)
 	var end := _drag_pos if to == null else to.position
-	var stretched := _drag_from.position.distance_to(end) > Vein.MAX_LEN
+	var stretched := not scoring \
+		and _drag_from.position.distance_to(end) > Vein.MAX_LEN
 
 	var col := Palette.VEIN_STRAINED if stretched else Palette.VEIN_LIVE
 	col.a = 0.75

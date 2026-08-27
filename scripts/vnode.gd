@@ -4,11 +4,11 @@ class_name VNode
 ##
 ## Shape is the type. Motion is the throughput. Nothing here is ever labelled.
 
-enum Kind { HEART, WELL, FORGE, LOOM, KILN, CRUCIBLE }
+enum Kind { HEART, WELL, FORGE, LOOM, KILN, CRUCIBLE, SCORE }
 ## HEXAGON appended after VOID (not inserted before it) — VOID's numeric
 ## value must not move, nothing else in the file ever assumes the LAST
 ## entry is the deepest tier, everything reaches tiers by name.
-enum Res { RAW, REFINED, CLOTH, PRISM, VOID, HEXAGON }
+enum Res { RAW, REFINED, CLOTH, PRISM, VOID, HEXAGON, SCORE }
 
 ## Fired once, from inside corrupt() itself, the instant this node turns —
 ## the only way to catch both paths that can trigger it (game.gd's spread/
@@ -127,6 +127,11 @@ const WITHER_WARN_AT := 0.6
 
 const RADIUS := 22.0
 const HEART_RADIUS := 34.0
+## The score node's ring — wide enough to enclose a four-digit total at
+## score_hud's 30px mono without the ring crossing the glyphs. It is a node,
+## so it snaps and takes a vein like any other; it is big because the thing
+## it is drawn around is big.
+const SCORE_RADIUS := 40.0
 
 ## How far, in DESIGN-space pixels, a drawn arc may bow away from the true
 ## circle it approximates — the error budget behind arc_points() below.
@@ -425,12 +430,16 @@ func _ready() -> void:
 func radius() -> float:
 	if kind == Kind.HEART:
 		return HEART_RADIUS
+	if kind == Kind.SCORE:
+		return SCORE_RADIUS
 	return RADIUS
 
 
 func _on_beat(_i: int) -> void:
-	if kind == Kind.HEART:
-		# The Heart's swell IS the beat.
+	if kind == Kind.HEART or kind == Kind.SCORE:
+		# The Heart's swell IS the beat — and the score breathes with it, the
+		# same gentle every-beat pulse score_hud already gives the numerals
+		# this ring is drawn around.
 		pulse = 1.0
 
 
@@ -863,6 +872,7 @@ func _draw() -> void:
 
 	match kind:
 		Kind.HEART: _draw_heart_shape(r, col)
+		Kind.SCORE: _draw_score(r)
 		Kind.FORGE: _draw_tri(r, col)
 		Kind.LOOM: _draw_square(r, col)
 		Kind.KILN: _draw_pentagon(r, col)
@@ -1225,6 +1235,24 @@ func demand_glyph_offset() -> Vector2:
 	if kind != Kind.HEART or suppress_demand or starve <= 0.0:
 		return Vector2.ZERO
 	return _need_offset(STARVE_AMP_GLYPH, 0.6)
+
+
+## The score, as a node. Nothing inside it — score_hud draws the numerals at
+## exactly this spot, and the ring is only there to say "this is a shape, and
+## shapes take veins." Thin and near-white: it must read as connectable
+## without competing with a single thing on the board below it.
+func _draw_score(r: float) -> void:
+	# Opaque, in the board's own ground. The vein runs centre-to-centre like
+	# every other vein on this board (see Vein.rebuild), and every other node
+	# is small enough that its own body hides that; this one is a big hollow
+	# ring drawn around live numerals, so without a floor the link would be
+	# seen crossing the digits it is spending. Sits under score_hud's z 6 so
+	# the number stays on top of its own floor.
+	draw_circle(Vector2.ZERO, r, Palette.BG)
+
+	var ring := Palette.SCORE
+	ring.a = 0.40 + pulse * 0.22
+	draw_arc(Vector2.ZERO, r, 0.0, TAU, 40, ring, 1.8, true)
 
 
 func _draw_ring(r: float, col: Color) -> void:
