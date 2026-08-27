@@ -131,18 +131,16 @@ static func _joined(adj: Dictionary, u: VNode, w: VNode) -> bool:
 ## through the edge that was just added, so this never has to search the whole
 ## board — just for a second route between that one vein's two ends.
 ##
-## `floor_after` is the budget floor: forging BURIES its ring's veins
-## permanently, and without a floor a player could bury themselves into a
-## board they cannot connect anything on, which is exactly the state the
-## whole _ensure_move/_ensure_throughput rescue layer exists to prevent.
-static func find_closed(v: Vein, veins: Array[Vein], budget: int, floor_after: int) -> Array[VNode]:
+## No budget gate: forging hands every one of the ring's veins back (see
+## game.gd's _fuse_ring), so a ring can never leave the board with fewer
+## slots than it found. The only budget the mechanic ever needs is the slots
+## to draw the circuit in the first place, and _add_vein already charges that.
+static func find_closed(v: Vein, veins: Array[Vein]) -> Array[VNode]:
 	var none: Array[VNode] = []
 	if v == null or not is_instance_valid(v) or not usable(v.a) or not usable(v.b):
 		return none
 	var path := _shortest_path(v.a, v.b, _adjacency(veins, v), MAX - 1)
 	if path.size() < MIN or path.size() > MAX:
-		return none
-	if budget - path.size() < floor_after:
 		return none
 	return path
 
@@ -150,16 +148,25 @@ static func find_closed(v: Vein, veins: Array[Vein], budget: int, floor_after: i
 ## The teach: is the board one vein short of a ring, and which one?
 ##
 ## Returns {ring, from, to, kind} for the best candidate, or {} for none.
-## Ranked by ring size ASCENDING — the smallest ring is both the likeliest
-## intent and the cheapest commitment, and it is also the one find_closed
-## would actually fire, so the tell can never promise a shape the drag
-## wouldn't deliver. Ties break on the shortest missing edge.
+##
+## `want` is the Heart's current demand (VNode.Res). The ranking is, in
+## order: A RING THAT MAKES WHAT THE HEART IS ASKING FOR, then the LARGEST
+## ring available, then the shortest missing edge. Both of the first two
+## exist because of the same playtest complaint — with four or five orphaned
+## Wells sitting in reach of each other the old size-ascending rank proposed
+## a triangle every single time, which is the least the board can do with
+## what is standing there and, more often than not, not the shape being
+## demanded. The proposal should be worth taking.
+##
+## Whatever pair wins, the ring reported is the SHORTEST path between its two
+## ends — the same path find_closed walks when the vein is actually drawn —
+## so the tell still cannot promise a shape the drag wouldn't deliver.
 ##
 ## Only ever called from _rebuild_graph, i.e. on graph change — never per
 ## frame. The pair loop is bounded hard by the degree filter below: a Well
 ## with no vein on it cannot be an endpoint of a path, and most orphaned
 ## Wells on a live board have none.
-static func find_pending(nodes: Array[VNode], veins: Array[Vein], budget: int, floor_after: int) -> Dictionary:
+static func find_pending(nodes: Array[VNode], veins: Array[Vein], budget: int, want: int) -> Dictionary:
 	# No free slot means the closing vein cannot be drawn at all, so there is
 	# nothing to promise. Same silent refusal _add_vein already does.
 	if veins.size() >= budget:
@@ -187,7 +194,8 @@ static func find_pending(nodes: Array[VNode], veins: Array[Vein], budget: int, f
 
 	var best_from: VNode = null
 	var best_to: VNode = null
-	var best_n := MAX + 1
+	var best_want := false
+	var best_n := 0
 	var best_d := INF
 	for i in wells.size():
 		for j in range(i + 1, wells.size()):
@@ -203,9 +211,11 @@ static func find_pending(nodes: Array[VNode], veins: Array[Vein], budget: int, f
 			# Ring size is the path's node count: hops, plus the Well it
 			# started from.
 			var n: int = int(h[w]) + 1
-			if n < MIN or n > MAX or budget - n < floor_after:
+			if n < MIN or n > MAX:
 				continue
-			if n < best_n or (n == best_n and d < best_d):
+			var asked := want >= 0 and res_for_kind(kind_for(n)) == want
+			if best_from == null or _outranks(asked, n, d, best_want, best_n, best_d):
+				best_want = asked
 				best_n = n
 				best_d = d
 				best_from = u
@@ -216,6 +226,18 @@ static func find_pending(nodes: Array[VNode], veins: Array[Vein], budget: int, f
 	if ring.size() < MIN:
 		return {}
 	return {"ring": ring, "from": best_from, "to": best_to, "kind": kind_for(ring.size())}
+
+
+## The rank, whole: answers the demand first, then bigger, then closer. Split
+## out so the loop above reads as the search it is and this reads as the rule
+## it is.
+static func _outranks(asked: bool, n: int, d: float,
+		b_asked: bool, b_n: int, b_d: float) -> bool:
+	if asked != b_asked:
+		return asked
+	if n != b_n:
+		return n > b_n
+	return d < b_d
 
 
 ## Hop counts from one Well to every other within `max_hops`. Same BFS as

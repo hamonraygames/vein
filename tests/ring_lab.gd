@@ -33,7 +33,7 @@ var _t := 0.0
 var _ring: Array[VNode] = []
 var _open: Array[VNode] = []
 var _budget_before := 0
-var _buried_before := 0
+var _veins_before := 0
 var _looping := false
 var _loop_n := Ring.MIN
 var _fails := 0
@@ -68,8 +68,6 @@ func _ready() -> void:
 			"expect": VNode.Kind.FORGE, "reserve": 0.5},
 		# A ring touching the Heart is not ring material at all.
 		{"name": "Heart-connected ring REFUSES", "n": 3, "expect": -1, "heart": true},
-		# Burial would drop the budget under MIN_BUDGET_AFTER_FORGE.
-		{"name": "budget floor REFUSES", "n": 3, "expect": -1, "poor": true},
 		# Smallest ring wins, and the consequence is that a CHORDED ring can
 		# never exist on the board at all: four Wells wired 0-1-2-3, then
 		# closed with the 0-2 diagonal, fuse the TRIANGLE the diagonal just
@@ -80,10 +78,61 @@ func _ready() -> void:
 		# r is forced down because 0-2 is a diagonal: at the default radius
 		# a square's is 400, past Vein.MAX_LEN, and _add_vein refuses it.
 		{"name": "diagonal fuses the SMALLER ring", "n": 4, "radius": 160.0,
-			"expect": VNode.Kind.FORGE, "close": [0, 2], "buries": 3,
-			"survivors": 1},
+			"expect": VNode.Kind.FORGE, "close": [0, 2], "survivors": 1},
 	]
+	_assert_suggestions()
 	_next_case()
+
+
+## The tell's ranking, on one board that offers a triangle, a square and a
+## pentagon at once — the exact shape of the playtest complaint, where the
+## old size-ascending rank answered "triangle" to all three.
+##
+## A pentagon path 0-1-2-3-4 with the fifth edge missing. Every diagonal is
+## in reach at this radius, so (0,2) closes a triangle, (0,3) a square and
+## (0,4) the pentagon; which one is proposed must follow the Heart.
+func _assert_suggestions() -> void:
+	for n in _game.nodes.duplicate():
+		if n != _game.heart:
+			_game._remove_node(n)
+	var wells: Array[VNode] = []
+	for i in 5:
+		var a := TAU * float(i) / 5.0 - PI * 0.5
+		wells.append(_game._make_node(VNode.Kind.WELL,
+			CENTER + Vector2(cos(a), sin(a)) * 170.0))
+	_game.budget = 40
+	for i in 4:
+		_game._add_vein(wells[i], wells[i + 1])
+	if _game.veins_used() != 4:
+		print("ring_lab: SETUP  suggestion board drew %d/4 veins" % _game.veins_used())
+		_fails += 1
+
+	# want -> the ring size the tell must propose. RAW can never be forged,
+	# so it stands for "nothing on offer answers the Heart" and falls through
+	# to the largest ring standing there.
+	for c in [{"want": VNode.Res.REFINED, "n": 3}, {"want": VNode.Res.CLOTH, "n": 4},
+			{"want": VNode.Res.PRISM, "n": 5}, {"want": VNode.Res.RAW, "n": 5}]:
+		var d := Ring.find_pending(_game.nodes, _game.veins, _game.budget, c["want"])
+		var got: int = 0 if d.is_empty() else int(d["ring"].size())
+		var ok: bool = got == int(c["n"])
+		if not ok:
+			_fails += 1
+		print("ring_lab: %s  want res %d -> %d-ring%s" % ["PASS" if ok else "FAIL",
+			c["want"], c["n"], "" if ok else "  (got %d)" % got])
+
+	# No free slot means the closing vein cannot be drawn, so nothing is on
+	# offer — and the slot arriving later is what game.gd's budget clock now
+	# re-asks on.
+	_game.budget = _game.veins_used()
+	if not Ring.find_pending(_game.nodes, _game.veins, _game.budget, VNode.Res.PRISM).is_empty():
+		_fails += 1
+		print("ring_lab: FAIL  tapped-out budget still offered a ring")
+	else:
+		print("ring_lab: PASS  tapped-out budget offers nothing")
+
+	for w in wells:
+		if is_instance_valid(w):
+			_game._remove_node(w)
 
 
 func _radius(n: int) -> float:
@@ -170,10 +219,9 @@ func _build(c: Dictionary) -> void:
 		_ring.append(w)
 
 	# _add_vein spends the run's real budget — set it rather than fight it.
-	# N + 4 is exactly enough: MIN_BUDGET_AFTER_FORGE is 4. The "poor" case
-	# sits one under, so the ring closes but the burial is refused.
-	var need := n + (3 if c.get("poor", false) else 4)
-	_game.budget = _game.veins_used() + need
+	# Only the circuit itself has to be affordable now; forging costs no
+	# budget at all, so there is no floor left to sit under.
+	_game.budget = _game.veins_used() + n + 1
 
 	var want_veins := 0
 	for i in n - 1:
@@ -194,7 +242,7 @@ func _build(c: Dictionary) -> void:
 	var close_pair: Array = c.get("close", [n - 1, 0])
 	_open = [_ring[int(close_pair[0])], _ring[int(close_pair[1])]]
 	_budget_before = _game.budget
-	_buried_before = _game._buried
+	_veins_before = _game.veins_used()
 	_t = 0.0
 	_phase = "hold"
 
@@ -237,10 +285,10 @@ func _check() -> void:
 		if got != null:
 			ok = false
 			why = "expected no fusion, got kind %d" % got.kind
-		elif _game.budget != _budget_before or _game._buried != _buried_before:
+		elif _game.budget != _budget_before or _game.veins_used() != _veins_before + 1:
 			ok = false
-			why = "budget/burial moved (%d->%d, buried %d->%d) on a refused ring" % [
-				_budget_before, _game.budget, _buried_before, _game._buried]
+			why = "budget/veins moved (%d->%d, %d->%d) on a refused ring" % [
+				_budget_before, _game.budget, _veins_before, _game.veins_used()]
 	elif got == null:
 		ok = false
 		why = "no shape forged"
@@ -248,14 +296,15 @@ func _check() -> void:
 		ok = false
 		why = "expected kind %d, got %d" % [want, got.kind]
 	else:
-		# Burial: exactly the ring's own veins, gone for good.
-		var buried: int = int(c.get("buries", c["n"]))
-		if _game._buried - _buried_before != buried:
+		# The refund: forging costs no budget, and every line the circuit was
+		# drawn with is back on the board.
+		if _game.budget != _budget_before:
 			ok = false
-			why = "expected %d slots buried, got %d" % [buried, _game._buried - _buried_before]
-		elif _game.budget != _budget_before - buried:
+			why = "budget moved %d->%d — forging must cost none" % [
+				_budget_before, _game.budget]
+		elif _game.veins_used() != 0:
 			ok = false
-			why = "expected budget %d, got %d" % [_budget_before - buried, _game.budget]
+			why = "expected every ring vein handed back, %d still spent" % _game.veins_used()
 		elif c.has("survivors"):
 			var left := 0
 			for w in _ring:
@@ -277,8 +326,8 @@ func _check() -> void:
 		for w in _ring:
 			if is_instance_valid(w):
 				alive_wells += 1
-		print("ring_lab:   diag veins=%d budget=%d buried=%d ring_alive=%d/%d nodes=%d"
-			% [_game.veins_used(), _game.budget, _game._buried, alive_wells,
+		print("ring_lab:   diag veins=%d budget=%d ring_alive=%d/%d nodes=%d"
+			% [_game.veins_used(), _game.budget, alive_wells,
 				_ring.size(), _game.nodes.size()])
 	print("ring_lab: %s  %s%s" % ["PASS" if ok else "FAIL", c["name"],
 		"" if ok else "  (%s)" % why])
@@ -355,8 +404,7 @@ func _bench_one(label: String, count: int, chord_stride: int) -> void:
 	const ITER := 2000
 	var t0 := Time.get_ticks_usec()
 	for _i in ITER:
-		Ring.find_pending(_game.nodes, _game.veins, _game.budget,
-			_game.MIN_BUDGET_AFTER_FORGE)
+		Ring.find_pending(_game.nodes, _game.veins, _game.budget, _game.demand)
 	var us := float(Time.get_ticks_usec() - t0) / float(ITER)
 	# A 60fps frame is 16667us. This runs on graph EDITS, never per frame.
 	print("ringbench: %-16s %2d wells %2d veins -> %6.1f us/call (%.2f%% of a frame)"

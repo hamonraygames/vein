@@ -438,19 +438,6 @@ const BUDGET_GAP_GROWTH := 1.0
 ## to express itself instead of everyone converging on the same board.
 const BUDGET_GAP_MAX := 18.0
 
-## Forging a ring BURIES its veins — the budget never comes back (see
-## _fuse_ring). This is the floor that stops a player burying themselves
-## into a board they cannot connect anything on, which is precisely the
-## unrecoverable state the whole _ensure_move/_ensure_throughput layer
-## exists to prevent. A ring is simply refused — and its tell never blooms
-## — if paying for it would drop the budget below this.
-##
-## It also paces the mechanic for free, without a single extra timer: at
-## START_BUDGET (5) no ring is affordable at all, a Forge needs 7 and a
-## Crucible 10, so the first ring lands about a minute in and a hexagon
-## stays a genuine late-run commitment.
-const MIN_BUDGET_AFTER_FORGE := 4
-
 ## How close a node (or its fallback/clamped position) may sit to the
 ## screen's edge, in design_size() units. X stays modest — the sides are
 ## never covered by device chrome in portrait. Y is deliberately wider:
@@ -743,12 +730,6 @@ var veins: Array[Vein] = []
 var heart: VNode
 
 var budget := START_BUDGET
-## Vein slots spent forging rings, and the colour of the shape each one
-## bought. Buried budget is gone for the rest of the run, so the strip has
-## to keep drawing it or the cost would be invisible — see
-## budget_hint.bury(), the honest mirror of the Heart's own scars.
-var _buried := 0
-var _buried_cols: Array[Color] = []
 ## Re-entrancy guard: _fuse_ring tears down nodes, and every teardown
 ## rebuilds the graph, which is exactly where the tell recomputes.
 var _fusing := false
@@ -1539,14 +1520,10 @@ func start_run(run_seed: int) -> void:
 	rng.seed = seed_used
 
 	budget = START_BUDGET
-	_buried = 0
-	_buried_cols.clear()
 	_fusing = false
 	rings_forged = 0
 	if ring_tell != null:
 		ring_tell.clear()
-	if budget_hint.has_method("reset_buried"):
-		budget_hint.reset_buried()
 	fuel = START_FUEL
 	misses = 0
 	beats = 0
@@ -2590,6 +2567,9 @@ func _tick_escalation(delta: float) -> void:
 			heart.demand = want
 			# The graph did not move, but the question did — see _refresh_needs.
 			_demand_answered_now = _demand_answered()
+			# And the answer the board is offering changes with it: the tell
+			# ranks candidate rings by what the Heart is asking for.
+			_update_ring_tell()
 			# The Heart changing its mind is the loudest event in the run:
 			# everything you built is now feeding it the wrong thing.
 			heart.pulse = 1.0
@@ -2637,6 +2617,11 @@ func _tick_escalation(delta: float) -> void:
 		_next_budget_time += _jitter(_budget_gap, 0.15)
 		_budget_gap = minf(BUDGET_GAP_MAX, _budget_gap + BUDGET_GAP_GROWTH)
 		budget_hint.queue_redraw()
+		# The graph didn't move, but a ring that was one slot out of reach
+		# just came into it. find_pending refuses outright with no free slot,
+		# and without this the offer stayed hidden until something else
+		# happened to rebuild the graph.
+		_update_ring_tell()
 
 
 ## Rolls a rotation-phase demand, excluding `current` — the pool both the
@@ -3910,22 +3895,23 @@ func _add_vein(a: VNode, b: VNode) -> void:
 func _check_ring(v: Vein) -> void:
 	if _fusing:
 		return
-	var ring := Ring.find_closed(v, veins, budget, MIN_BUDGET_AFTER_FORGE)
+	var ring := Ring.find_closed(v, veins)
 	if ring.size() >= Ring.MIN:
 		_fuse_ring(ring)
 
 
-## The trade-off, paid in full and never refunded.
+## The trade-off, and what it is NOT.
 ##
-## You give up N Wells — with whatever reserve they had left — and N vein
-## slots, permanently. You get the tool you needed, at a spot you chose,
-## right now, instead of waiting on a spawn clock that owes you nothing.
+## You give up N Wells — with whatever reserve they had left. You get the
+## tool you needed, at a spot you chose, right now, instead of waiting on a
+## spawn clock that owes you nothing.
 ##
-## Note what the budget arithmetic actually says: _remove_node hands each
-## ring vein's slot back as it drops, and then exactly that many are buried.
-## So the lines you lose are literally the lines you drew the ring with. The
-## cost is the circuit itself, not an abstract tax bolted onto it — which is
-## also why it needs no explaining beyond watching it happen once.
+## The LINES COME BACK. _remove_node hands every ring vein's slot back as it
+## drops and nothing takes them away again: the circuit was scaffolding, not
+## payment. Charging for it twice — Wells AND permanent budget — made the
+## mechanic read as a punishment for using it, which is the opposite of what
+## a build is for; the Wells alone are already a real price, since they are
+## supply that will never spawn back on your schedule.
 func _fuse_ring(ring: Array[VNode]) -> void:
 	var n := ring.size()
 	var kind := Ring.kind_for(n)
@@ -3934,7 +3920,6 @@ func _fuse_ring(ring: Array[VNode]) -> void:
 	_fusing = true
 
 	var res := Ring.res_for_kind(kind)
-	var col := Palette.of_res(res)
 	var ratio := Ring.inherited_ratio(ring)
 	var at := _clear_spot(Ring.centroid(ring), ring)
 
@@ -3954,12 +3939,10 @@ func _fuse_ring(ring: Array[VNode]) -> void:
 	# is what hands the slots back for the burial below to take away.
 	for w in ring:
 		_remove_node(w)
-	budget -= n
-	_buried += n
-	for _i in n:
-		_buried_cols.append(col)
-	if budget_hint.has_method("bury"):
-		budget_hint.bury(n, col)
+	# _remove_node already flashed each slot as it landed back; one row-wide
+	# pulse with no single winner says the thing those individual ticks
+	# can't — the whole circuit just returned at once.
+	budget_hint.flash(-1)
 
 	# Created immediately, hidden, revealed by the effect on its own clock —
 	# the same split ghost_spawn.gd uses, so the rescue guarantees and the
@@ -4070,7 +4053,7 @@ func _update_ring_tell() -> void:
 	if not alive or _fusing:
 		ring_tell.clear()
 		return
-	ring_tell.offer(Ring.find_pending(nodes, veins, budget, MIN_BUDGET_AFTER_FORGE), seen_ring)
+	ring_tell.offer(Ring.find_pending(nodes, veins, budget, demand), seen_ring)
 
 
 func _tempo_action() -> bool:

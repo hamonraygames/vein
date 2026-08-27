@@ -23,36 +23,6 @@ var _flash := 0.0
 ## (the vein you just spent, or the slot a cut just handed back). -1 = none.
 var _flash_i := -1
 
-## Slots spent forging rings, in the colour of the shape each one bought —
-## permanently gone (see game.gd's _fuse_ring). They are kept here and still
-## DRAWN, past the live strokes, for the same reason the row flashes at all:
-## a cost the inventory simply stopped displaying would be a stealth tax. The
-## strokes would quietly vanish and the player would never connect their
-## shrinking inventory to the triangle they made a minute ago.
-##
-## This is the strip's answer to the Heart's scars (see vnode.gd's add_scar,
-## "scarred tissue is score that became flesh"). Buried budget is lines that
-## became shape — the same permanent, wordless record, kept in the same
-## register, on the resource the ring actually cost.
-var _buried: Array[Color] = []
-
-
-## N slots gone for good, tinted by what they bought.
-func bury(n: int, col: Color) -> void:
-	for _i in n:
-		_buried.append(col)
-	# Row-wide flash with no single winner: nothing here was handed back to a
-	# particular slot, the whole inventory just got smaller.
-	_flash = 1.0
-	_flash_i = -1
-	queue_redraw()
-
-
-func reset_buried() -> void:
-	_buried.clear()
-	queue_redraw()
-
-
 ## Pulse the inventory. `at_index` is the slot that changed (draw or refund),
 ## which glows brightest; the whole row lifts too.
 func flash(at_index: int = -1) -> void:
@@ -79,14 +49,11 @@ func _draw() -> void:
 		return
 	var total: int = game.budget
 	var used: int = game.veins_used()
-	# Buried slots still occupy the row, so the strip never gets SHORTER —
-	# it only ever goes darker. See _buried.
-	var slots := total + _buried.size()
-	if slots <= 0:
+	if total <= 0:
 		return
 
 	var vp: Vector2 = game.design_size()
-	var span := float(slots) * STROKE_W + float(slots - 1) * GAP
+	var span := float(total) * STROKE_W + float(total - 1) * GAP
 	var x := (vp.x - span) * 0.5
 	# The has_method check above already proves `game` is the real game.gd
 	# instance, so its EDGE_MARGIN_Y constant is always there too. Explicit
@@ -121,17 +88,4 @@ func _draw() -> void:
 		var hh := h + _flash * (7.0 if i == _flash_i else 3.0)
 		draw_line(Vector2(x, y - hh * 0.5 - lift), Vector2(x, y + hh * 0.5 - lift),
 			col, STROKE_W, true)
-		x += STROKE_W + GAP
-
-	# Then everything forged away, at the end of the row. Stubs — half height,
-	# clearly not a vessel you still hold — but NOT faint: the whole point of
-	# this file is that budget is the resource every decision spends, and a
-	# 22%-alpha stroke was already found to be invisible on a phone once. The
-	# colour is what says which shape took them.
-	for buried_col in _buried:
-		var c := buried_col
-		c.a = 0.38 + _flash * 0.45
-		var bh := STROKE_H * 0.5 + _flash * 3.0
-		draw_line(Vector2(x, y - bh * 0.5 - lift), Vector2(x, y + bh * 0.5 - lift),
-			c, STROKE_W, true)
 		x += STROKE_W + GAP
